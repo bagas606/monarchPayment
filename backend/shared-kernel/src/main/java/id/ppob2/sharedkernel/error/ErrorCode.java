@@ -12,7 +12,19 @@ public enum ErrorCode {
     UNSUPPORTED_AMOUNT(422),
     RATE_LIMITED(429),
     INTERNAL_ERROR(500),
-    PG_UNAVAILABLE(503);
+    PG_UNAVAILABLE(503),
+
+    /** Not part of Section 23.9's partner-facing table above — Section 37.1 defines no error
+     * codes of its own for settlement report ingestion, an internal ops endpoint, not a partner
+     * one. Added so a duplicate-date resubmission gets a clean 409 instead of a raw 500 from the
+     * underlying `settlement_date_uk` constraint violation. */
+    SETTLEMENT_ALREADY_INGESTED(409),
+
+    /** Not part of Section 23.9's table either — Section 34.1's Admin Web compensating retry is
+     * an internal ops action. Covers every reason a retry can't proceed: the child order isn't
+     * {@code FAILED}, its parent isn't {@code PARTIAL_FAILED}, or it lost a race with another
+     * concurrent state change between lookup and retry. */
+    CHILD_ORDER_NOT_RETRYABLE(409);
 
     private final int httpStatus;
 

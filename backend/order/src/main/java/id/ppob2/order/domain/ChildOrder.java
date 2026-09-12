@@ -145,4 +145,16 @@ public class ChildOrder {
         this.providerTransactionId = providerTransactionId;
         return true;
     }
+
+    /** True only from FAILED — the Admin Web compensating retry (Section 34.1). Deliberately does
+     * NOT reset {@code attempt_count}: see {@link #markExecuting}'s Javadoc for why resetting it
+     * would let a retried attempt collide with the earlier failed attempt's {@code
+     * provider_transaction} row via {@code ON CONFLICT DO NOTHING} instead of getting its own row. */
+    public boolean resetForRetry() {
+        if (this.state != ChildOrderState.FAILED) {
+            return false;
+        }
+        this.state = ChildOrderState.PENDING;
+        return true;
+    }
 }

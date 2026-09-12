@@ -58,6 +58,21 @@ public class ChildOrderService {
         return repository.findByParentOrderIdOrderBySequenceNo(parentOrderId);
     }
 
+    public Optional<ChildOrder> findById(Long childOrderId) {
+        return repository.findById(childOrderId);
+    }
+
+    /** Admin Web compensating retry (Section 34.1). A separate {@code REQUIRES_NEW} write from
+     * the dispatch that follows it, same granularity as every other single-field state change in
+     * this service — the caller (an `app`-layer orchestrator) resolves provider/cost and calls
+     * {@code FulfillmentExecutionService.dispatch} afterward, itself unchanged. */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public boolean resetForRetry(Long childOrderId) {
+        ChildOrder childOrder = repository.findById(childOrderId)
+                .orElseThrow(() -> new IllegalStateException("child_order " + childOrderId + " not found"));
+        return childOrder.resetForRetry();
+    }
+
     /** @return the resulting attempt_count, used to build this dispatch attempt's provider-transaction
      * idempotency key — or empty if the child order wasn't PENDING (already executing/terminal). */
     @Transactional(propagation = Propagation.REQUIRES_NEW)

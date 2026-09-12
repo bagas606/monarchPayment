@@ -301,9 +301,9 @@ database — see that slice's notes.
     across ticks is the intended behavior, not a limitation worked around.
   - **Also expires the linked `payment` row**, not just the order. Section 22.17 has an `EXPIRED`
     payment status; leaving it `PENDING` forever would make `GET /orders/{id}/payment` (Section
-    23.6, unbuilt but specified) and the Payment-vs-PG/Payment-vs-Settlement reconciliation types
-    see a stale row for an order that's actually terminal. `Payment.markExpired()` mirrors the
-    existing `markSuccess`/`markFailed` guard (only from `PENDING`).
+    23.6) and the Payment-vs-PG/Payment-vs-Settlement reconciliation types see a stale row for an
+    order that's actually terminal. `Payment.markExpired()` mirrors the existing
+    `markSuccess`/`markFailed` guard (only from `PENDING`).
   - **The guard that matters most**: `expirePaymentPending` checks `order.getState() !=
     PAYMENT_PENDING` before touching anything, which is what stops a payment confirmed in the
     narrow window between the sweep's query and this transition running from being expired out
@@ -318,15 +318,6 @@ database — see that slice's notes.
     the exact race the sweep exists to tolerate: an order still read as `PAYMENT_PENDING` whose
     payment already committed `SUCCESS` a moment earlier, where `markExpired()` must return false
     and log, never throw.
-  - **The outbound `ORDER_STATUS_CHANGED` webhook half of Section 48.3's diagram is deliberately
-    not built.** Four concrete things are missing, not just "webhooks unbuilt": no `callback_url`
-    column on `parent_order` (Section 22.15 has none — already flagged as dropped-on-create-order
-    in an earlier slice), no per-partner registered secret to sign outbound requests with (Section
-    23.8), no delivery/retry machinery (Section 23.8's "5 attempts over 24h" backoff schedule),
-    and no `order -> webhook` compile edge in Section 20.2's graph (only `payment -> webhook`
-    exists), so wiring it would need `app`-layer composition once the other three exist. Faking a
-    `webhook_event` row with an invented "sent" status was considered and rejected — there's
-    nothing to actually deliver to.
   - `@EnableScheduling` lives on its own `app`-layer `SchedulingConfig`, kept separate from
     `JpaConfig` for the same reason that class is already separate: avoid pulling infrastructure a
     `@WebMvcTest` slice doesn't need into its context. Confirmed the three existing `@WebMvcTest`
@@ -695,6 +686,49 @@ database — see that slice's notes.
     second tenant in that database, not a torn-down fixture; a later reader querying `partner`
     should expect two rows, not treat the second as accidental leftover.
 
+- **Settlement ingestion hardening + Admin Web compensating retry** — two independent fixes to
+  previously-flagged gaps (Section 34.1 / 37.1), done together as one slice.
+  - **`/internal/settlement/ingest` is now gated behind admin auth**, not `permitAll` — same
+    `SecurityConfig.adminFilterChain` as `/admin/**`. Section 37.1 still doesn't specify how a real
+    settlement report arrives (file/API), so this covers "an authenticated admin triggers
+    ingestion," not a real machine-to-machine ingestion contract.
+  - **A duplicate settlement report for an already-ingested date now returns a clean `409
+    SETTLEMENT_ALREADY_INGESTED`**, not a raw 500. `SettlementIngestionService.ingest` checks
+    `SettlementRepository.existsBySettlementDate` proactively before inserting. The
+    `settlement_date_uk` constraint stays as the backstop for the narrow concurrent-double-POST
+    race between that check and the insert — a genuine race there still surfaces as a raw 500,
+    deliberately: translating every `DataIntegrityViolationException` in this codebase to a
+    client-facing "conflict" would misreport a real bug (e.g. a NOT NULL/FK violation elsewhere) as
+    caller error, so this fix is scoped to the one named, understood constraint, not a blanket
+    exception-handler change. Verified against real Postgres: ingesting `2026-09-20` twice returned
+    `200` then `409`; ingesting a fresh date (`2026-09-21`) immediately after still returned a
+    normal `200`.
+  - **`POST /admin/child-orders/{id}/retry`** (new `AdminFulfillmentController` +
+    `AdminChildOrderRetryOrchestrator` in `app`) closes "no Admin Web retry/compensation action" —
+    resets a `FAILED` child order to `PENDING` (never resetting `attempt_count`; see
+    `ChildOrder.resetForRetry`'s Javadoc for why) and re-dispatches it through the unchanged
+    `FulfillmentExecutionService.dispatch`, then calls the new `ParentOrderTransitionService
+    .completeRetry` to drive the PRD's `PARTIAL_FAILED -> SUCCESS` edge (Section 33.2) once every
+    child order is `SUCCESS`.
+    - Only retryable from `child_order.state == FAILED` with `parent_order.state ==
+      PARTIAL_FAILED` — anything else is a clean `409 CHILD_ORDER_NOT_RETRYABLE`, not an
+      `IllegalStateException` from the state machine.
+    - `completeRetry` checks `state == SUCCESS` explicitly, not "not FAILED" —
+      `ChildOrderState.COMPENSATED` exists in the enum but nothing sets it yet; if a future
+      compensation action does, this predicate needs revisiting so a compensated child order
+      neither blocks `SUCCESS` forever nor gets silently counted as if it had succeeded.
+    - Verified end-to-end against real Postgres in both directions: retrying `child_order` 2
+      (parent order 1, `PARTIAL_FAILED`) against the default stub config reached `SUCCESS`,
+      correctly flipping the parent to `SUCCESS` too — `attempt_count` went from 1 to 2, and a
+      *second*, distinct `provider_transaction` row (`child-2-attempt-2`) was created rather than
+      colliding with the first attempt's key. Restarting with
+      `PPOB2_FULFILLMENT_STUBPROVIDER_FAILPROVIDERSKUIDS=2` and retrying `child_order` 4 (same
+      shape) reproduced a still-`FAILED` outcome with the parent correctly remaining
+      `PARTIAL_FAILED` — proving the retry can genuinely fail, not just always succeed.
+    - `AdminChildOrderRetryOrchestratorTest` (Mockito) covers every rejection branch the e2e runs
+      didn't need to reach: child not `FAILED`, parent not `PARTIAL_FAILED`, `resetForRetry` losing
+      a race, and the unresolvable-SKU/no-active-price dispatch path.
+
 Everything after that — the two remaining reconciliation types and the rest of Section 41's Admin
 Web surface — is unbuilt; those are candidates for the next slice. Every other module directory
 exists with a correct `build.gradle.kts` and dependency edges, but no domain code yet — that's
@@ -739,18 +773,6 @@ Known gaps to close before this is production-real:
   has picked one. A `provider_sku.face_value` update committed in that narrow window wouldn't be
   caught. Low risk (face values don't change often, and the read isn't locked); this slice's
   fulfillment dispatch does not re-verify it either — flagged again below.
-- **No Provider/Fulfillment Ledger posting** on `FULFILLING → SUCCESS`, despite Section 33.2's
-  state table saying "Ledger: provider/fulfillment entries posted" — `ledger` itself is no longer
-  empty (see the ledger-posting slice above), but this specific posting point is deliberately
-  unimplemented, not merely missed: the entry's `amount` should be the provider's actual cost for
-  the purchased SKU, and that value exists nowhere in this codebase — `provider_price` (Section
-  22.7, versioned provider cost) was never built, and `provider_sku.face_value` is the
-  customer-facing retail value, not cost. Posting `face_value` as the debit would record zero
-  margin on every fulfillment — not an approximation, an inversion of the number's meaning — and
-  because `ledger_entry` is append-only, a wrong entry can only be corrected by a reversing entry,
-  not fixed in place. Blocked on `provider_price` being built. This is still a real gap for
-  financial correctness (BR-PAY-005 requires paid-but-unfulfilled funds to never be silently lost),
-  just not one this slice could close honestly.
 - **No Order Ledger posting anywhere.** Section 36.1 names an Order Ledger ("entries tied to
   parent/child order lifecycle events, e.g. order value recognition"), but Section 33.2's Side
   Effect column — the authoritative trigger list this codebase has followed for every ledger/state
@@ -759,32 +781,6 @@ Known gaps to close before this is production-real:
   entries for the same money at the same instant, in ledgers Section 36.2's traceability chain
   doesn't disambiguate between, reads as a double-count to anyone auditing this later. Needs a PRD
   decision on where "order value recognition" actually happens before this is built.
-- **Four of Section 38.1's five reconciliation types are unbuilt** — only `PAYMENT_VS_SETTLEMENT`
-  is wired (see the reconciliation slice above). The other four are blocked on different things,
-  not simply unstarted:
-  - `PAYMENT_VS_PG` needs an ingested "Ayolinx transaction report" to compare against — no such
-    report format or ingestion endpoint exists (same class of gap as the settlement report itself,
-    just for a different PG artifact Section 37.1 never specifies).
-  - `ORDER_VS_FULFILLMENT` needs `order` and `fulfillment` data (parent/child order final states),
-    but Section 20.2 grants `reconciliation` no edge to either module — this would need an
-    `app`-layer composition (reading both, then calling `reconciliationService.open(...)`), the
-    same pattern used for settlement, just not built yet.
-  - `PROVIDER_VS_REPORT` needs both a provider billing report (no format, no source — provider
-    integrations are Section 27's stubbed `GameProvider`, which reports nothing back on a schedule)
-    and `fulfillment`'s `provider_transaction` data, which `reconciliation` also has no edge to.
-  - `MARGIN_EXPECTED_VS_ACTUAL` is blocked on `provider_price` (Section 22.7) not existing, same
-    root cause as the unposted Provider/Fulfillment Ledger gap from the fulfillment slice — actual
-    provider cost is tracked nowhere in this codebase.
-- **No ingestion authentication.** `/internal/settlement/ingest` is `permitAll`, same as the
-  Ayolinx webhook endpoint, but unlike that endpoint there's no signature scheme here at all —
-  Section 37.1 doesn't specify how the real report arrives, so nothing was invented to fill the
-  gap. Needs either a real auth scheme once the ingestion mechanism (file/API) is known, or an
-  Admin-Web-gated manual trigger.
-- **Duplicate-report rejection surfaces as a raw 500**, not a clean `4xx` with an error code —
-  `GlobalExceptionHandler`'s generic exception handler catches the `DataIntegrityViolationException`
-  from the unique constraint but doesn't translate it into Section 50.1's error envelope with a
-  specific `ErrorCode`. Functionally correct (no duplicate row, no duplicate ledger entry) but a
-  worse operator experience than it should be.
 - **"Settlement window" is a single calendar day, and exactly one batch per day is supported** —
   not a real T+N schedule with contract-defined cutoff times/timezones (Section 37.1 flags the
   actual schedule as unverified against the Ayolinx contract), and not multiple intraday batches
@@ -836,10 +832,9 @@ Known gaps to close before this is production-real:
 - **`StubQrisPaymentGateway`** (`payment` module) is a fake Ayolinx stand-in gated behind
   `@Profile("!prod")` so it can never accidentally serve real traffic — but there is still no real
   `AyolinxPaymentGateway`. No payment will ever actually settle until one is built.
-- **`callback_url` and `metadata`** on `POST /orders` are accepted and silently dropped — Section
-  22.15's `parent_order` schema has no column for either. Per-request callback overrides likely
-  need to fall back to the partner's registered webhook URL instead; confirm with the PRD owner
-  before adding a column.
+- **`metadata`** on `POST /orders` is accepted and silently dropped — Section 22.15's
+  `parent_order` schema has no column for it, and no built feature reads it back. (`callback_url`
+  *is* persisted and used — see the outbound webhook slice above; only `metadata` remains a gap.)
 - **`OrderStateMachine`** enforces which *states* may follow one another, but Section 34.1's real
   `FULFILLING`/`PARTIAL_FAILED → SUCCESS` invariant is child-order-count-shaped ("parent SUCCESS
   requires ALL child orders SUCCESS"), not state-shaped — the state machine cannot see that on its
@@ -1027,7 +1022,16 @@ INSERT INTO admin_user (username, password_hash) VALUES ('admin1', '<paste hash 
 ```bash
 curl -X POST -u admin1:<your-password> http://localhost:8080/admin/reconciliations/1/investigate
 curl -X POST -u admin1:<your-password> http://localhost:8080/admin/reconciliations/1/resolve
+curl -X POST -u admin1:<your-password> http://localhost:8080/internal/settlement/ingest -H "Content-Type: application/json" -d '{"settlement_date":"2026-09-22","pg_reference":"BATCH-X","actual_amount":1000}'
+curl -X POST -u admin1:<your-password> http://localhost:8080/admin/child-orders/4/retry
 ```
+
+**Dev note, not a credential to reuse**: this session's own end-to-end verification (documented
+above) rotated the `admin1` row's `password_hash` mid-session to test against a locally-known
+password — that hash is not committed anywhere, and a future session picking up this same dev
+database will find a password neither it nor this file knows. Re-run the `bcrypt.hashpw` command
+above and `UPDATE admin_user SET password_hash = '<new hash>' WHERE username = 'admin1'` rather
+than guessing.
 
 To exercise outbound webhook delivery, pass a `callback_url` when creating an order and point it at
 a receiver you control (a real PPOB1 endpoint isn't available in dev):

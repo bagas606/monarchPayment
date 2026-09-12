@@ -6,6 +6,8 @@ import id.ppob2.ledger.domain.LedgerType;
 import id.ppob2.settlement.domain.Settlement;
 import id.ppob2.settlement.domain.SettlementStatus;
 import id.ppob2.settlement.repository.SettlementRepository;
+import id.ppob2.sharedkernel.error.ApiException;
+import id.ppob2.sharedkernel.error.ErrorCode;
 import id.ppob2.sharedkernel.money.Money;
 import java.time.LocalDate;
 import org.springframework.stereotype.Service;
@@ -25,12 +27,22 @@ import org.springframework.transaction.annotation.Transactional;
  * README), there is no competing candidate event for "funds actually settled" and no double-count
  * risk in posting here.
  *
- * <p>No re-ingestion/upsert semantics: the migration's {@code UNIQUE(settlement_date)} constraint
- * rejects a second report for the same date outright rather than this class trying to guess
- * whether a resend is a correction (update in place, needing a reversing ledger entry) or an
- * accidental replay. Section 37.1 doesn't describe reports being resent, and building that branch
- * would mean untested code deciding whether a financial ledger entry gets written twice — flagged
- * as a gap in the README instead of guessed at here.
+ * <p>No re-ingestion/upsert semantics: a second report for the same date is rejected outright
+ * rather than this class trying to guess whether a resend is a correction (update in place,
+ * needing a reversing ledger entry) or an accidental replay. Section 37.1 doesn't describe reports
+ * being resent, and building that branch would mean untested code deciding whether a financial
+ * ledger entry gets written twice — flagged as a gap in the README instead of guessed at here.
+ *
+ * <p>The common case (a genuine resend of the same date) is caught proactively via {@link
+ * SettlementRepository#existsBySettlementDate} and reported as a clean {@code 409
+ * SETTLEMENT_ALREADY_INGESTED} — not a raw 500. The migration's {@code UNIQUE(settlement_date)}
+ * constraint (`settlement_date_uk`) remains as the backstop for the narrow concurrent-double-POST
+ * race between that check and this insert; a genuine race there still surfaces as an unhandled
+ * {@code DataIntegrityViolationException} (raw 500), which is correct, not merely unaddressed —
+ * blanket-translating every constraint violation in this codebase to a client-facing "conflict"
+ * would misreport a real bug (e.g. a NOT NULL/FK violation) as caller error. See the README's
+ * settlement notes for why this stays a proactive check rather than a general exception-handler
+ * fix.
  *
  * <p>The constraint is scoped to {@code settlement_date} alone, not {@code (settlement_date,
  * pg_reference)}, because {@code expected_amount} (computed by the `app`-layer caller) is the sum
@@ -57,6 +69,11 @@ public class SettlementIngestionService {
     @Transactional
     public Settlement ingest(LocalDate settlementDate, String pgReference, Money expectedAmount,
                               Money actualAmount, Money feeAmount) {
+        if (settlementRepository.existsBySettlementDate(settlementDate)) {
+            throw new ApiException(ErrorCode.SETTLEMENT_ALREADY_INGESTED,
+                    "A settlement report for " + settlementDate + " was already ingested.");
+        }
+
         SettlementStatus status = actualAmount.equals(expectedAmount) ? SettlementStatus.MATCHED : SettlementStatus.DISCREPANCY;
 
         Settlement settlement = new Settlement(settlementDate, pgReference, expectedAmount, actualAmount, feeAmount, status);

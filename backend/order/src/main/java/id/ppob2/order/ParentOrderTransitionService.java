@@ -170,6 +170,45 @@ public class ParentOrderTransitionService {
     }
 
     /**
+     * PRD Section 33.2's {@code PARTIAL_FAILED -> SUCCESS} edge ("Manual/automated retry completes
+     * remaining child orders", Section 34.1) — called by the `app`-layer Admin Web retry
+     * orchestrator after it has already reset a {@code FAILED} child order to {@code PENDING} and
+     * re-dispatched it via {@code FulfillmentExecutionService.dispatch} (which itself calls {@link
+     * #completeFulfillment} as always, but that no-ops here since the order is {@code
+     * PARTIAL_FAILED}, not {@code FULFILLING} — see that guard). Plain {@code @Transactional}
+     * (REQUIRED): called synchronously from an admin request thread, not from an
+     * {@code AFTER_COMMIT} listener's call tree, same reasoning as {@link #expirePaymentPending}
+     * and {@code OrderQueryController}'s {@code cancel}.
+     *
+     * <p>Only transitions to {@code SUCCESS} when every child order is {@code SUCCESS}
+     * (deliberately checked as {@code state == SUCCESS}, not "not FAILED" — {@code
+     * ChildOrderState.COMPENSATED} exists in Section 22.16's enum but nothing in this codebase
+     * currently sets it; if a future compensation action does, this predicate must be revisited so
+     * a compensated child order doesn't block SUCCESS forever, or so it doesn't get silently
+     * counted as if it succeeded). If the retry still leaves at least one child order {@code
+     * FAILED}, this deliberately does nothing — {@code PARTIAL_FAILED} has no state-machine edge to
+     * a "still partially failed" state because it already IS that state; remaining at
+     * {@code PARTIAL_FAILED} is correct, not a missed case.
+     */
+    @Transactional
+    public void completeRetry(Long parentOrderId) {
+        ParentOrder order = repository.findById(parentOrderId)
+                .orElseThrow(() -> new IllegalStateException("parent_order " + parentOrderId + " not found for retry completion"));
+
+        if (order.getState() != OrderState.PARTIAL_FAILED) {
+            log.warn("Skipping retry completion for parent_order {}: expected PARTIAL_FAILED but state is {}",
+                    parentOrderId, order.getState());
+            return;
+        }
+
+        List<ChildOrder> childOrders = childOrderService.findByParentOrderId(parentOrderId);
+        boolean allSuccess = childOrders.stream().allMatch(c -> c.getState() == ChildOrderState.SUCCESS);
+        if (allSuccess) {
+            order.transitionTo(OrderState.SUCCESS);
+        }
+    }
+
+    /**
      * PRD Section 33.2: {@code PAID -> DECOMPOSITION_SELECTED} ("Routing module selects eligible
      * pattern") or, on BR-DEC exhaustion (no eligible pattern), {@code PAID -> REFUND_PENDING}.
      *
