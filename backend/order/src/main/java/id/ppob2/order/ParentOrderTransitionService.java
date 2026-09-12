@@ -139,6 +139,37 @@ public class ParentOrderTransitionService {
     }
 
     /**
+     * PRD Section 23.7: {@code POST /api/v1/orders/{order_id}/cancel}, valid only from
+     * {@code CREATED} or {@code PAYMENT_PENDING} (Section 33.2's transition table). Called
+     * synchronously from a controller handling a direct partner request — not from an
+     * {@code AFTER_COMMIT} listener's call tree — so plain {@code @Transactional} (REQUIRED) is
+     * correct here, matching {@link #expirePaymentPending}'s reasoning exactly.
+     *
+     * <p>{@code callerPartnerId} scoping happens in {@code OrderQueryService}/the controller
+     * before this is even called — by the time this runs, the caller is already known to own the
+     * order, so this method takes the order by id, not by (partnerId, orderNo).
+     *
+     * <p>Does not touch the linked {@code payment} row: a {@code PAYMENT_PENDING} order may have
+     * a {@code PENDING} payment already created at the gateway, and Section 22.17 has no
+     * {@code CANCELLED} payment status to move it to. If a payment confirmation for this order
+     * arrives after cancellation, {@link #markPaid}'s existing late-callback guard (this order is
+     * no longer in a transitionable state) already prevents it from forcing the order back to
+     * {@code PAID} — collected-funds handling for that race is Section 25.2's reconciliation
+     * territory, not something this method builds.
+     */
+    @Transactional
+    public CancelOrderResult cancel(Long parentOrderId) {
+        ParentOrder order = repository.findById(parentOrderId)
+                .orElseThrow(() -> new IllegalStateException("parent_order " + parentOrderId + " vanished before cancel"));
+
+        if (!OrderStateMachine.canTransition(order.getState(), OrderState.CANCELLED)) {
+            return CancelOrderResult.NOT_CANCELLABLE;
+        }
+        order.transitionTo(OrderState.CANCELLED);
+        return CancelOrderResult.CANCELLED;
+    }
+
+    /**
      * PRD Section 33.2: {@code PAID -> DECOMPOSITION_SELECTED} ("Routing module selects eligible
      * pattern") or, on BR-DEC exhaustion (no eligible pattern), {@code PAID -> REFUND_PENDING}.
      *

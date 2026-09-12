@@ -636,6 +636,65 @@ database — see that slice's notes.
     reach: `PARTIAL_FAILED` skip, no pattern selected, no `pattern_economics` snapshot at all, and
     the duplicate-open guard.
 
+- **Open API order lookups & cancel** (Sections 23.5-23.7: `GET /api/v1/orders/{order_id}`,
+  `GET /api/v1/orders/{order_id}/payment`, `POST /api/v1/orders/{order_id}/cancel`) — the three
+  PRD-documented Open API endpoints that weren't part of the original `POST /api/v1/orders` slice.
+  New `order.OrderQueryService` composes `ParentOrder` + `Payment` + `ChildOrder` data (`order`
+  already has the Section 20.2 edges to both); a new `OrderQueryController` in `app` resolves the
+  caller's numeric `partner_id` the same way `CreateOrderController` does, since `order` has no
+  edge to `partner`.
+  - **Every lookup is scoped to the resolved `partner_id`, not `client_id`.** A partner can
+    register multiple `api_client` rows (Section 22.3); scoping on `client_id` would hide a
+    partner's own orders placed through a different client. A `partner_id` mismatch (order exists,
+    belongs to a different partner) is reported identically to a genuinely unknown `order_id` —
+    `404 ORDER_NOT_FOUND`, never a distinguishing `403` — so one partner cannot use these endpoints
+    to probe for another partner's order numbers by guessing order IDs. Verified end-to-end: a
+    second partner + `api_client` was seeded (`PPOB3`/`ppob3-client`) and used to `GET`/`cancel` an
+    order owned by the original `PPOB1` partner — all three requests returned `404
+    ORDER_NOT_FOUND`, not `403` or the order's real state.
+  - **`cancel` uses plain `@Transactional` (REQUIRED), not `REQUIRES_NEW`** — unlike every
+    `ParentOrderTransitionService` method reached from the `AFTER_COMMIT` fulfillment pipeline,
+    this one runs synchronously from a controller handling a direct partner request, matching
+    `expirePaymentPending`'s existing reasoning exactly (see that method's Javadoc).
+  - **Cancel does not touch the linked `payment` row.** Section 22.17 has no `CANCELLED` payment
+    status, and a `PAYMENT_PENDING` order may already have a `PENDING` payment at the gateway. If a
+    payment confirmation arrives after cancellation, `markPaid`'s existing late-callback guard
+    (order no longer transitionable) already stops it from forcing the order back to `PAID` —
+    collected-funds handling for that race is Section 25.2's reconciliation territory, not built
+    here.
+  - **`fulfillment_summary`'s three counts don't necessarily sum** while an order is still
+    `FULFILLING` — a child order can be `PENDING`/`EXECUTING` (neither success nor failed yet).
+    Documented on `OrderDetailResult` so an integrator doesn't wrongly treat
+    `total_child - success` as `failed`.
+  - `ParentOrder.updatedAt` was added as a new read-only (`insertable = false, updatable = false`)
+    mapping of the `updated_at` column. Confirmed (`\d parent_order`, not assumed) that the
+    `parent_order_set_updated_at BEFORE UPDATE` trigger already maintains it — no entity read it
+    before this slice. Schema validation passed on boot (`TIMESTAMPTZ → Instant` already matches
+    `created_at`'s mapping), and the end-to-end run below shows it moving on its own: order 13's
+    `updated_at` was `12:42:23.016743Z` right after creation and `12:42:43.374860Z` after cancel,
+    with nothing in this codebase's Java writing that column.
+  - **A `GET .../payment` on an order with no payment row yet returns 200, not 404** — with every
+    payment field *absent* from the JSON body (Jackson drops `null`s by default; verified this is
+    literally what comes back — `{"order_id":"..."}`, not `{"order_id":"...","status":null,...}`),
+    same as `payment_status` already does on `GET .../orders/{id}` for the same situation. An
+    integrator should check "is `status` present," not "is `status` null." First version of this
+    slice collapsed the no-payment case into `ORDER_NOT_FOUND` —
+    caught before commit: a `CREATED` order (real, owned by the caller; `ParentOrderCreationService`
+    deliberately commits it before the gateway call so a failure there leaves it behind) is not the
+    same as a nonexistent or another-partner's order, and reporting it identically to the
+    cross-partner case would have actively misled the order's own owner. `getOrderDetail`'s
+    `payment_status: null` handling was already doing the right thing for the same situation; this
+    now matches it.
+  - Verified end-to-end against real Postgres: `GET` on both a `PAYMENT_PENDING` order (fresh,
+    created via `POST /api/v1/orders` for this test) and an existing `SUCCESS` order (2/2/0
+    fulfillment summary); `GET .../payment` on both; `cancel` on the `PAYMENT_PENDING` order
+    (200 → `CANCELLED`), then `cancel` again on the same now-cancelled order (409
+    `ORDER_NOT_CANCELLABLE`) — plus the cross-partner 404s above. The cross-partner check seeded a
+    second, real `partner`/`channel`/`api_client` row (`PPOB3`/`PPOB3-CHANNEL`/`ppob3-client`) into
+    the same dev database used by every prior slice's cumulative seed data — it's now a permanent
+    second tenant in that database, not a torn-down fixture; a later reader querying `partner`
+    should expect two rows, not treat the second as accidental leftover.
+
 Everything after that — the two remaining reconciliation types and the rest of Section 41's Admin
 Web surface — is unbuilt; those are candidates for the next slice. Every other module directory
 exists with a correct `build.gradle.kts` and dependency edges, but no domain code yet — that's

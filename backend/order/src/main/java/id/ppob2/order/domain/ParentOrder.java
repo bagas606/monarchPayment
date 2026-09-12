@@ -66,6 +66,13 @@ public class ParentOrder {
     @Column(name = "callback_url", length = 500)
     private String callbackUrl;
 
+    /** DB-trigger-managed (confirmed via {@code \d parent_order}: {@code
+     * parent_order_set_updated_at BEFORE UPDATE}) — read-only here (`insertable = false,
+     * updatable = false`) since the trigger, not the application, is the source of truth for this
+     * column's value on every write. */
+    @Column(name = "updated_at", insertable = false, updatable = false)
+    private Instant updatedAt;
+
     protected ParentOrder() {
     }
 
@@ -152,6 +159,10 @@ public class ParentOrder {
 
     public String getCallbackUrl() {
         return callbackUrl;
+    }
+
+    public Instant getUpdatedAt() {
+        return updatedAt;
     }
 
     public void setPatternId(Long patternId) {
