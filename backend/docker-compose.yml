@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ppob2
+      POSTGRES_USER: ppob2
+      POSTGRES_PASSWORD: ppob2
+    ports:
+      - "5432:5432"
+    volumes:
+      - ppob2-postgres-data:/var/lib/postgresql/data
+
+volumes:
+  ppob2-postgres-data:

@@ -1,0 +1,40 @@
+spring:
+  application:
+    name: ppob2
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+    default-property-inclusion: non_null
+  datasource:
+    url: ${PPOB2_DB_URL:jdbc:postgresql://localhost:5432/ppob2}
+    username: ${PPOB2_DB_USER:ppob2}
+    password: ${PPOB2_DB_PASSWORD:ppob2}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+server:
+  port: ${PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+ppob2:
+  security:
+    signature-window-ms: 300000 # 5 minutes, PRD Section 23.2
+  channel:
+    default-application-id: PPOB1-DEFAULT
+  payment:
+    # Section 25.2's "Ayolinx-provided secret" — real Ayolinx callback signing is unspecified
+    # (see StubQrisPaymentGateway's Javadoc); this only guards the dev stub.
+    ayolinx-webhook-secret: ${PPOB2_AYOLINX_WEBHOOK_SECRET:dev-webhook-secret}

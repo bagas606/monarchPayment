@@ -1,0 +1,15 @@
+dependencies {
+    api(project(":shared-kernel"))
+    api(project(":order"))
+    api(project(":catalog"))
+    api(project(":pricing"))
+    api(project(":decomposition"))
+    api(project(":reconciliation"))
+    api(project(":configuration"))
+    api(project(":audit"))
+    api(project(":ledger"))
+    api(project(":settlement"))
+    api(project(":provider"))
+    api("org.springframework.boot:spring-boot-starter-data-jpa")
+    api("org.springframework.boot:spring-boot-starter-security")
+}
