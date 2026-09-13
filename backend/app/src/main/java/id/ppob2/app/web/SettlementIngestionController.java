@@ -8,6 +8,7 @@ import jakarta.validation.constraints.NotNull;
 import java.math.BigInteger;
 import java.time.LocalDate;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
@@ -33,6 +34,7 @@ public class SettlementIngestionController {
     }
 
     @PostMapping("/internal/settlement/ingest")
+    @PreAuthorize("hasAuthority('settlement:ingest')")
     public ResponseEntity<SettlementIngestionResponse> ingest(@RequestBody SettlementIngestionRequest request) {
         Money actualAmount = Money.of(request.actualAmount());
         Money feeAmount = request.feeAmount() != null ? Money.of(request.feeAmount()) : null;

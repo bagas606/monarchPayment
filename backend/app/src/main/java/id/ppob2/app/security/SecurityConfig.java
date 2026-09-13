@@ -4,6 +4,7 @@ import id.ppob2.admin.security.AdminUserDetailsService;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
@@ -20,6 +21,7 @@ import org.springframework.security.web.SecurityFilterChain;
  */
 @Configuration
 @EnableWebSecurity
+@EnableMethodSecurity
 public class SecurityConfig {
 
     @Bean
@@ -60,12 +62,20 @@ public class SecurityConfig {
      * mechanism is that fix, on the reasoning that triggering settlement ingestion is itself an
      * ops/Admin action (Section 41.8), not a partner- or PG-facing one.
      *
-     * <p>Any {@code ACTIVE} admin_user can access every endpoint under either path: Section 42's
-     * role/permission model (RBAC) is not built, so there is no per-action permission check
-     * beyond "is an authenticated admin" — flagged in the README. Section 42.3's session
-     * management (JWT/idle+absolute timeout, revocation) and MFA are also not built; Basic Auth
-     * is stateless per-request, which sidesteps session-timeout semantics entirely rather than
-     * approximating them.
+     * <p>This chain still only checks "is an authenticated {@code ROLE_ADMIN}" at the URL level —
+     * every {@link AdminPrincipal} always carries {@code ROLE_ADMIN}, so this check can never
+     * itself deny an authenticated admin; it only rejects unauthenticated/wrong-credential
+     * requests (401, via Basic Auth). Section 42's fine-grained permission checks (retry:execute,
+     * reconciliation:investigate, reconciliation:resolve, settlement:ingest) are enforced one
+     * level deeper, via {@code @PreAuthorize} on the individual controller methods, using the
+     * permission-code authorities {@code AdminPrincipal} carries. A {@code @PreAuthorize} denial
+     * throws {@code AuthorizationDeniedException} from inside the controller's AOP proxy —
+     * {@code DispatcherServlet}'s own exception resolution resolves that via {@code
+     * GlobalExceptionHandler}'s {@code @ExceptionHandler(AccessDeniedException.class)} before it
+     * could ever reach a filter-level {@code AccessDeniedHandler} here, which is why the 403 is
+     * produced there and not in this class. Section 42.3's session management (JWT/idle+absolute
+     * timeout, revocation) and MFA are still not built; Basic Auth is stateless per-request, which
+     * sidesteps session-timeout semantics entirely rather than approximating them.
      */
     @Bean
     public SecurityFilterChain adminFilterChain(HttpSecurity http, AdminUserDetailsService adminUserDetailsService,

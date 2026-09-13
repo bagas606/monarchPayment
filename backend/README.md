@@ -541,10 +541,9 @@ database — see that slice's notes.
   - **Real authentication, not a stub.** A genuine `admin_user` table (V17 migration, Section
     22.26's columns) backs a `SecurityFilterChain` for `/admin/**` using HTTP Basic +
     `DaoAuthenticationProvider` + `BCryptPasswordEncoder` (`admin`'s new `AdminUserDetailsService`,
-    `AdminPrincipal`). **Not built**: Section 42's RBAC (`role`/`permission`/`admin_user_role`/
-    `role_permission` tables) — every `ACTIVE` admin_user can call every `/admin/**` endpoint this
-    codebase exposes, with no per-action permission check; Section 42.3's session management
-    (JWT/idle+absolute timeout, revocation) — Basic Auth is stateless per-request instead; MFA.
+    `AdminPrincipal`). Section 42's RBAC (fine-grained permission checks) is now built — see
+    "Admin RBAC" below. **Still not built**: Section 42.3's session management (JWT/idle+absolute
+    timeout, revocation) — Basic Auth is stateless per-request instead; MFA.
     `admin_user.last_login_at` is mapped but never written — schema-only, not silently "maintained."
   - **`AdminReconciliationController`** (`app.web`, matching this codebase's established
     composition-root-owns-controllers convention) exposes `POST /admin/reconciliations/{id}
@@ -575,6 +574,80 @@ database — see that slice's notes.
     unauthenticated `POST /internal/settlement/ingest` now returns `401`, and the same request
     with valid admin credentials still ingests correctly (`200`, real `DISCREPANCY`/`MATCHED`
     response body unchanged).
+
+- **Admin RBAC** (Section 42.1 / 42.2) closes the RBAC gap the Admin Web slice above flagged:
+  every `ACTIVE` admin_user could previously call every `/admin/**` action with no per-permission
+  check. Section 42.3 (MFA, JWT/idle+absolute session timeout) is explicitly still out of scope —
+  a separate, still-open gap, not silently folded into this one.
+  - **New tables** (V19 migration): `role`, `permission`, `admin_user_role`, `role_permission`
+    (Section 22.26). Seeded: all 7 Section 42.1 roles as reference data, but only the 4 permission
+    codes this codebase actually gates something with today (`retry:execute`,
+    `reconciliation:investigate`, `reconciliation:resolve`, `settlement:ingest`) — Section 42.2
+    names several more as examples (`order:view`, `config:edit`, ...); seeding a permission nothing
+    checks would be reference data pretending to be enforcement. The role→permission mapping is
+    this codebase's interpretation of Section 42.1's descriptive "Typical Scope" text (not a
+    literal table) — see the migration file's comment for the per-role reasoning, including why
+    `settlement:ingest` goes to `FINANCE` and not `RECONCILIATION` (whose scope says "settlement
+    *read*"). **`SUPER_ADMIN`'s grants are enumerated explicitly, not a cross join to `permission`**
+    — a cross join would silently hand SUPER_ADMIN every future permission a later migration adds
+    without that migration's author ever deciding so; any migration adding a new permission must
+    also add its own explicit SUPER_ADMIN grant row.
+  - **No `admin_user_role` rows are seeded** — who holds which role is operational data, same
+    treatment as `admin_user` itself. This means a fresh deploy has every admin locked out of all
+    four gated actions until someone assigns roles — correct-by-default, not a bug, but worth
+    knowing before assuming a fresh environment is broken.
+  - **Mechanism**: `AdminUserRepository.findPermissionCodes` (native 3-table join, no `Role`/
+    `Permission` JPA entities — same precedent as `ProviderTransactionRepository.insertIfAbsent`)
+    resolves an admin_user's granted permission codes; `AdminPrincipal` exposes them as plain
+    (non-`ROLE_`-prefixed) `GrantedAuthority`s alongside the existing `ROLE_ADMIN`; each gated
+    controller method carries `@PreAuthorize("hasAuthority('...')")`
+    (`SecurityConfig`'s new `@EnableMethodSecurity`).
+  - **Real bug found and fixed during live verification**: a `@PreAuthorize` denial throws
+    `AuthorizationDeniedException` from inside the controller's AOP proxy — `DispatcherServlet`'s
+    own exception resolution (which backs `GlobalExceptionHandler`'s `@RestControllerAdvice`)
+    resolves that *before* the exception can ever propagate up the filter chain to
+    `ExceptionTranslationFilter`. A `SecurityConfig`-level `AccessDeniedHandler` bean was built
+    first (the textbook-correct place for this), wired via `.exceptionHandling(...)`, and observed
+    live to **never fire** — every denial surfaced as a raw `500 INTERNAL_ERROR` instead of `403`.
+    Fixed by adding `GlobalExceptionHandler.handlePermissionDenied` (an
+    `@ExceptionHandler(AccessDeniedException.class)`, since `AuthorizationDeniedException` extends
+    it) and deleting the dead filter-level handler entirely, rather than leaving an unreachable
+    branch. Worth remembering for any *future* `@PreAuthorize` usage in this codebase: the 403
+    envelope belongs in `GlobalExceptionHandler`, not a `SecurityConfig` `AccessDeniedHandler` —
+    the latter only ever fires for a URL-level `authorizeHttpRequests` denial (a different call
+    site, earlier in the filter chain, before `DispatcherServlet` is even entered).
+  - `adminFilterChain`'s existing `hasRole("ADMIN")` URL-level check is now provably unable to
+    deny anyone by itself: every `AdminPrincipal` always carries `ROLE_ADMIN` unconditionally, so
+    that check can only ever reject unauthenticated/wrong-credential requests (401) — the
+    permission-level gating is what does real work now.
+  - **Verified end-to-end against real Postgres**, discriminating real gating from a
+    misconfigured/typo'd permission string (a same-shaped 403 would result from either):
+    1. An admin with `OPERATIONS` (only `retry:execute`) → retry succeeds (`200`), and
+       `audit_log` records the real actor — denied calls never reach the controller body, so
+       nothing is written to `audit_log` for them (checked directly).
+    2. The same `OPERATIONS` admin → `reconciliation:investigate` → `403 PERMISSION_DENIED`, and
+       the target `reconciliation` row's `status`/`resolved_by` are provably untouched (the AOP
+       proxy blocks the call before the method body, hence before any repository write, ever
+       runs).
+    3. A fresh admin with **no** role assigned (the fresh-deploy default) → `403` on all four
+       gated endpoints.
+    4. The same no-role admin, after being granted `SUPER_ADMIN` → all four endpoints succeed
+       (`200`/domain-level response, never `PERMISSION_DENIED`) — this is what actually proves the
+       permission strings in the `@PreAuthorize` annotations match the seeded `permission.code`
+       values exactly; four denials alone can't distinguish "correctly denied" from "misspelled
+       permission code," only a subsequent grant-and-succeed can.
+    5. `X-Correlation-Id` sent on a denied request is echoed back unchanged inside the `403`
+       body's `correlation_id` field (same `GlobalExceptionHandler.correlationId` fallback path
+       every other error response already uses — no new correlation-id plumbing was needed once
+       the fix moved into `GlobalExceptionHandler`).
+  - One unit test (`AdminPrincipalTest`) covers `getAuthorities()` shape directly; it does not
+    (and can't, on its own) prove `@PreAuthorize` is actually wired — that's what the live
+    verification above is for.
+  - Dev-DB note: verifying this required rotating `admin1`'s `password_hash` to a locally-known
+    dev password and adding a second admin user (`noroleadmin`) with no roles, following the same
+    pattern already noted below under "Running locally" — neither hash nor either plaintext
+    password is committed anywhere; a future session picking up this same dev database will need
+    to re-rotate both via the same `bcrypt.hashpw` + `UPDATE`/`INSERT` commands.
 
 - **`MARGIN_EXPECTED_VS_ACTUAL` reconciliation** (Section 38.1: "pattern_economics projected
   net_contribution vs actual computed post-fact from real provider cost/payment fee" — "Detect
@@ -1236,12 +1309,23 @@ curl -X POST -u admin1:<your-password> http://localhost:8080/internal/settlement
 curl -X POST -u admin1:<your-password> http://localhost:8080/admin/child-orders/4/retry
 ```
 
+To exercise Section 42's RBAC (rather than just authentication), assign roles — a fresh
+`admin_user` starts with **no** roles and is `403 PERMISSION_DENIED` on all four gated actions
+above until you do:
+
+```sql
+INSERT INTO admin_user_role (admin_user_id, role_id) SELECT <admin_user id>, id FROM role WHERE code = 'OPERATIONS';       -- retry:execute only
+INSERT INTO admin_user_role (admin_user_id, role_id) SELECT <admin_user id>, id FROM role WHERE code = 'SUPER_ADMIN';      -- all four permissions
+```
+
 **Dev note, not a credential to reuse**: this session's own end-to-end verification (documented
-above) rotated the `admin1` row's `password_hash` mid-session to test against a locally-known
-password — that hash is not committed anywhere, and a future session picking up this same dev
-database will find a password neither it nor this file knows. Re-run the `bcrypt.hashpw` command
-above and `UPDATE admin_user SET password_hash = '<new hash>' WHERE username = 'admin1'` rather
-than guessing.
+above under "Admin RBAC") rotated the `admin1` row's `password_hash` mid-session to test against a
+locally-known password, and added a second row (`noroleadmin`, initially no roles, later granted
+`SUPER_ADMIN`) using the same locally-known password — neither hash nor either plaintext password
+is committed anywhere, and a future session picking up this same dev database will find passwords
+neither it nor this file knows. Re-run the `bcrypt.hashpw` command above and
+`UPDATE admin_user SET password_hash = '<new hash>' WHERE username = '<admin1|noroleadmin>'`
+rather than guessing.
 
 To exercise outbound webhook delivery, pass a `callback_url` when creating an order and point it at
 a receiver you control (a real PPOB1 endpoint isn't available in dev):

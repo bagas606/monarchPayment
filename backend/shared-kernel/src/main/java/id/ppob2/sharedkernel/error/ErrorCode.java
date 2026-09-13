@@ -24,7 +24,15 @@ public enum ErrorCode {
      * an internal ops action. Covers every reason a retry can't proceed: the child order isn't
      * {@code FAILED}, its parent isn't {@code PARTIAL_FAILED}, or it lost a race with another
      * concurrent state change between lookup and retry. */
-    CHILD_ORDER_NOT_RETRYABLE(409);
+    CHILD_ORDER_NOT_RETRYABLE(409),
+
+    /** Not part of Section 23.9's partner-facing table — Section 42.2's RBAC denial for an
+     * authenticated admin who lacks the specific permission a `@PreAuthorize`-gated admin action
+     * requires ("not merely be an admin"). Returned by {@code SecurityConfig}'s custom
+     * {@code AccessDeniedHandler}, not {@code GlobalExceptionHandler}, since Spring Security's
+     * {@code ExceptionTranslationFilter} intercepts {@code AccessDeniedException} before it can
+     * ever reach a {@code @RestControllerAdvice}. */
+    PERMISSION_DENIED(403);
 
     private final int httpStatus;
 

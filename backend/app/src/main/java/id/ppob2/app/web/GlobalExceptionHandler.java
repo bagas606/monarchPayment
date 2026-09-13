@@ -8,6 +8,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
@@ -21,6 +22,23 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleApiException(ApiException ex, HttpServletRequest request) {
         ErrorResponse body = ErrorResponse.of(ex, correlationId(request));
         return ResponseEntity.status(ex.errorCode().httpStatus()).body(body);
+    }
+
+    /**
+     * A {@code @PreAuthorize} denial (Section 42.2) throws {@code AuthorizationDeniedException} —
+     * a subtype of this — from inside the controller-method AOP proxy, which {@code
+     * DispatcherServlet}'s own exception resolution (backing this very {@code
+     * @RestControllerAdvice}) resolves before the exception can ever propagate up the filter chain
+     * to {@code ExceptionTranslationFilter}. A {@code SecurityConfig}-level {@code
+     * AccessDeniedHandler} therefore never runs for a method-security denial — only for a
+     * URL-level {@code authorizeHttpRequests} denial, which throws from {@code AuthorizationFilter}
+     * before the servlet is ever entered. Both call sites now produce the same envelope: this
+     * handler for @PreAuthorize, the filter-level handler for URL-level checks.
+     */
+    @ExceptionHandler(AccessDeniedException.class)
+    public ResponseEntity<ErrorResponse> handlePermissionDenied(AccessDeniedException ex, HttpServletRequest request) {
+        ErrorResponse body = ErrorResponse.of(ErrorCode.PERMISSION_DENIED, "You do not have permission to perform this action.", correlationId(request));
+        return ResponseEntity.status(ErrorCode.PERMISSION_DENIED.httpStatus()).body(body);
     }
 
     @ExceptionHandler(Exception.class)

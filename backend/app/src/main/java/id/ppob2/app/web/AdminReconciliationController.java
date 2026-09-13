@@ -10,6 +10,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import java.util.Map;
 import java.util.Optional;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -26,9 +27,10 @@ import org.springframework.web.bind.annotation.RestController;
  *
  * <p>Every mutation is recorded to {@code audit_log} via {@link AuditService#recordAdminAction}
  * (Section 43's "Recorded" requirement) with the acting admin_user's id ({@link
- * AdminPrincipal#getAdminUserId()}) — never a client-supplied actor id. No RBAC permission check
- * beyond "authenticated admin" (Section 42's role/permission model isn't built — see
- * {@code SecurityConfig.adminFilterChain}'s Javadoc).
+ * AdminPrincipal#getAdminUserId()}) — never a client-supplied actor id. Each mutating method is
+ * additionally gated behind its own Section 42.2 permission via {@code @PreAuthorize} — an
+ * authenticated admin without the specific permission is rejected by the AOP proxy before the
+ * method body (and therefore any repository write) ever runs.
  */
 @RestController
 public class AdminReconciliationController {
@@ -49,6 +51,7 @@ public class AdminReconciliationController {
     }
 
     @PostMapping("/admin/reconciliations/{id}/investigate")
+    @PreAuthorize("hasAuthority('reconciliation:investigate')")
     public ResponseEntity<?> investigate(@PathVariable Long id, @AuthenticationPrincipal AdminPrincipal principal,
                                           HttpServletRequest request) {
         Optional<Reconciliation> existing = reconciliationRepository.findById(id);
@@ -67,6 +70,7 @@ public class AdminReconciliationController {
     }
 
     @PostMapping("/admin/reconciliations/{id}/resolve")
+    @PreAuthorize("hasAuthority('reconciliation:resolve')")
     public ResponseEntity<?> resolve(@PathVariable Long id, @AuthenticationPrincipal AdminPrincipal principal,
                                       HttpServletRequest request) {
         Optional<Reconciliation> existing = reconciliationRepository.findById(id);

@@ -9,10 +9,12 @@ import jakarta.persistence.Table;
 import java.time.Instant;
 
 /**
- * Maps to the `admin_user` table, PRD Section 22.26. Only this table is built in this slice —
- * {@code role}/{@code permission}/{@code admin_user_role}/{@code role_permission} (Section 42's
- * RBAC) are not, so there is no per-permission gating here: any {@code ACTIVE} admin_user can
- * drive every admin action this codebase exposes. Flagged in the README.
+ * Maps to the `admin_user` table, PRD Section 22.26. Section 42's role/permission tables
+ * ({@code role}, {@code permission}, {@code admin_user_role}, {@code role_permission}) are a
+ * separate slice, not columns on this entity — see {@code AdminUserRepository
+ * .findPermissionCodes} and {@code AdminPrincipal} for how an admin_user's granted permission
+ * codes are resolved. Section 42.3 (MFA, JWT/session idle+absolute timeout) remains out of scope;
+ * flagged in the README.
  */
 @Entity
 @Table(name = "admin_user")

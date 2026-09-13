@@ -21,7 +21,7 @@ public class AdminUserDetailsService implements UserDetailsService {
     @Override
     public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException {
         return repository.findByUsername(username)
-                .map(AdminPrincipal::new)
+                .map(adminUser -> new AdminPrincipal(adminUser, repository.findPermissionCodes(adminUser.getId())))
                 .orElseThrow(() -> new UsernameNotFoundException("Unknown admin username: " + username));
     }
 }

@@ -11,6 +11,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import java.util.Map;
 import java.util.Optional;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -47,6 +48,7 @@ public class AdminFulfillmentController {
     }
 
     @PostMapping("/admin/child-orders/{id}/retry")
+    @PreAuthorize("hasAuthority('retry:execute')")
     public ResponseEntity<?> retry(@PathVariable Long id, @AuthenticationPrincipal AdminPrincipal principal,
                                     HttpServletRequest request) {
         Optional<ChildOrder> existing = childOrderService.findById(id);
