@@ -24,6 +24,18 @@ import org.springframework.stereotype.Component;
  * particular child order's purchase to fail. A configured provider_sku id fails every time (never
  * succeeds after retry) to also exercise Section 27.2's bounded-retry path predictably.
  *
+ * <p>{@code ambiguous-provider-sku-ids} is the same kind of dev-only knob, for Section 34.1's
+ * third failure class: "connection reset after the request was already sent." A configured
+ * provider_sku id returns {@link PurchaseStatus#AMBIGUOUS} every time from {@link #purchase} —
+ * deterministic, like the fail list, so the inquiry-before-retry path in {@code
+ * FulfillmentExecutionService} is exercisable predictably rather than depending on real network
+ * flakiness that doesn't exist in a stub.
+ *
+ * <p>{@link #inquire} always confirms {@code SUCCESS} — simulating Section 34.1's canonical
+ * ambiguous case (the purchase actually went through; only the response was lost) — with a
+ * provider-shaped reference synthesized fresh, not the caller's own idempotency key echoed back:
+ * a real provider's inquiry response carries its own transaction reference, never the caller's.
+ *
  * <p>{@code @Profile("!prod")} guard for the same reason as {@code StubQrisPaymentGateway}: this
  * must never be the only {@link GameProvider} bean in a production context.
  */
@@ -32,9 +44,16 @@ import org.springframework.stereotype.Component;
 public class StubGameProviderAdapter implements GameProvider {
 
     private final Set<Long> failProviderSkuIds;
+    private final Set<Long> ambiguousProviderSkuIds;
 
-    public StubGameProviderAdapter(@Value("${ppob2.fulfillment.stub-provider.fail-provider-sku-ids:}") String failProviderSkuIds) {
-        this.failProviderSkuIds = Arrays.stream(failProviderSkuIds.split(","))
+    public StubGameProviderAdapter(@Value("${ppob2.fulfillment.stub-provider.fail-provider-sku-ids:}") String failProviderSkuIds,
+                                    @Value("${ppob2.fulfillment.stub-provider.ambiguous-provider-sku-ids:}") String ambiguousProviderSkuIds) {
+        this.failProviderSkuIds = parseIds(failProviderSkuIds);
+        this.ambiguousProviderSkuIds = parseIds(ambiguousProviderSkuIds);
+    }
+
+    private static Set<Long> parseIds(String csv) {
+        return Arrays.stream(csv.split(","))
                 .map(String::trim)
                 .filter(s -> !s.isBlank())
                 .map(Long::parseLong)
@@ -56,11 +75,14 @@ public class StubGameProviderAdapter implements GameProvider {
         if (failProviderSkuIds.contains(request.providerSkuId())) {
             return PurchaseResult.failed("STUB_INJECTED_FAILURE for provider_sku " + request.providerSkuId());
         }
+        if (ambiguousProviderSkuIds.contains(request.providerSkuId())) {
+            return PurchaseResult.ambiguous("STUB_INJECTED_AMBIGUOUS for provider_sku " + request.providerSkuId());
+        }
         return PurchaseResult.success("STUBPROV-" + UUID.randomUUID());
     }
 
     @Override
     public InquiryResult inquire(String providerReference) {
-        return new InquiryResult(providerReference, PurchaseStatus.SUCCESS);
+        return new InquiryResult("STUBPROV-INQUIRY-" + UUID.randomUUID(), PurchaseStatus.SUCCESS);
     }
 }

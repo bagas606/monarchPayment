@@ -14,11 +14,19 @@ public record PurchaseResult(PurchaseStatus status, String providerReference, St
         return new PurchaseResult(PurchaseStatus.TIMEOUT, null, reason);
     }
 
+    public static PurchaseResult ambiguous(String reason) {
+        return new PurchaseResult(PurchaseStatus.AMBIGUOUS, null, reason);
+    }
+
     public boolean isRetryable() {
         return status == PurchaseStatus.TIMEOUT;
     }
 
     public boolean isSuccess() {
         return status == PurchaseStatus.SUCCESS;
+    }
+
+    public boolean isAmbiguous() {
+        return status == PurchaseStatus.AMBIGUOUS;
     }
 }

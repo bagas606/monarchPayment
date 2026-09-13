@@ -13,8 +13,10 @@ import static org.mockito.Mockito.verify;
 import id.ppob2.order.ChildOrderService;
 import id.ppob2.order.ParentOrderTransitionService;
 import id.ppob2.provider.GameProvider;
+import id.ppob2.provider.InquiryResult;
 import id.ppob2.provider.PurchaseRequest;
 import id.ppob2.provider.PurchaseResult;
+import id.ppob2.provider.PurchaseStatus;
 import id.ppob2.sharedkernel.money.Money;
 import java.util.List;
 import java.util.Optional;
@@ -132,5 +134,64 @@ class FulfillmentExecutionServiceTest {
         service.dispatch(1L, List.of(new ResolvedChildOrder(9L, 12L, 6L, 1, Money.of(900L))), List.of());
 
         verify(providerLedgerPoster, never()).postPurchaseDebit(anyLong(), any(), anyInt());
+    }
+
+    // --- Section 34.1 inquiry-before-retry: only the SUCCESS branch was live-verified against
+    // real Postgres (StubGameProviderAdapter.inquire() always confirms SUCCESS) — the FAILED and
+    // TIMEOUT branches are unreachable from any live path, so these three cover them directly.
+    // The assertion that matters in each is `purchase` called exactly once: the no-double-purchase
+    // invariant inquiry-before-retry exists to guarantee.
+
+    @Test
+    void ambiguousPurchaseConfirmedSuccessfulByInquiryRecordsANormalSuccess() {
+        given(childOrderService.markExecuting(20L)).willReturn(Optional.of(1));
+        given(gameProvider.purchase(any())).willReturn(PurchaseResult.ambiguous("connection reset"));
+        given(gameProvider.inquire("child-20-attempt-1"))
+                .willReturn(new InquiryResult("PROV-REF-CONFIRMED", PurchaseStatus.SUCCESS));
+        given(providerTransactionRecorder.record(eq(1L), eq(1), eq(20L), eq(1L), eq("child-20-attempt-1"), any()))
+                .willReturn(new RecordedProviderTransaction(500L, true));
+
+        service.dispatch(1L, List.of(new ResolvedChildOrder(20L, 1L, 1L, 1, Money.of(100L))), List.of());
+
+        verify(gameProvider, times(1)).purchase(any());
+        verify(gameProvider).inquire("child-20-attempt-1");
+        verify(providerLedgerPoster).postPurchaseDebit(500L, Money.of(100L), 1);
+        verify(childOrderService).recordOutcome(20L, true, 500L);
+    }
+
+    @Test
+    void ambiguousPurchaseConfirmedFailedByInquiryRecordsANormalFailureWithNoLedgerPost() {
+        given(childOrderService.markExecuting(21L)).willReturn(Optional.of(1));
+        given(gameProvider.purchase(any())).willReturn(PurchaseResult.ambiguous("connection reset"));
+        given(gameProvider.inquire("child-21-attempt-1"))
+                .willReturn(new InquiryResult(null, PurchaseStatus.FAILED));
+        given(providerTransactionRecorder.record(eq(1L), eq(1), eq(21L), eq(1L), eq("child-21-attempt-1"), any()))
+                .willReturn(new RecordedProviderTransaction(501L, true));
+
+        service.dispatch(1L, List.of(new ResolvedChildOrder(21L, 1L, 1L, 1, Money.of(100L))), List.of());
+
+        verify(gameProvider, times(1)).purchase(any());
+        verify(gameProvider).inquire("child-21-attempt-1");
+        verify(providerLedgerPoster, never()).postPurchaseDebit(anyLong(), any(), anyInt());
+        verify(childOrderService).recordOutcome(21L, false, 501L);
+    }
+
+    @Test
+    void ambiguousPurchaseWithInconclusiveInquiryIsTreatedAsFailedNotRetried() {
+        given(childOrderService.markExecuting(22L)).willReturn(Optional.of(1));
+        given(gameProvider.purchase(any())).willReturn(PurchaseResult.ambiguous("connection reset"));
+        given(gameProvider.inquire("child-22-attempt-1"))
+                .willReturn(new InquiryResult(null, PurchaseStatus.TIMEOUT));
+        given(providerTransactionRecorder.record(eq(1L), eq(1), eq(22L), eq(1L), eq("child-22-attempt-1"), any()))
+                .willReturn(new RecordedProviderTransaction(502L, true));
+
+        service.dispatch(1L, List.of(new ResolvedChildOrder(22L, 1L, 1L, 1, Money.of(100L))), List.of());
+
+        // The whole point of this test: an inconclusive inquiry must not fall through into the
+        // ambiguous-retry path again — purchase() is called exactly once, never a second time.
+        verify(gameProvider, times(1)).purchase(any());
+        verify(gameProvider).inquire("child-22-attempt-1");
+        verify(providerLedgerPoster, never()).postPurchaseDebit(anyLong(), any(), anyInt());
+        verify(childOrderService).recordOutcome(22L, false, 502L);
     }
 }

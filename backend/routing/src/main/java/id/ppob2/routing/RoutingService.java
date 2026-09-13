@@ -25,13 +25,18 @@ import org.springframework.stereotype.Service;
  * recomputed daily"). Runtime routing's job per Section 31.1 is to read that pre-computed score
  * from a cached candidate list, not recompute it per request.
  *
- * <p>Two Section 31.2 criteria are simplified here, both flagged: provider-level aggregate quota
- * isn't enforced (Section 22.5's `provider` table has no `quota_daily` column, only
+ * <p>One Section 31.2 criterion is simplified here, flagged: provider-level aggregate quota isn't
+ * enforced (Section 22.5's `provider` table has no `quota_daily` column, only
  * `rate_limit_per_min`, which is a rate limit, not a daily quota — provider-level daily quota
- * would need to be an aggregate over its SKUs, not implemented in this slice). And pattern
- * selection among ties/near-ties is deterministic (highest score wins outright) rather than
- * load-balanced per Section 31.4's "avoid concentrating all volume on one provider" — that needs
- * usage-distribution-aware tie-breaking this slice doesn't implement.
+ * would need to be an aggregate over its SKUs, not implemented in this slice).
+ *
+ * <p>Picking the single highest pre-computed score deterministically, with no runtime tie-break
+ * among near-ties, is correct per Section 31.1 — not a simplification. "Avoid concentrating all
+ * volume on one provider" is Section 31.3's {@code w_loadbalance * load_balance_score} term
+ * <em>inside</em> the composite score {@code pattern_economics.score} already holds — a scoring
+ * <em>input</em> the (not-yet-built) offline daily re-score job is responsible for computing, not
+ * something runtime routing recomputes or second-guesses. Layering a runtime tie-break on top
+ * would double-count load balancing through two uncoordinated mechanisms once that job exists.
  */
 @Service
 public class RoutingService {

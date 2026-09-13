@@ -3,8 +3,10 @@ package id.ppob2.fulfillment;
 import id.ppob2.order.ChildOrderService;
 import id.ppob2.order.ParentOrderTransitionService;
 import id.ppob2.provider.GameProvider;
+import id.ppob2.provider.InquiryResult;
 import id.ppob2.provider.PurchaseRequest;
 import id.ppob2.provider.PurchaseResult;
+import id.ppob2.provider.PurchaseStatus;
 import java.util.List;
 import java.util.Optional;
 import org.slf4j.Logger;
@@ -105,12 +107,20 @@ public class FulfillmentExecutionService {
     }
 
     /** Bounded automatic retry only for the idempotent-safe TIMEOUT class (Section 27.2) — a
-     * terminal FAILED response is not retried. No inquiry-before-retry step for ambiguous
-     * failures (there is no such failure class in this stub); flagged as a gap. */
+     * terminal FAILED response is not retried. An {@code AMBIGUOUS} response (Section 34.1:
+     * "connection reset after the request was already sent") is never blindly retried either —
+     * that risks a real double-purchase if it actually went through — it is resolved via {@link
+     * #resolveAmbiguous} instead. Invariant: this method never *returns* an {@code AMBIGUOUS}
+     * result — {@link #resolveAmbiguous} always converts it to a concrete {@code SUCCESS}/{@code
+     * FAILED} before returning, so {@code AMBIGUOUS} never reaches {@code
+     * ProviderTransactionRecorder} or any persisted column. */
     private PurchaseResult executeWithRetry(ResolvedChildOrder command, String idempotencyKey) {
         PurchaseResult result = null;
         for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             result = gameProvider.purchase(new PurchaseRequest(command.providerSkuId(), command.quantity(), idempotencyKey));
+            if (result.isAmbiguous()) {
+                return resolveAmbiguous(command, idempotencyKey, result);
+            }
             if (!result.isRetryable()) {
                 return result;
             }
@@ -119,6 +129,63 @@ public class FulfillmentExecutionService {
             backoff(attempt);
         }
         return result;
+    }
+
+    /**
+     * Section 34.1's inquiry-before-retry step. {@code idempotencyKey} is passed as the {@code
+     * providerReference} argument to {@link GameProvider#inquire} — the ambiguous {@link
+     * PurchaseResult} carries no provider-issued reference (the response that would have carried
+     * one was lost), so the idempotency key is the only identifier both sides share to look the
+     * attempt up by.
+     *
+     * <p>A confirmed {@code SUCCESS} is recorded exactly like any other successful purchase — the
+     * same {@code provider_transaction} row + ledger debit {@link #processOne} already posts for a
+     * direct success, via the normal {@code PurchaseResult.success(...)} return path, not a
+     * separate "mark SUCCESS" shortcut. The provider genuinely fulfilled this purchase; skipping
+     * that bookkeeping would leave a real provider charge with no {@code provider_transaction} row
+     * and no ledger debit — an unaudited spend, a Section 36.1 violation. What inquiry-before-retry
+     * *does* avoid is calling {@link GameProvider#purchase} a second time for the same attempt,
+     * which is the actual double-purchase risk Section 34.1 is guarding against.
+     *
+     * <p><b>Deliberately narrower than Section 34.1's literal phrasing</b> ("inquiry-before-retry
+     * ... before deciding whether to retry"): a confirmed {@code FAILED} here is treated as this
+     * attempt's terminal outcome, not fed back into {@link #executeWithRetry}'s automatic-retry
+     * loop, even though a retry at that point would in fact be idempotent-safe (inquiry just
+     * proved nothing happened). Section 27.2's bounded automatic retries stay reserved for the
+     * narrow, ordinary TIMEOUT class; an ambiguous failure is by definition an unusual event
+     * (Section 34.1's own example is a connection reset) worth surfacing rather than silently
+     * absorbing into another invisible auto-retry. The existing Admin Web retry action
+     * ({@code AdminChildOrderRetryOrchestrator}, {@code POST /admin/child-orders/{id}/retry}) is
+     * the actual recovery path for this case — the same authorized-retry mechanism Section 33.2's
+     * {@code PARTIAL_FAILED -> SUCCESS} transition already uses, not a new mechanism invented here.
+     *
+     * <p>A {@code TIMEOUT} inquiry result means the inquiry itself was inconclusive — a third case,
+     * not a confirmed failure — logged distinctly at ERROR since it needs manual review (this
+     * codebase has no further automated escalation once inquiry itself fails to disambiguate); it
+     * is treated the same as a confirmed {@code FAILED} for the return value, but never conflated
+     * with one in the log or the recorded failure reason.
+     */
+    private PurchaseResult resolveAmbiguous(ResolvedChildOrder command, String idempotencyKey, PurchaseResult ambiguousResult) {
+        log.warn("Ambiguous purchase result for child_order {} (idempotency_key={}): {} — querying provider via inquire() "
+                        + "before deciding the outcome",
+                command.childOrderId(), idempotencyKey, ambiguousResult.failureReason());
+
+        InquiryResult inquiry = gameProvider.inquire(idempotencyKey);
+
+        if (inquiry.status() == PurchaseStatus.SUCCESS) {
+            log.info("Inquiry confirmed child_order {} (idempotency_key={}) actually succeeded (provider_reference={})",
+                    command.childOrderId(), idempotencyKey, inquiry.providerReference());
+            return PurchaseResult.success(inquiry.providerReference());
+        }
+        if (inquiry.status() == PurchaseStatus.FAILED) {
+            return PurchaseResult.failed("Ambiguous purchase, inquiry confirmed not completed: " + ambiguousResult.failureReason());
+        }
+
+        log.error("Inquiry itself was inconclusive for child_order {} (idempotency_key={}) — provider could not confirm "
+                        + "either way; needs manual review, not further automated retry",
+                command.childOrderId(), idempotencyKey);
+        return PurchaseResult.failed("Ambiguous purchase, inquiry was inconclusive (needs manual review): "
+                + ambiguousResult.failureReason());
     }
 
     private void backoff(int attempt) {

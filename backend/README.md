@@ -672,6 +672,57 @@ database — see that slice's notes.
   itself is already enforced, more cheaply, by the Gradle project-dependency edges — duplicating
   that in ArchUnit form isn't a new risk closed, just the same one enforced twice.
 
+- **Inquiry-before-retry** (Section 34.1's third failure class: "connection reset after the
+  request was already sent") closes the gap this README used to flag as "`GameProvider.inquire()`
+  exists on the interface for fidelity but nothing calls it."
+  - **New `PurchaseStatus.AMBIGUOUS`**, distinct from `TIMEOUT` (idempotent-safe, auto-retried) and
+    `FAILED` (terminal, never retried): a purchase whose actual outcome the caller genuinely
+    doesn't know. Neither of the existing two treatments is safe for it — blind retry risks a real
+    double-purchase if it actually succeeded; treating it as terminal-failed risks silently eating
+    a purchase that actually went through and never posting its ledger debit.
+  - **`FulfillmentExecutionService.resolveAmbiguous`** calls `GameProvider.inquire(idempotencyKey)`
+    — the idempotency key, not a provider reference, since the ambiguous result carries no
+    provider-issued reference (the response that would have carried one was lost); the idempotency
+    key is the only identifier both sides share to look the attempt up by. Three inquiry outcomes,
+    handled distinctly rather than collapsed into two: a confirmed `SUCCESS` returns as a normal
+    `PurchaseResult.success(...)`; a confirmed `FAILED` returns as `failed(...)`; a `TIMEOUT` (the
+    inquiry call itself being inconclusive — a third case, not a confirmed failure) is logged at
+    ERROR as needing manual review, since this codebase has no further automated escalation once
+    inquiry itself can't disambiguate.
+  - **Deliberately narrower than Section 34.1's literal phrasing** ("inquiry-before-retry ...
+    before deciding whether to retry"): a confirmed `FAILED` is this attempt's terminal outcome,
+    not fed back into the automatic-retry loop — even though a retry at that point would in fact
+    be idempotent-safe (inquiry just proved nothing happened). Section 27.2's bounded automatic
+    retries stay reserved for the ordinary TIMEOUT class; an ambiguous failure is an unusual event
+    worth surfacing, not silently absorbing into another invisible auto-retry. The existing Admin
+    Web retry action (`AdminChildOrderRetryOrchestrator`) is the actual recovery path for this
+    case — the same mechanism Section 33.2's `PARTIAL_FAILED -> SUCCESS` transition already uses.
+  - **A confirmed-success is recorded through the exact same `provider_transaction` + ledger-debit
+    path a normal direct success uses — deliberately not a separate "mark SUCCESS" shortcut** that
+    sets `ChildOrder.state = SUCCESS` directly and bypasses that bookkeeping. The provider genuinely
+    fulfilled the purchase in this scenario, so skipping the ledger debit would leave a real charge
+    with no `provider_transaction` row and no debit — an unaudited spend, a Section 36.1 violation.
+    What inquiry-before-retry actually avoids is calling `purchase()` a second time for the same
+    attempt (the real double-purchase risk); it was never meant to skip recording a purchase that
+    did happen.
+  - **`StubGameProviderAdapter`** gets a new `ambiguous-provider-sku-ids` dev-only knob (same shape
+    as the existing `fail-provider-sku-ids`): a configured provider_sku id returns `AMBIGUOUS`
+    deterministically from `purchase()`, and `inquire()` always confirms `SUCCESS` with a freshly
+    synthesized `STUBPROV-INQUIRY-...` reference — not the caller's own idempotency key echoed
+    back, since a real provider's inquiry response carries its own transaction reference, never
+    the caller's.
+  - **Verified end-to-end against real Postgres**, with the check that actually discriminates
+    correct inquiry-resolution from a silent double-purchase or an unaudited spend: not "did the
+    child order reach `SUCCESS`" (that passes either way), but **exactly one** `provider_transaction`
+    row and **exactly one** ledger `DEBIT` for the child order whose SKU was configured ambiguous.
+    Created an order for `provider_sku_id=2` configured as ambiguous
+    (`PPOB2_FULFILLMENT_STUBPROVIDER_AMBIGUOUSPROVIDERSKUIDS=2`), paid it via a signed callback,
+    and confirmed: the child order reached `SUCCESS`; its `provider_transaction.provider_reference`
+    was the synthesized `STUBPROV-INQUIRY-...` value (proving the inquiry path ran, not a normal
+    purchase); exactly one `provider_transaction` row and one `ledger_entry` (`DEBIT`) exist for it;
+    and the app log showed the exact sequence (`Ambiguous purchase result...` →
+    `Inquiry confirmed ... actually succeeded`).
+
 - **`MARGIN_EXPECTED_VS_ACTUAL` reconciliation** (Section 38.1: "pattern_economics projected
   net_contribution vs actual computed post-fact from real provider cost/payment fee" — "Detect
   margin erosion, pricing drift") — a new `app`-layer `MarginReconciliationOrchestrator`, wired
@@ -1050,10 +1101,19 @@ Known gaps to close before this is production-real:
 - **Section 31.3's weighted scoring formula is not implemented here, by design** — `RoutingService`
   only reads the pre-computed `pattern_economics.score` and picks the max. Recomputing the formula
   is the (not-yet-built) offline daily job's job, not runtime routing's, per Section 31.1.
-- **Load-balancing / tie-break (Section 31.4) is not implemented.** `RoutingService` picks the
-  single highest-scored eligible pattern deterministically; it does not spread volume across
-  providers on ties or near-ties, which Section 31.4 calls for to avoid concentrating volume on
-  one provider.
+- ~~Load-balancing / tie-break (Section 31.4) is not implemented~~ — **this entry was a false PRD
+  attribution and has been retracted, not built.** On closer reading, Section 31.4 ("Purpose of
+  Variation") is a compliance/legitimate-purpose statement — routing variation must never be used
+  for audit/AML evasion — not a runtime tie-break specification. The actual "spread volume across
+  providers" requirement is Section 31.3's `w_loadbalance * load_balance_score` term **inside** the
+  composite score formula, which the (not-yet-built) offline daily re-score job is responsible for
+  computing into `pattern_economics.score` — this is the same gap as "No offline pattern-generation
+  engine exists" above, not a separate one. `RoutingService` picking the single highest pre-computed
+  score deterministically is *correct* per Section 31.1, not a shortfall: once the offline job
+  exists and produces a real `load_balance_score`, that's where volume-spreading is supposed to
+  happen. Adding a runtime weighted-random (or any other) tie-break on top would double-count load
+  balancing through two uncoordinated mechanisms once the real score exists — worse than the
+  current gap, not a fix for it.
 - **`RoutingServiceTest` uses reflection to populate its `ProviderSku`/`Provider`/`SkuUsage` test
   doubles**, since those entities have no public constructors/setters for test-only field
   population. Ugly but deliberate — the quota-exceeded case it covers isn't exercised anywhere
@@ -1084,11 +1144,7 @@ Known gaps to close before this is production-real:
 - **No circuit breaker, rate limiting, or health check** (Section 27.2) — `StubGameProviderAdapter`
   is called directly and unconditionally; a real provider integration needs all three before this
   is production-real, same class of gap as the deferred pattern-generation engine.
-- **No inquiry-before-retry for ambiguous failures** (Section 34.1) — `GameProvider.inquire()`
-  exists on the interface for fidelity but nothing calls it. This slice's retry classification is
-  binary (`TIMEOUT` retries, everything else is terminal); a real provider's "connection reset
-  after the request was already sent" case needs the inquiry step to disambiguate before deciding
-  whether to retry, which isn't built.
+- ~~No inquiry-before-retry for ambiguous failures~~ — closed, see "Inquiry-before-retry" below.
 - **No per-provider adapter registry.** Section 27.1 describes `ProviderAAdapter`/`ProviderBAdapter`
   per real provider; this slice has exactly one generic `StubGameProviderAdapter` bean used for
   every `provider_id`, mirroring `StubQrisPaymentGateway`'s single-bean precedent. There's no
@@ -1263,6 +1319,19 @@ PPOB2_FULFILLMENT_STUBPROVIDER_FAILPROVIDERSKUIDS=2 ./gradlew :app:bootRun
 
 An order for `parent_amount: 40000` then reaches `PARTIAL_FAILED` (child order for provider_sku 1
 `SUCCESS`, provider_sku 2 `FAILED`); setting the property to `1,2` instead produces `FAILED`.
+
+The same relaxed-binding rule applies to the inquiry-before-retry test knob:
+
+```bash
+PPOB2_FULFILLMENT_STUBPROVIDER_AMBIGUOUSPROVIDERSKUIDS=2 ./gradlew :app:bootRun
+```
+
+A child order for the configured provider_sku gets `PurchaseStatus.AMBIGUOUS` from every
+`purchase()` call; `StubGameProviderAdapter.inquire()` always confirms `SUCCESS`, so the child
+order still reaches `SUCCESS` — but via `FulfillmentExecutionService.resolveAmbiguous`, not a
+direct purchase. Check `provider_transaction.provider_reference` for that child order: a
+`STUBPROV-INQUIRY-...` value (not a plain `STUBPROV-...` one) confirms the inquiry path actually
+ran.
 
 The moment any order reaches `PAID` (regardless of what happens after), check the Payment Ledger
 entry it should have produced:
