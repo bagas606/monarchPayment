@@ -2,6 +2,7 @@ package id.ppob2.app.webhook;
 
 import id.ppob2.webhook.OutboundWebhookDeliveryResult;
 import id.ppob2.webhook.OutboundWebhookSender;
+import id.ppob2.webhook.WebhookDeliveryTracker;
 import id.ppob2.webhook.WebhookEventRecorder;
 import id.ppob2.webhook.domain.WebhookDirection;
 import java.util.Optional;
@@ -17,15 +18,20 @@ import org.springframework.stereotype.Component;
  * concern, the same shape as {@code OrderFulfillmentReconciliationOrchestrator} right next to it
  * in the dispatch listener.
  *
- * <p><b>Scope of this slice</b>: exactly one delivery attempt, outcome recorded in
- * {@code webhook_event} (direction OUTBOUND). Section 23.8's "5 attempts over 24h" retry schedule
- * is not built — no persisted attempt count, no scheduled re-driver, no dead-letter/inquiry
- * fallback. Trigger coverage is also partial: only the post-dispatch terminal states
- * (SUCCESS/PARTIAL_FAILED/FAILED) fire this; CANCELLED/EXPIRED/REFUNDED transitions and the QR
- * expiry sweep's own state change (Section 48.3's diagram) do not, and are not newly covered by
- * this slice — flagged in the README, not silently left implied as done.
+ * <p><b>Retry</b>: {@link #sendOrderStatusChanged} makes exactly one synchronous attempt (kept —
+ * most deliveries succeed immediately, and there is no reason to defer the happy path to a sweep
+ * job); on failure it schedules a retry via {@link WebhookDeliveryTracker} instead of only
+ * logging. {@link #attempt} itself — resolve target, send, log the attempt to
+ * {@code webhook_event} — is the single shared path both the first attempt and every later retry
+ * (from {@code WebhookRetrySweepJob}) go through, so there is exactly one place that can resolve
+ * the target or record an attempt, not two copies to keep in sync.
  *
- * <p>This method itself is not transactional: resolving the target is a separate
+ * <p>Trigger coverage is still partial: only the post-dispatch terminal states
+ * (SUCCESS/PARTIAL_FAILED/FAILED) fire this; CANCELLED/EXPIRED/REFUNDED transitions and the QR
+ * expiry sweep's own state change (Section 48.3's diagram) do not — flagged in the README, not
+ * silently left implied as done.
+ *
+ * <p>{@link #attempt} itself is not transactional: resolving the target is a separate
  * {@code REQUIRES_NEW} bean (see its Javadoc for why that propagation is load-bearing here, not
  * just convention), the HTTP call runs outside any transaction (same reasoning as
  * {@code FulfillmentExecutionService}'s provider call — an unreachable partner endpoint is the
@@ -43,34 +49,55 @@ public class OutboundWebhookOrchestrator {
     private final WebhookDeliveryTargetResolver targetResolver;
     private final OutboundWebhookSender sender;
     private final WebhookEventRecorder webhookEventRecorder;
+    private final WebhookDeliveryTracker deliveryTracker;
 
     public OutboundWebhookOrchestrator(WebhookDeliveryTargetResolver targetResolver,
                                         OutboundWebhookSender sender,
-                                        WebhookEventRecorder webhookEventRecorder) {
+                                        WebhookEventRecorder webhookEventRecorder,
+                                        WebhookDeliveryTracker deliveryTracker) {
         this.targetResolver = targetResolver;
         this.sender = sender;
         this.webhookEventRecorder = webhookEventRecorder;
+        this.deliveryTracker = deliveryTracker;
     }
 
     public void sendOrderStatusChanged(Long parentOrderId) {
+        OutboundWebhookAttemptResult result = attempt(parentOrderId, "ORDER_STATUS_CHANGED");
+        if (result.noTarget() || result.success()) {
+            return;
+        }
+        log.warn("Outbound webhook delivery failed for parent_order {}, scheduling a retry: {}",
+                parentOrderId, result.failureReason());
+        deliveryTracker.scheduleFirstRetry(parentOrderId, "ORDER_STATUS_CHANGED", result.failureReason());
+    }
+
+    /**
+     * One delivery attempt: resolve the current target fresh (not cached from a prior attempt —
+     * a partner's {@code callback_url}/{@code webhook_secret} could change between retries, and
+     * the order's own state is already terminal by the time this is ever reachable, so re-reading
+     * it is cheap and always correct), send, and log the outcome to {@code webhook_event}
+     * regardless of success. Used by both {@link #sendOrderStatusChanged}'s first attempt and
+     * {@code WebhookRetrySweepJob}'s later retries — the only two callers.
+     */
+    public OutboundWebhookAttemptResult attempt(Long parentOrderId, String eventType) {
         try {
             Optional<WebhookDeliveryTarget> target = targetResolver.resolve(parentOrderId);
             if (target.isEmpty()) {
-                return;
+                return OutboundWebhookAttemptResult.ofNoTarget();
             }
             WebhookDeliveryTarget t = target.get();
 
             OutboundWebhookDeliveryResult result = sender.send(t.callbackUrl(), t.webhookSecret(), t.orderNo(), t.state());
 
-            webhookEventRecorder.recordIndependently(WebhookDirection.OUTBOUND, t.partnerCode(), "ORDER_STATUS_CHANGED",
+            webhookEventRecorder.recordIndependently(WebhookDirection.OUTBOUND, t.partnerCode(), eventType,
                     result.requestBody(), result.success() ? "SUCCESS" : "FAILED", null);
 
-            if (!result.success()) {
-                log.warn("Outbound webhook delivery failed for parent_order {} (order_no={}): {}",
-                        parentOrderId, t.orderNo(), result.failureReason());
-            }
+            return result.success()
+                    ? OutboundWebhookAttemptResult.ofSuccess()
+                    : OutboundWebhookAttemptResult.ofFailure(result.failureReason());
         } catch (Exception e) {
             log.error("Unexpected error while attempting outbound webhook delivery for parent_order {}", parentOrderId, e);
+            return OutboundWebhookAttemptResult.ofFailure(e.getClass().getSimpleName() + ": " + e.getMessage());
         }
     }
 }

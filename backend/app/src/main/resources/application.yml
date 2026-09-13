@@ -19,6 +19,14 @@ spring:
   flyway:
     enabled: true
     locations: classpath:db/migration
+  task:
+    scheduling:
+      pool:
+        # Default is 1 thread shared by every @Scheduled job. With WebhookRetrySweepJob added
+        # alongside QrExpirySweepJob, a single slow/timing-out webhook-delivery batch could occupy
+        # that one thread long enough to delay the expiry sweep too. Two threads means the two jobs
+        # no longer contend for the same slot.
+        size: 2
 
 server:
   port: ${PORT:8080}
@@ -58,3 +66,10 @@ ppob2:
       # See AyolinxPaymentGateway's Javadoc "Known unknowns" — genuinely undocumented, this is a best-effort default.
       callback-route: ${PPOB2_AYOLINX_CALLBACK_ROUTE:/v1/qr/qr-mpm-notify}
       timezone: ${PPOB2_AYOLINX_TIMEZONE:Asia/Jakarta}
+  webhook:
+    # Section 23.8: how often WebhookRetrySweepJob checks for due webhook_delivery rows.
+    retry-sweep-interval-ms: ${PPOB2_WEBHOOK_RETRY_SWEEP_INTERVAL_MS:60000}
+    # Delay *between* retry attempts (minutes), comma-separated — NOT the attempt count itself.
+    # Total attempts = this list's length + 1 (the first, synchronous attempt). Default (5,60,240,1080)
+    # gives 5 total attempts spanning ~23h, matching Section 23.8's "e.g. 5 attempts over 24h".
+    retry-backoff-minutes: ${PPOB2_WEBHOOK_RETRY_BACKOFF_MINUTES:5,60,240,1080}

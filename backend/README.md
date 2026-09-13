@@ -469,14 +469,16 @@ database — see that slice's notes.
   column (V16) holds "PPOB1's registered secret" — undocumented in Section 22.2, same caveat as
   `api_client.secret_hash`: verifying an HMAC requires the actual secret, not a one-way hash, so
   despite the name this must be the reversible signing secret; worth raising with the PRD owner.
-  - **Scope, held deliberately narrow**: exactly one delivery attempt per terminal-state
-    transition, outcome recorded in `webhook_event` (`direction=OUTBOUND`). Section 23.8's "5
-    attempts over 24h" retry-with-backoff schedule is **not** built — no persisted attempt count,
-    no scheduled re-driver, no dead-letter/inquiry fallback. Trigger coverage is partial too: only
-    the post-dispatch terminal states (`SUCCESS`/`PARTIAL_FAILED`/`FAILED`, fired from
+  - **Scope, held deliberately narrow at the time**: exactly one delivery attempt per
+    terminal-state transition, outcome recorded in `webhook_event` (`direction=OUTBOUND`). Section
+    23.8's "5 attempts over 24h" retry-with-backoff schedule was **not** built in this slice —
+    **closed in a later slice, see "Webhook Retry Sweep" below** (persisted attempt count,
+    scheduled re-driver; dead-letter/inquiry fallback still isn't built, since that means PPOB1
+    polling our Open API, not something we push). Trigger coverage is still partial: only the
+    post-dispatch terminal states (`SUCCESS`/`PARTIAL_FAILED`/`FAILED`, fired from
     `FulfillmentDispatchListener` right after the reconciliation orchestrator) send a webhook;
     `CANCELLED`/`EXPIRED`/`REFUNDED` transitions and the QR expiry sweep's own state change
-    (Section 48.3's diagram) do not, and are not newly covered by this slice.
+    (Section 48.3's diagram) do not, and are not covered by the retry-sweep slice either.
   - **`webhook`'s new `OutboundWebhookSender`** signs with the exact same `HmacSigner` scheme as
     inbound Open API auth (Section 23.2), using the callback URL's own path component. Uses
     `WebClient` (the `spring-boot-starter-webflux` dependency this module already declared but
@@ -860,6 +862,67 @@ database — see that slice's notes.
     entry, and a byte-identical resend was correctly ignored as a duplicate with no second row of
     either kind). **Not achievable and not claimed: any actual round-trip against Ayolinx's sandbox**
     — that needs the merchant registration + KYB step described above.
+
+- **Webhook Retry Sweep** (Section 23.8 / 40.4) closes the gap this README used to flag as "no
+  delivery/retry machinery, no persisted delivery-attempt-count, and no scheduled re-driver" —
+  `OutboundWebhookOrchestrator.sendOrderStatusChanged` still makes one synchronous attempt (most
+  deliveries succeed immediately; no reason to defer that), but on failure now schedules a retry
+  via the new `webhook_delivery` table (`WebhookDeliveryTracker`) instead of only logging a
+  warning. `WebhookRetrySweepJob` (`app`, same `@Scheduled` + bounded-batch shape as
+  `QrExpirySweepJob`) picks up due `PENDING` rows and retries them through the *same* `attempt(...)`
+  method the first try used — one shared path, not two copies of resolve/send/record to keep in
+  sync.
+  - **New table, not a Section 22 one**: `webhook_event` (22.24) is an append-only log (one row
+    per attempt, no mutable state) — the wrong shape for a retry schedule's attempt count and
+    next-attempt-at. `webhook_delivery` holds that instead; both tables get written for the same
+    logical delivery by design, not a duplication to reconcile.
+  - **Backoff is configurable, not the attempt count directly**: `ppob2.webhook.retry-backoff-minutes`
+    (default `5,60,240,1080`) lists the delay *between* attempts; total attempts = list length + 1
+    (the first synchronous one). Default yields 5 total attempts spanning ~23h, matching Section
+    23.8's "e.g. 5 attempts over 24h" without hardcoding it. Verified booting with this exact
+    default (no env override) to confirm the comma-parsing doesn't fail at bean construction —
+    every prior boot during development had overridden it for faster iteration.
+  - **`spring.task.scheduling.pool.size: 2`** was added because `WebhookRetrySweepJob` and
+    `QrExpirySweepJob` would otherwise share Spring's default single-thread scheduler — a batch of
+    slow/timing-out webhook deliveries (up to 200 per tick, each bounded by a 5s HTTP timeout)
+    could occupy that one thread long enough to delay the next expiry-sweep tick, leaving unpaid
+    orders sitting past their QR TTL. Not a hypothetical: caught by advisor review before this
+    shipped, not by any test.
+  - **Not safe for more than one app instance** — two instances racing on the same due row would
+    both attempt delivery (partner gets a duplicate `ORDER_STATUS_CHANGED`) and both update the
+    same `webhook_delivery` row with no optimistic-locking guard. Flagged in
+    `WebhookRetrySweepJob`'s Javadoc with the eventual fix's shape (`SELECT ... FOR UPDATE SKIP
+    LOCKED`) — deliberately *not* claimed benign the way `QrExpirySweepJob`'s identical-shape race
+    is, since writing the same target state twice (that job) and sending a partner the same
+    webhook twice (this job) are different risk classes. Not built — single-instance-only, same
+    simplification as the in-memory nonce store and routing candidate cache elsewhere.
+  - **`webhook_delivery_order_event_uk`** (unique on `parent_order_id, event_type`) assumes at most
+    one `ORDER_STATUS_CHANGED` notification is ever owed per order — true today. If a future slice
+    also notifies PPOB1 after `AdminChildOrderRetryOrchestrator`'s `PARTIAL_FAILED -> SUCCESS`
+    retry (it arguably should), a second notification for the same order will collide with this
+    constraint and be silently dropped — flagged in `WebhookDelivery`'s Javadoc, same treatment as
+    the `ChildOrderState.COMPENSATED` predicate flag elsewhere.
+  - Verified end-to-end against real Postgres, all three reachable outcomes: an order whose
+    partner endpoint was reachable on the first try created no `webhook_delivery` row at all
+    (nothing to schedule); an order whose endpoint stayed down the whole time reached
+    `EXHAUSTED` at exactly attempt 5, with 5 matching `FAILED` rows in `webhook_event`; an order
+    whose endpoint came back up mid-retry-cycle reached `DELIVERED`, and the test HTTP receiver
+    confirmed it received the correctly-signed payload. Verified with a tuned
+    `retry-sweep-interval-ms`/`retry-backoff-minutes` for fast iteration, not the production
+    defaults — the boot-with-defaults check above is what confirms the real config value parses.
+  - **Dev-DB fixture trap hit while testing this, unrelated to the retry sweep itself**: an order
+    reached `REFUND_PENDING` ("no eligible decomposition pattern") for two different reasons
+    layered on top of each other in this long-lived dev database — (1) `provider_sku.face_value`
+    had drifted since the pattern was seeded, tripping Section 28.2's invariant check correctly
+    (fixed by restoring `face_value` so `quantity × face_value` sums back to the pattern's
+    `parent_amount`), and (2) `pattern_economics` is looked up by `snapshot_date = LocalDate.now()`
+    (`RoutingService`, no daily re-scoring job exists — already a known gap), so a snapshot dated
+    yesterday makes every order route to `REFUND_PENDING` with no more specific hint than "no
+    eligible pattern." Fixed for this dev DB by inserting today's snapshot as a copy of the
+    existing one (`INSERT INTO pattern_economics (...) SELECT ..., CURRENT_DATE, ... FROM
+    pattern_economics WHERE snapshot_date = '<last date>'`) — that inserted row is still in the
+    dev DB. Documented here so the next person hitting `REFUND_PENDING` unexpectedly checks this
+    before assuming new code broke something.
 
 Everything after that — the two remaining reconciliation types and the rest of Section 41's Admin
 Web surface — is unbuilt; those are candidates for the next slice. Every other module directory
