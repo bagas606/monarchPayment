@@ -649,6 +649,18 @@ database — see that slice's notes.
     password is committed anywhere; a future session picking up this same dev database will need
     to re-rotate both via the same `bcrypt.hashpw` + `UPDATE`/`INSERT` commands.
 
+- **Settlement ingest audit** closes the inconsistency the Admin RBAC slice above introduced:
+  `SettlementIngestionController.ingest` carries `@PreAuthorize("hasAuthority('settlement:ingest')")`
+  — formally an admin action — but had no `AuditService` call at all, unlike the other three
+  `@PreAuthorize`-gated endpoints. **The snapshot shape differs from those three, and is documented
+  as such in the controller's Javadoc**: the other three take a `before` snapshot of an entity that
+  already exists, then compare against `after`. Here, the `settlement` row doesn't exist until
+  `SettlementIngestionOrchestrator.ingest` returns — there is nothing to snapshot beforehand. This
+  records post-hoc instead: `beforeState` is always `null`, `targetId` is the newly-created
+  settlement's id, `afterState` is the resulting settlement. Verified live: one ingest as an admin
+  with `settlement:ingest` produced an `audit_log` row with the real `actor_id` and the correct new
+  `target_id` — see `SELECT ... FROM audit_log ORDER BY id DESC LIMIT 1` after ingesting.
+
 - **`MARGIN_EXPECTED_VS_ACTUAL` reconciliation** (Section 38.1: "pattern_economics projected
   net_contribution vs actual computed post-fact from real provider cost/payment fee" — "Detect
   margin erosion, pricing drift") — a new `app`-layer `MarginReconciliationOrchestrator`, wired
