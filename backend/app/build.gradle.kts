@@ -32,4 +32,5 @@ dependencies {
     runtimeOnly("org.postgresql:postgresql")
 
     testImplementation("org.springframework.security:spring-security-test")
+    testImplementation("com.tngtech.archunit:archunit-junit5:1.3.0")
 }

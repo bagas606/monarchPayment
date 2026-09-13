@@ -661,6 +661,17 @@ database — see that slice's notes.
   with `settlement:ingest` produced an `audit_log` row with the real `actor_id` and the correct new
   `target_id` — see `SELECT ... FROM audit_log ORDER BY id DESC LIMIT 1` after ingesting.
 
+- **Module architecture check** (`ModuleArchitectureTest`, `app` module, new `com.tngtech.archunit`
+  test dependency) — the smaller, previously-flagged half of the "no ArchUnit enforcement" gap.
+  One rule so far: every `@Entity` must live in a `..domain..` package. Runs from `app` because
+  it's the only module wired to every other module (Section 20.2's composition root) and can
+  therefore import the whole `id.ppob2` package tree in one `ClassFileImporter` scan. Passes today
+  — every real `@Entity` in this codebase already followed the convention (two grep matches for
+  `@Entity` outside `domain` turned out to be a Javadoc mention and an unrelated `@EntityScan`
+  annotation, not a violation). Deliberately just the one rule: the Section 20.2 module-level graph
+  itself is already enforced, more cheaply, by the Gradle project-dependency edges — duplicating
+  that in ArchUnit form isn't a new risk closed, just the same one enforced twice.
+
 - **`MARGIN_EXPECTED_VS_ACTUAL` reconciliation** (Section 38.1: "pattern_economics projected
   net_contribution vs actual computed post-fact from real provider cost/payment fee" — "Detect
   margin erosion, pricing drift") — a new `app`-layer `MarginReconciliationOrchestrator`, wired
@@ -1112,10 +1123,10 @@ Known gaps to close before this is production-real:
   slice notes above) by checking every child order's state before choosing `SUCCESS`/
   `PARTIAL_FAILED`/`FAILED`, including a loud error log (not a silent no-op) if any child order is
   still `PENDING`/`EXECUTING` when completion is requested — a stuck-order signal.
-- No `ArchUnit` test enforces the Section 20.2 module graph at the package level — the Gradle
-  project-dependency graph already enforces it at the module level, which is the larger risk, but
-  a package-level rule (e.g. "no `@Entity` outside a module's `domain` package") is still worth
-  adding.
+- ~~No `ArchUnit` test enforces the Section 20.2 module graph at the package level~~ — closed, see
+  "Module architecture check" below. The Gradle project-dependency graph still enforces the
+  module-level graph itself (the larger risk); this closes only the smaller, previously-unenforced
+  package-level convention.
 - **`AyolinxCallbackPayload`'s shape is now built against Ayolinx's real public API docs**, not
   invented — see the narrative entry above for what changed and what's still genuinely unverified
   (the callback signature's `ROUTE`, exact non-success response codes, etc.). The
