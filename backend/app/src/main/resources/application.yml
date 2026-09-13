@@ -35,6 +35,26 @@ ppob2:
   channel:
     default-application-id: PPOB1-DEFAULT
   payment:
-    # Section 25.2's "Ayolinx-provided secret" — real Ayolinx callback signing is unspecified
-    # (see StubQrisPaymentGateway's Javadoc); this only guards the dev stub.
+    # "stub" (default — StubQrisPaymentGateway, no real HTTP call) or "ayolinx" (AyolinxPaymentGateway,
+    # real doc.ayolinx.id calls — needs every ayolinx.* property below plus real merchant credentials).
+    gateway: ${PPOB2_PAYMENT_GATEWAY:stub}
+    # Section 25.2's "Ayolinx-provided secret" — only used by the dev stub's own invented callback
+    # scheme (StubQrisPaymentGateway's Javadoc); AyolinxPaymentGateway uses ayolinx.public-key-pem instead.
     ayolinx-webhook-secret: ${PPOB2_AYOLINX_WEBHOOK_SECRET:dev-webhook-secret}
+    ayolinx:
+      # https://sandbox.ayolinx.id (sandbox) or https://openapi.ayolinx.id (production).
+      base-url: ${PPOB2_AYOLINX_BASE_URL:https://sandbox.ayolinx.id}
+      # X-PARTNER-ID / X-CLIENT-KEY — issued post-KYB via the merchant dashboard, see backend/README.md.
+      client-key: ${PPOB2_AYOLINX_CLIENT_KEY:}
+      # Shared secret for the HMAC-SHA512 API request signature (AyolinxSigner.signApiRequest).
+      client-secret: ${PPOB2_AYOLINX_CLIENT_SECRET:}
+      # PKCS8 PEM, our own RSA private key (generated via `openssl genpkey`) — signs the B2B token request.
+      private-key-pem: ${PPOB2_AYOLINX_PRIVATE_KEY_PEM:}
+      # X.509 PEM, Ayolinx's RSA public key — verifies inbound callback signatures.
+      public-key-pem: ${PPOB2_AYOLINX_PUBLIC_KEY_PEM:}
+      channel: ${PPOB2_AYOLINX_CHANNEL:BNC_QRIS}
+      # Registered in each Generate QRIS call's urlParams; must be this app's own reachable /internal/webhooks/ayolinx URL.
+      notification-url: ${PPOB2_AYOLINX_NOTIFICATION_URL:}
+      # See AyolinxPaymentGateway's Javadoc "Known unknowns" — genuinely undocumented, this is a best-effort default.
+      callback-route: ${PPOB2_AYOLINX_CALLBACK_ROUTE:/v1/qr/qr-mpm-notify}
+      timezone: ${PPOB2_AYOLINX_TIMEZONE:Asia/Jakarta}

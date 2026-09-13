@@ -4,26 +4,36 @@ import id.ppob2.sharedkernel.security.HmacSigner;
 import java.util.Map;
 import java.util.UUID;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 
 /**
- * Development-only stand-in for {@code AyolinxPaymentGateway} (Section 25.1). No Ayolinx
- * integration exists yet — there is no contract, sandbox credential, or signature secret to
- * build against. This generates a syntactically-fake QR payload (not a valid EMVCo QRIS string)
- * so {@code OrderApplicationService} and the Create Order slice can be exercised end-to-end.
- * Swapping this for a real {@code AyolinxPaymentGateway} bean requires no change to `order` or
- * `payment` beyond a Spring profile/bean selection — that decoupling is the point of Section
- * 25.1's interface.
+ * Development-only stand-in for {@code id.ppob2.payment.gateway.ayolinx.AyolinxPaymentGateway}
+ * (Section 25.1). Generates a syntactically-fake QR payload (not a valid EMVCo QRIS string) so
+ * {@code OrderApplicationService} and the Create Order slice can be exercised end-to-end without
+ * live Ayolinx credentials. Swapping this for the real gateway requires no change to `order` or
+ * `payment` beyond flipping {@code ppob2.payment.gateway} — that decoupling is the point of
+ * Section 25.1's interface.
  *
- * <p>{@code @Profile("!prod")} is a deliberate guard, not decoration: without it, this is the
- * only {@link PaymentGateway} bean in the context and would load in production exactly as
- * happily as in dev, silently issuing QR codes no customer can pay. Once a real gateway exists,
- * activate the {@code prod} profile there (or replace this guard with an explicit bean-selection
- * property) rather than removing it.
+ * <p>Two independent guards, deliberately not one:
+ * <ul>
+ *   <li>{@code @ConditionalOnProperty(havingValue = "stub")} — lets {@code
+ *       ppob2.payment.gateway=ayolinx} activate the real gateway in <em>any</em> environment
+ *       (including dev), not only one gated by Spring profile, so it can actually be booted and
+ *       exercised (and fail loudly on the HTTP call) before a `prod` flip.</li>
+ *   <li>{@code @Profile("!prod")} — deliberately kept, <strong>without</strong> {@code
+ *       matchIfMissing} on the property condition. If this were the only guard, an unconfigured
+ *       {@code prod} deployment (property absent for any reason — misconfiguration, a missed
+ *       env var) would fall through to loading this stub anyway, silently issuing QR codes no
+ *       customer can pay — exactly the failure mode this class exists to prevent. With both
+ *       guards, a `prod` boot with no working {@link PaymentGateway} bean fails to start
+ *       (no bean satisfies the {@code PaymentGateway} dependency) rather than silently degrading.</li>
+ * </ul>
  */
 @Component
 @Profile("!prod")
+@ConditionalOnProperty(name = "ppob2.payment.gateway", havingValue = "stub")
 public class StubQrisPaymentGateway implements PaymentGateway {
 
     private final String webhookSecret;

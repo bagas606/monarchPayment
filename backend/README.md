@@ -760,6 +760,107 @@ database — see that slice's notes.
     module's `domain` package") is still not built — this fix closes the module-level Gradle leak
     the same bullet named, not the separate package-level gap next to it.
 
+- **Real `AyolinxPaymentGateway`** (`payment/gateway/ayolinx`) replaces the invented placeholder
+  contract with one built against doc.ayolinx.id's actual public API reference (Generate/Query
+  QRIS, Access Token B2B, Cancel QRIS, Payment Notify) — the docs are public and readable without
+  registering; only the *credentials* to call the sandbox require merchant registration + KYB
+  (see the chat history / ask again if this needs re-explaining). Selected via
+  `ppob2.payment.gateway=ayolinx` (default `stub`) rather than a `prod` profile flip, so it can be
+  booted and exercised — including watching it fail at the actual HTTP call — in any environment.
+  - **`payment.pg_reference` is our own `orderNo`, not an Ayolinx-issued reference** — despite
+    Section 22.17's column comment calling it an "Ayolinx transaction ref." Generate QRIS's
+    response carries no Ayolinx-side reference at all (only `qrContent`/`partnerReferenceNo`/
+    `expiredDate`), and both Query QRIS and Cancel QRIS key on `originalPartnerReferenceNo` — i.e.
+    ours. See `AyolinxPaymentGateway`'s class Javadoc for the full reasoning.
+  - **Three distinct signing schemes**, none of which match `HmacSigner` (kept untouched — it's
+    HMAC-SHA256/hex/newline-delimited, shared by partner-facing Section 23.2 auth and the outbound
+    webhook sender): the B2B access token request is RSA-SHA256 over `clientKey|timestamp` signed
+    with our own private key; every other API call is HMAC-SHA512 over
+    `METHOD:PATH:ACCESS_TOKEN:SHA256(BODY):TIMESTAMP` keyed by `client_secret`; inbound callback
+    verification is RSA-SHA256 over `METHOD:ROUTE:SHA256(BODY):TIMESTAMP` verified against
+    Ayolinx's public key. All three live in the new (package-private) `AyolinxSigner`, tested with
+    known-answer/round-trip tests against a throwaway in-test RSA keypair — not a real credential.
+  - **`AyolinxCallbackPayload` was rewritten** to the real nested QRIS-notify shape
+    (`additionalInfo`/`amount` objects, `latestTransactionStatus` status codes `00`–`07`,
+    `originalPartnerReferenceNo`/`originalReferenceNo`, no event-id field at all) and annotated
+    `@JsonNaming(LowerCamelCaseStrategy)` — **without this override, the app's global
+    `spring.jackson.property-naming-strategy: SNAKE_CASE` (set for our own partner-facing JSON)
+    would make the shared `ObjectMapper` bean expect `original_partner_reference_no` instead of
+    Ayolinx's real `originalPartnerReferenceNo`, silently failing to bind every field.** Caught and
+    fixed before it shipped; same fix applied to the new `AyolinxWebhookController.NotifyResponse`
+    for the same reason (Ayolinx expects `responseCode`/`responseMessage`, not the global
+    `response_code`/`response_message`) — verified with a real curl round-trip, not just a test.
+  - **Dedup key changed from a nonexistent `event_id` to `originalReferenceNo + ":" +
+    latestTransactionStatus`.** Ayolinx's real callback body has no event-id field, and the same
+    transaction legitimately produces multiple callbacks across a status progression (`01`
+    Initiated → `02` Paying → `00` Success) — the old placeholder scheme (dedup by reference alone)
+    would have let the first non-terminal callback burn the dedup slot and caused the real `00`
+    terminal callback to be dropped as `DUPLICATE_IGNORED`, silently never marking the payment
+    paid. `PaymentCallbackServiceTest.statusProgressionCallbacksAreAllProcessedAndTheFinalSuccessIsNotDroppedAsADuplicate`
+    exercises exactly this sequence.
+  - **Two real bugs found and fixed while building this, neither caught by a passing test until
+    added deliberately**:
+    1. The bean-selection guard for `StubQrisPaymentGateway` was first changed from
+       `@Profile("!prod")` to `@ConditionalOnProperty(..., matchIfMissing = true)` alone, which
+       reintroduced exactly the hazard the original guard existed to prevent: an unconfigured
+       `prod` deployment (property absent for any reason) would silently fall through to loading
+       the stub and issuing QR codes no customer can pay, rather than failing to start. Fixed by
+       keeping **both** guards — `@Profile("!prod")` *and* `@ConditionalOnProperty(havingValue =
+       "stub")`, no `matchIfMissing` — so a `prod` boot with no working gateway now fails loudly
+       (no bean satisfies `PaymentGateway`) instead of degrading silently.
+    2. `POST /internal/webhooks/ayolinx` with a syntactically-invalid-JSON body (not just
+       Ayolinx-schema-invalid — actual garbage) returned a bare `500 INTERNAL_ERROR` instead of the
+       documented `400`/`401` + JSON body, because `webhookEventRecorder.record(...)` tried to
+       insert the raw non-JSON string into `webhook_event.payload`, a `json`-typed column, which
+       Postgres rejects with `PSQLException`. This mattered specifically *because* of the
+       always-return-a-body fix below: Ayolinx retries an unacknowledged/wrongly-shaped response up
+       to 4× over 1h, so a malformed body used to guarantee the worst possible outcome (unparseable
+       retries of something that can never succeed). Fixed with `PaymentCallbackService
+       .recordablePayload(...)`, which wraps non-JSON input as a JSON string literal before
+       recording it. Verified live: `curl -d 'not-json'` now returns `401` (no signature) with
+       `{"responseCode":"4015600","responseMessage":"Unauthorized"}`, and a validly-*signed* garbage
+       body returns `400`/`{"responseCode":"4005600","responseMessage":"Bad Request"}` — both
+       previously 500'd.
+  - **`refund()` stays `UnsupportedOperationException`, deliberately** — no refund endpoint exists
+    in the public docs found. `qr-mpm-cancel` ("Cancel QRIS") voids an *unpaid* QR, which is a
+    different operation from refunding a settled payment; mapping one onto the other would be a
+    silent semantic lie. Status `04 Refunded` exists in the callback's own status table, so the
+    mechanism exists on Ayolinx's side — just not as a documented callable endpoint.
+  - **Unverified-against-a-real-sandbox assumptions — check these first once real credentials
+    exist**, since none of them could be confirmed without one:
+    - `amount.value` is formatted as `"<whole rupiah>.00"` (SNAP-convention decimal string) —
+      `Money` itself is whole-Rupiah only (Section 21.1), so this is an assumption about Ayolinx's
+      side, not ours.
+    - The inbound callback signature's `ROUTE` component
+      (`ppob2.payment.ayolinx.callback-route`, defaulting to Ayolinx's documented QRIS notify path
+      `/v1/qr/qr-mpm-notify`) — neither "Callback description" nor the Payment Notify page state
+      whether Ayolinx signs against their own documented path or against *our* registered callback
+      URL's path when calling us.
+    - The `4xx/5xx` response codes this app sends back to Ayolinx on rejection
+      (`AyolinxWebhookController.responseCode`, e.g. `4015600`/`4005600`) are a placeholder
+      following the one worked example's shape (`2005600`/"Successful") — the real non-success
+      codes aren't published.
+    - The `00`/`01`/`02`/`03`/`04`/`05`/`06`/`07` status-code table (Success/Initiated/Paying/
+      Pending/Refunded/Canceled/Failed/Not found) came from a secondary "Callback description" doc
+      page, not the primary QRIS Payment Notify schema page itself.
+    - `X-EXTERNAL-ID` (documented "numeric, unique within the same day") uses the current epoch
+      millisecond — satisfies both constraints cheaply but wasn't validated against Ayolinx.
+    - `expiredDate` in Generate QRIS's response is documented only as "seconds timestamp," which
+      is ambiguous against every other ISO-with-offset timestamp field in the same API — rather
+      than guess a parse, this gateway echoes back the caller's own requested `expiresAt` instead
+      (same as the stub already did).
+  - Achievable without a sandbox credential, and done: known-answer signature tests
+    (`AyolinxSignerTest`), real-shaped-JSON deserialization against the app's actual SNAKE_CASE
+    global `ObjectMapper` config (`AyolinxCallbackPayloadTest`), the full callback service including
+    the status-progression dedup scenario (`PaymentCallbackServiceTest`), graceful-failure behavior
+    against an unreachable host (`AyolinxPaymentGatewayTest`), single-`PaymentGateway`-bean
+    resolution on boot in both `gateway=stub` (default) and `gateway=ayolinx` modes, and a full live
+    round-trip against real Postgres in stub mode (a real-shaped, correctly-signed SUCCESS callback
+    correctly marked a `PENDING` payment `SUCCESS`, posted exactly one `PAYMENT`/`CREDIT` ledger
+    entry, and a byte-identical resend was correctly ignored as a duplicate with no second row of
+    either kind). **Not achievable and not claimed: any actual round-trip against Ayolinx's sandbox**
+    — that needs the merchant registration + KYB step described above.
+
 Everything after that — the two remaining reconciliation types and the rest of Section 41's Admin
 Web surface — is unbuilt; those are candidates for the next slice. Every other module directory
 exists with a correct `build.gradle.kts` and dependency edges, but no domain code yet — that's
@@ -847,9 +948,12 @@ Known gaps to close before this is production-real:
 - **Nonce replay protection** (`NonceStore`) is in-memory. Section 19.1 designates Redis for
   this; an in-memory store does not protect against replay once there's more than one app
   instance.
-- **`StubQrisPaymentGateway`** (`payment` module) is a fake Ayolinx stand-in gated behind
-  `@Profile("!prod")` so it can never accidentally serve real traffic — but there is still no real
-  `AyolinxPaymentGateway`. No payment will ever actually settle until one is built.
+- **A real `AyolinxPaymentGateway` now exists** (see the narrative entry above) but has never
+  round-tripped against Ayolinx's actual sandbox — that needs merchant registration + KYB first
+  (no self-service credentials). Until that happens, `StubQrisPaymentGateway` (gated behind both
+  `@Profile("!prod")` and `ppob2.payment.gateway=stub`, the default) remains what actually runs in
+  every environment that's been exercised so far. No payment will actually settle against a real
+  bank until the real gateway is verified against real credentials.
 - **`metadata`** on `POST /orders` is accepted and silently dropped — Section 22.15's
   `parent_order` schema has no column for it, and no built feature reads it back. (`callback_url`
   *is* persisted and used — see the outbound webhook slice above; only `metadata` remains a gap.)
@@ -864,9 +968,12 @@ Known gaps to close before this is production-real:
   project-dependency graph already enforces it at the module level, which is the larger risk, but
   a package-level rule (e.g. "no `@Entity` outside a module's `domain` package") is still worth
   adding.
-- **`AyolinxCallbackPayload`'s shape and the `X-Ayolinx-Signature` scheme are invented**, same
-  class of gap as `secret_hash`: there is no real Ayolinx contract/sandbox doc to build against
-  yet. Both are flagged inline; treat them as placeholders to verify, not as truth.
+- **`AyolinxCallbackPayload`'s shape is now built against Ayolinx's real public API docs**, not
+  invented — see the narrative entry above for what changed and what's still genuinely unverified
+  (the callback signature's `ROUTE`, exact non-success response codes, etc.). The
+  `X-Ayolinx-Signature`/HMAC-SHA256 scheme remains `StubQrisPaymentGateway`-only, a local-testing
+  convenience (see "Running locally" below) — it is not part of the real `AyolinxPaymentGateway`,
+  which uses Ayolinx's actual RSA-SHA256 callback verification instead.
 - **The `STALE_TERMINAL_STATE` warning (Section 25.2's "flag for manual review") fires at most
   once per callback `event_id`.** A retried out-of-order callback with the *same* `event_id` takes
   the `DUPLICATE_IGNORED` path on retry instead, since the dedup row it wrote on its first arrival
@@ -922,15 +1029,31 @@ POST /api/v1/orders
 {"product_code":"MOBILE_LEGENDS","parent_amount":20000,"customer_reference":"GAMEID-123456"}
 ```
 
-then simulate Ayolinx confirming that payment — look up `payment.pg_reference` for the order you
-just created, sign the body with `dev-webhook-secret` (or `PPOB2_AYOLINX_WEBHOOK_SECRET` if you
-set one) the same way `HmacSigner` does, and call:
+then simulate Ayolinx confirming that payment (this exercises `PaymentCallbackService` against
+`StubQrisPaymentGateway`'s local-testing signature scheme — the default in every environment that's
+been exercised so far; it is not the real `AyolinxPaymentGateway`'s RSA scheme, see above) — look
+up `payment.pg_reference` for the order you just created (with the real gateway this equals the
+order's own `order_no`; with the stub it's a synthetic `STUB-<uuid>`), sign the body with
+`dev-webhook-secret` (or `PPOB2_AYOLINX_WEBHOOK_SECRET` if you set one) the same way `HmacSigner`
+does, and call — note the real (nested, camelCase) Ayolinx notify shape, not the old flat one:
 
 ```
 POST /internal/webhooks/ayolinx
 X-Ayolinx-Signature: <hex HMAC-SHA256(secret, raw body)>
-{"event_id":"evt-1","pg_reference":"<from the payment row>","status":"SUCCESS","paid_at":"2026-09-12T03:15:00Z"}
+{
+  "callbackType": "QRIS",
+  "additionalInfo": {"channel": "BNC_QRIS"},
+  "amount": {"currency": "IDR", "value": "20000.00"},
+  "latestTransactionStatus": "00",
+  "originalPartnerReferenceNo": "<payment.pg_reference from the row above>",
+  "originalReferenceNo": "AYO-TEST-REF-1",
+  "finishedTime": "2026-09-12T03:15:00+00:00"
+}
 ```
+
+The response body is `{"responseCode":"2005600","responseMessage":"Successful"}` on success (or a
+`4xx` + JSON body on rejection) — Ayolinx requires a JSON body on every response, not just a status
+code, and retries an unacknowledged one up to 4× over 1h.
 
 The order should move to `PAID`, then — since no decomposition pattern is seeded yet — on to
 `REFUND_PENDING` (BR-DEC exhaustion). To see it reach `DECOMPOSITION_SELECTED` instead, seed a

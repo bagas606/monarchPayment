@@ -65,7 +65,7 @@ public class PaymentCallbackService {
         boolean signatureValid = paymentGateway.verifyCallbackSignature(rawBody, headers);
 
         if (!signatureValid) {
-            webhookEventRecorder.record(WebhookDirection.INBOUND, SOURCE, "CALLBACK", rawBody, "FAILED", null);
+            webhookEventRecorder.record(WebhookDirection.INBOUND, SOURCE, "CALLBACK", recordablePayload(rawBody), "FAILED", null);
             return PaymentCallbackOutcome.SIGNATURE_INVALID;
         }
 
@@ -73,11 +73,11 @@ public class PaymentCallbackService {
         try {
             payload = objectMapper.readValue(rawBody, AyolinxCallbackPayload.class);
         } catch (Exception e) {
-            webhookEventRecorder.record(WebhookDirection.INBOUND, SOURCE, "CALLBACK", rawBody, "FAILED", null);
+            webhookEventRecorder.record(WebhookDirection.INBOUND, SOURCE, "CALLBACK", recordablePayload(rawBody), "FAILED", null);
             return PaymentCallbackOutcome.MALFORMED;
         }
 
-        webhookEventRecorder.record(WebhookDirection.INBOUND, SOURCE, "CALLBACK", rawBody, "RECEIVED", payload.eventId());
+        webhookEventRecorder.record(WebhookDirection.INBOUND, SOURCE, "CALLBACK", rawBody, "RECEIVED", payload.dedupKey());
 
         Optional<Payment> maybePayment = paymentRepository.findByPgReference(payload.pgReference());
         if (maybePayment.isEmpty()) {
@@ -86,7 +86,7 @@ public class PaymentCallbackService {
         }
         Payment payment = maybePayment.get();
 
-        boolean isNewEvent = paymentEventDeduplicator.recordIfNew(payment.getId(), "CALLBACK_RECEIVED", rawBody, payload.eventId());
+        boolean isNewEvent = paymentEventDeduplicator.recordIfNew(payment.getId(), "CALLBACK_RECEIVED", rawBody, payload.dedupKey());
         if (!isNewEvent) {
             // Section 48.5: the unique constraint on dedup_key IS the idempotency mechanism.
             return PaymentCallbackOutcome.DUPLICATE_IGNORED;
@@ -120,7 +120,40 @@ public class PaymentCallbackService {
             return PaymentCallbackOutcome.PROCESSED;
         }
 
-        log.warn("Unrecognized Ayolinx callback status '{}' for pg_reference={}", payload.status(), payload.pgReference());
+        if (payload.isCancelled()) {
+            log.warn("Ayolinx CANCELED callback for pg_reference={} — no order-state-machine transition built for this yet", payload.pgReference());
+            return PaymentCallbackOutcome.PROCESSED;
+        }
+
+        if (payload.isNonTerminal()) {
+            // 01 Initiated / 02 Paying / 03 Pending / 07 Not found — expected mid-flow callbacks,
+            // logged for traceability (via webhookEventRecorder above) but nothing to react to yet.
+            log.debug("Ayolinx non-terminal status '{}' for pg_reference={}", payload.latestTransactionStatus(), payload.pgReference());
+            return PaymentCallbackOutcome.PROCESSED;
+        }
+
+        log.warn("Unrecognized Ayolinx callback status '{}' for pg_reference={}", payload.latestTransactionStatus(), payload.pgReference());
         return PaymentCallbackOutcome.PROCESSED;
+    }
+
+    /**
+     * {@code webhook_event.payload} is a {@code json} column — an arbitrary, possibly not
+     * even syntactically-valid-JSON {@code rawBody} (a caller sending garbage, or a stray plain-
+     * text body) fails that column's own validation and throws a {@code PSQLException} the moment
+     * this tries to record the very "this callback was rejected" audit row it exists to write.
+     * Wrapping non-JSON input as a JSON string literal keeps the exact bytes recoverable while
+     * guaranteeing the insert succeeds regardless of what was sent.
+     */
+    private String recordablePayload(String rawBody) {
+        try {
+            objectMapper.readTree(rawBody);
+            return rawBody;
+        } catch (Exception e) {
+            try {
+                return objectMapper.writeValueAsString(rawBody);
+            } catch (Exception unwritable) {
+                return "\"<unrecordable payload>\"";
+            }
+        }
     }
 }
