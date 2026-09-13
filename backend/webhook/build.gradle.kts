@@ -1,6 +1,6 @@
 dependencies {
-    api(project(":shared-kernel"))
-    api(project(":audit"))
+    implementation(project(":shared-kernel"))
+    implementation(project(":audit"))
     api("org.springframework.boot:spring-boot-starter-data-jpa")
     implementation("org.springframework.boot:spring-boot-starter-webflux")
 }

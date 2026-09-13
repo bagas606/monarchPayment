@@ -729,6 +729,37 @@ database — see that slice's notes.
       didn't need to reach: child not `FAILED`, parent not `PARTIAL_FAILED`, `resetForRetry` losing
       a race, and the unresolvable-SKU/no-active-price dispatch path.
 
+- **Gradle `api(...)` → `implementation(...)` for every inter-module project dependency** — closes
+  the gap flagged since the fulfillment slice: `api(project(...))` re-exports a dependency's
+  classes to every *transitive* consumer, silently permitting compile-time access beyond what
+  Section 20.2's graph actually grants (e.g. `order` could already compile against `catalog`
+  classes it has no documented edge to, because `decomposition` re-exposed them via `api`).
+  Converted every `project(...)` dependency across all 16 non-`app` modules (`app` itself already
+  used `implementation` throughout) in one pass, then verified empirically rather than reasoning it
+  through by hand: `./gradlew clean compileJava compileTestJava` succeeded with zero errors on the
+  first try, and the full test suite plus an app boot + a real API call afterward all still passed.
+  A clean compile was the actual test of the hypothesis, not a hand-checked survey of which public
+  signatures leak which types — "does the multi-module build still compile" is the only thing that
+  actually determines whether an `api` edge is load-bearing, and the empirical answer here was that
+  none of them were: this codebase's few genuine cross-module type leaks (e.g. `ChildOrderService
+  .createForPattern` taking `decomposition`'s `PatternComponentDto`) are only ever called by code
+  *inside the same module*, never by an external consumer relying on the transitive re-export.
+  - Left external-library `api(...)` declarations (`spring-boot-starter-data-jpa`, etc.) untouched
+    — Section 20.2's graph governs module-to-module edges, not third-party library visibility, and
+    those weren't part of the flagged gap.
+  - Several edges turned out to be entirely unused end to end, not merely over-visible: e.g.
+    `order -> channel`, `order -> partner`, `order -> ledger`, `order -> audit`, `payment ->
+    configuration`, `provider -> audit`, `reconciliation`'s edges to `ledger`/`settlement`/
+    `payment`/`provider`, `routing -> provider`/`configuration`, `webhook -> audit`, `fulfillment ->
+    audit`, and `configuration -> audit` — none referenced anywhere in that module's main or test
+    source. Left declared (now as `implementation`, harmless either way) rather than removed: these
+    match Section 20.2's *permitted* graph even where nothing has needed them yet, and a future
+    slice using one is a one-line change, not evidence the current declaration was wrong. Worth
+    revisiting if this list grows rather than shrinks.
+  - The already-flagged ArchUnit check (package-level enforcement, e.g. "no `@Entity` outside a
+    module's `domain` package") is still not built — this fix closes the module-level Gradle leak
+    the same bullet named, not the separate package-level gap next to it.
+
 Everything after that — the two remaining reconciliation types and the rest of Section 41's Admin
 Web surface — is unbuilt; those are candidates for the next slice. Every other module directory
 exists with a correct `build.gradle.kts` and dependency edges, but no domain code yet — that's
@@ -805,22 +836,9 @@ Known gaps to close before this is production-real:
 - **No distributed lock per `child_order_id`** (Section 34.1) — the `provider_transaction`
   unique constraint is the only guard against concurrent duplicate dispatch (no Redis in this
   codebase, same simplification already made for nonce storage and routing's candidate cache).
-- **No Admin Web retry/compensation action** (Section 34.1) exists to return a `PARTIAL_FAILED`/
-  `FAILED` child order to `PENDING` for an authorized re-dispatch. The idempotency-key scheme
-  supports it (see above), but nothing in this codebase exercises that path against real Postgres
-  yet — only the unit test does.
 - **Sequential dispatch only** — Section 34.1's default ("sequential-per-provider, parallel-
   across-providers") isn't implemented; `FulfillmentExecutionService` dispatches every child order
   for a parent one at a time regardless of provider.
-- **Some modules declare Gradle dependencies with `api(...)` instead of `implementation(...)`**
-  (e.g. `decomposition`, `order`), which leaks transitive compile access beyond what Section 20.2's
-  graph actually grants — `order` can technically already compile against `catalog` classes today
-  because `decomposition` re-exposes them via `api`. This slice deliberately did NOT take advantage
-  of that leak (the `provider_id` resolution happens in `app`, per Section 20.2, not in `order` or
-  `fulfillment` even though the build would allow it) — but nothing *enforces* that discipline
-  besides code review. Worth fixing the `api`/`implementation` split and adding the already-flagged
-  ArchUnit check together.
-
 - **`api_client.secret_hash`** (Section 22.3) is documented as a one-way hash, but HMAC
   verification requires the server to reproduce the client's MAC, which a one-way hash can't do.
   `HmacAuthenticationFilter` currently treats the stored value as the verification secret
@@ -854,12 +872,18 @@ Known gaps to close before this is production-real:
   the `DUPLICATE_IGNORED` path on retry instead, since the dedup row it wrote on its first arrival
   is now real. With no `reconciliation` module yet, that one log line is the only trace of a stale
   callback — plan for that when building `reconciliation`, don't assume the warning is durable.
-- **`webhookEventRecorder.record(...)` writes inside the same transaction as the rest of
-  `PaymentCallbackService.processCallback`.** It's meant to be an unconditional receipt log
-  (Section 22.24 has no FK to `payment`, specifically so it can record what a normal
-  `payment_event` can't), but a rollback anywhere later in that transaction would erase it too.
-  Low risk now that the dedup path can't throw, but worth knowing if another failure mode is added
-  to that method later.
+- **`webhookEventRecorder.record(...)` joining `PaymentCallbackService.processCallback`'s own
+  transaction is deliberate, not a gap** — checked while investigating whether to reuse the
+  `recordIndependently()`/`REQUIRES_NEW` fix built for the *outbound* webhook path here too.
+  `record()`'s own Javadoc explicitly documents joining as correct for this inbound path: rolling
+  the receipt log back together with a failed `payment.markSuccess`/ledger-post is the wanted
+  behavior, not a bug, because those two writes must commit atomically (Section 22.24 has no FK to
+  `payment` specifically so it *can* record callbacks that never resolve to a payment at all — but
+  once one does resolve, its receipt shouldn't outlive a rollback of the processing it describes).
+  Switching this call site to `recordIndependently()` would decouple the receipt row from
+  `payment_event.dedup_key`'s own rollback, risking a *duplicate* `RECEIVED` row on a later retry
+  of the same event — worse, not better. Left as-is; this entry replaces an earlier, vaguer version
+  of this note that read as an open gap when the code already had a considered answer.
 
 ## Running locally
 
