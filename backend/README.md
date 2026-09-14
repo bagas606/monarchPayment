@@ -1181,6 +1181,53 @@ database — see that slice's notes.
   test case's expected result exactly. `TC-BE-033/034` (settlement allocation) was already covered
   by `SettlementAllocationServiceTest` plus the real-Postgres run documented above.
 
+- **PRD Section 54 (`TC-ADM-*`) Admin Web test matrix, run for real** — this codebase has no
+  browser-based Admin Web (Section 54's own "Method" column names Playwright/Cypress; none exists
+  here), so "Admin Web" in practice is real HTTP Basic Auth against the actual `/admin/**` REST
+  endpoints and RBAC (`SecurityConfig.adminFilterChain`, Section 42's permission model) — the same
+  adaptation this README's own "Running locally" section already documents for exercising Admin Web
+  manually. Seeded four throwaway `admin_user` rows (`e2e_viewer`/VIEWER, `e2e_ops`/OPERATIONS,
+  `e2e_finance`/FINANCE, `e2e_suspended`/SUSPENDED, plus rotating the existing `e2e_admin`'s
+  password) via `pgcrypto`'s `crypt()`, same technique and same "never committed" discipline this
+  README already documents elsewhere for admin seeding — against real data (`reconciliation` id 1,
+  `settlement` id 1 from earlier in this session):
+
+  | Test Case | Result |
+  |---|---|
+  | TC-ADM-001 — login, valid credentials | `200` on an authorized admin call |
+  | TC-ADM-002 — login, invalid credentials | `401` — rejected correctly, **but see gap below** |
+  | TC-ADM-003 — RBAC: VIEWER attempts a mutating action | `403 PERMISSION_DENIED`, blocked |
+  | TC-ADM-004 — RBAC: FINANCE accesses reconciliation module | `200`, granted per the seeded permission matrix |
+  | TC-ADM-005 — permission: user without `retry:execute` attempts retry | `403 PERMISSION_DENIED` — blocked correctly, **but see gap below** |
+  | TC-ADM-012 — retry authorization: user *with* `retry:execute` | Permission granted, request reaches business logic (`404` for a nonexistent child order id — proves the AOP proxy let it through, not a stub) |
+  | TC-ADM-013 — audit log completeness | Exactly 1 new `audit_log` row per successful mutation (`RECONCILIATION_INVESTIGATE`, `RECONCILIATION_RESOLVE`), correct `actor_id` per acting admin, zero rows for the denied/not-found attempts above |
+  | TC-ADM-014 — settlement display | `200`, real per-partner allocation breakdown returned (gross/fee/net/reconciling total) — see gap below for what this doesn't cover |
+  | TC-ADM-015 — reconciliation handling | Full `OPEN → INVESTIGATING → RESOLVED` lifecycle driven for real on `reconciliation` id 1, `resolved_by` correctly recorded as the resolving admin's id |
+
+  **Two real gaps found, not fixed in this pass** (same "tested for real, found a real spec-vs-code
+  gap" pattern as `TC-BE-011`):
+  - **`TC-ADM-002`/`TC-ADM-005`'s "…audit-logged" half is not implemented.** Both test cases
+    explicitly expect a *denied* attempt to still produce an audit trail ("failure audit-logged" /
+    "audit-logged as denied attempt"), but `AdminReconciliationController`/`AdminFulfillmentController`
+    only call `AuditService.recordAdminAction` on success, and a `@PreAuthorize` denial or a Basic
+    Auth failure never reaches the controller body at all — there is no
+    `AuthenticationEventPublisher`/failed-login listener and no catch-path for a denied permission
+    check wired to `AuditService` anywhere in this codebase. `audit_log` confirms it: zero rows for
+    either the invalid-login or the permission-denied attempts above.
+  - **`TC-ADM-012`'s "…+ reason text" half is not implemented.** `AdminFulfillmentController.retry`
+    takes no reason/justification parameter at all — only `@PreAuthorize("hasAuthority('retry:execute')")`
+    is enforced, not the reason-text requirement this row also specifies.
+
+  **Six test cases have no corresponding implementation to test at all** — `TC-ADM-006`
+  (transaction search), `TC-ADM-007` (parent-child drilldown), `TC-ADM-008` (pricing update),
+  `TC-ADM-009` (configuration update), `TC-ADM-010` (pattern viewing), `TC-ADM-011` (generation
+  activation). None of these have a controller anywhere in `app/src/main/java/id/ppob2/app/web` —
+  confirmed by listing every `@RestController` in the module, not just their absence from what's
+  wired behind `/admin/**`. `TC-ADM-014`'s literal wording ("Expected vs actual vs fee … for a given
+  settlement_date") is also only partially covered: the endpoint that exists shows the per-partner
+  allocation breakdown (`Section 37.3`/`41.8`, added earlier this session), not a settlement-level
+  expected/actual/fee view — there is no `GET` for the raw `settlement` row's own fields.
+
 - **Webhook Retry Sweep** (Section 23.8 / 40.4) closes the gap this README used to flag as "no
   delivery/retry machinery, no persisted delivery-attempt-count, and no scheduled re-driver" —
   `OutboundWebhookOrchestrator.sendOrderStatusChanged` still makes one synchronous attempt (most

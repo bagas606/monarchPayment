@@ -2465,6 +2465,25 @@ Response:
 | TC-ADM-014 | Settlement display | Expected vs actual vs fee shown accurately for a given settlement_date |
 | TC-ADM-015 | Reconciliation handling | Discrepancy can be moved OPEN → INVESTIGATING → RESOLVED with resolver recorded |
 
+### 54.1 Verification Log (2026-09-14)
+
+No browser-based Admin Web exists in this codebase (this section's own "Method" column names
+Playwright/Cypress) — "Admin Web" here means real HTTP Basic Auth against the actual `/admin/**`
+REST endpoints and Section 42's RBAC. `TC-ADM-001`–`TC-ADM-005`, `TC-ADM-012`, `TC-ADM-013`, `TC-ADM-015`
+were all run for real this way (four throwaway `admin_user` rows seeded across VIEWER/OPERATIONS/
+FINANCE/SUSPENDED) and matched their expected result, with two exceptions: `TC-ADM-002` and
+`TC-ADM-005` both specify that a *denied* attempt should still be audit-logged, but neither
+`AdminReconciliationController`/`AdminFulfillmentController` nor Spring Security's authentication
+failure path calls `AuditService` on a rejection — confirmed via `audit_log`: zero rows for either
+the invalid-login or the permission-denied attempts tested. `TC-ADM-012`'s "reason text" requirement
+is also unimplemented — `AdminFulfillmentController.retry` takes no such parameter. `TC-ADM-014`
+was only partially exercised: the endpoint that exists shows the per-partner allocation breakdown
+(Section 37.3/41.8), not a settlement-level expected/actual/fee view (no `GET` on the raw
+`settlement` row exists). `TC-ADM-006`–`TC-ADM-011` have no corresponding implementation anywhere in
+`app`'s web layer to test — transaction search, parent-child drilldown, pricing update, configuration
+update, pattern viewing, and generation activation are all unbuilt. See `backend/README.md` for the
+full result table and reasoning.
+
 ---
 
 ## 55. Performance Testing
@@ -2694,6 +2713,7 @@ The RTM links Business Requirement → Functional Requirement → Module → API
 | Payment downtime (Ayolinx) | Low-Medium | High | Circuit breaker, clear customer-facing error, alerting | Engineering/Ops | PG error rate, `PG_UNAVAILABLE` frequency |
 | Duplicate callbacks | Medium | Low (if handled) / High (if not) | Idempotency via `dedup_key`, thoroughly tested (TC-BE-010) | Engineering | Duplicate-callback rejection count (should be non-zero and handled, not absent) |
 | Stale/replayed callback with a valid signature accepted (no timestamp window) | Low (was Medium — mitigated 2026-09-14) | Low — closed by a Section 23.2-style timestamp-window check (`AyolinxPaymentGateway.CALLBACK_TIMESTAMP_WINDOW`, 1 hour, matching Ayolinx's documented callback-redelivery period) added to `verifyCallbackSignature`; re-verified against the exact attack that originally exposed this (TC-BE-011, confirmed rejected 2026-09-14) | Timestamp-window check implemented and tested; residual risk is the 1-hour window itself being wider than ideal (chosen to tolerate Ayolinx's own legitimate retries, per doc.ayolinx.id/api-299374923) | Engineering | Age distribution of accepted callbacks' `X-TIMESTAMP` vs `received_at` (should now cluster near zero, occasionally up to ~1h on a genuine PG retry) |
+| Denied/failed Admin Web actions leave no audit trail | Medium (undermines Section 43's "every action recorded" intent specifically for the security-relevant cases — failed logins, permission-denied attempts) | Medium — confirmed 2026-09-14 (TC-ADM-002/005): `audit_log` has zero rows for either an invalid-login or a permission-denied `retry`/`reconciliation` attempt; `AuditService.recordAdminAction` is only ever called on the success path in `AdminReconciliationController`/`AdminFulfillmentController`, and no `AuthenticationEventPublisher`/access-denied listener exists to cover the rejection paths | Not yet implemented — needs a failed-authentication listener and an `AccessDeniedException`/`AuthorizationDeniedException` handler that both call `AuditService` with the attempted (not necessarily resolvable) actor and action, distinct from today's success-only recording | Engineering/Security | Count of `401`/`403` responses on `/admin/**` vs corresponding `audit_log` rows (should trend to 1:1; currently 0 for the denied side) |
 | Duplicate fulfillment | Low (if idempotency holds) | High | Idempotency key + distributed lock (Section 34.1) | Engineering | `provider_transaction` idempotency constraint violations (should trend to zero exceptions, all caught) |
 | Partial failure (parent stuck) | Medium | Medium | Explicit `PARTIAL_FAILED` state, Ops runbook, alerting | Engineering/Ops | Count of orders in `PARTIAL_FAILED` beyond SLA |
 | Reconciliation mismatch | Medium | Medium-High | Daily reconciliation batch, discrepancy workflow | Finance/Reconciliation | Open discrepancy count/age |
