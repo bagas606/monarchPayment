@@ -161,7 +161,7 @@ No PPOB1-specific business logic may be hard-coded into the core in a way that w
 
 | ID | Assumption | Verification Needed |
 |---|---|---|
-| AS-01 | Payment Gateway = Ayolinx; Payment Method = QRIS Dynamic; Acquirer = Bank Neo Commerce | Yes — contract |
+| AS-01 | Payment Gateway = Ayolinx; Payment Method = QRIS Dynamic; Acquirer = Bank Neo Commerce | **Confirmed 2026-09-14** against Ayolinx's sandbox: a real `POST /api/v1/orders` call returned a genuine EMV/QRIS payload carrying `ID.CO.BANKNEOCOMMERCE.WWW` acquirer data — the PG/acquirer identity is no longer an assumption. Commercial terms (MDR, settlement schedule) are separate and still unconfirmed. |
 | AS-02 | QRIS nominal maximum = Rp10,000,000 per transaction | Yes — regulation may change |
 | AS-03 | Initial traffic ≈ 4,000 transactions/day | Yes — actual PPOB1 volume |
 | AS-04 | Supported parent amounts ≈ 118 amounts (from tiered step configuration, Section 21) | Derived, configurable |

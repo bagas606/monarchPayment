@@ -1007,8 +1007,51 @@ database — see that slice's notes.
     round-trip against real Postgres in stub mode (a real-shaped, correctly-signed SUCCESS callback
     correctly marked a `PENDING` payment `SUCCESS`, posted exactly one `PAYMENT`/`CREDIT` ledger
     entry, and a byte-identical resend was correctly ignored as a duplicate with no second row of
-    either kind). **Not achievable and not claimed: any actual round-trip against Ayolinx's sandbox**
-    — that needs the merchant registration + KYB step described above.
+    either kind). At the time this slice shipped: **not achievable and not claimed: any actual
+    round-trip against Ayolinx's sandbox** — merchant registration was assumed to require KYB.
+    **Superseded below** — sandbox registration turned out to be plain self-service signup, no KYB
+    gate, and the real round-trip has since been done.
+
+- **Real sandbox round-trip against `sandbox.ayolinx.id` — the "not achievable without KYB" gap
+  above is closed.** Merchant sandbox registration at `merchant.ayolinx.id` needed no KYB at all —
+  self-service signup straight into a "Demo Mode" account, immediately capable of registering
+  integration material. This produced the first genuine end-to-end confirmation of the whole
+  outbound path built blind from public docs above.
+  - **Ayolinx's onboarding flow itself confirms the three-signing-scheme design was read
+    correctly**: the portal's "Integration Material" form asks the merchant to submit their own
+    RSA public key (pasted as `-----BEGIN PUBLIC KEY-----` PEM — generated locally via `openssl
+    genpkey`/`openssl rsa -pubout`, private key never leaving the local machine), and in exchange
+    auto-issues a `Customer No` (`28798` in this run) and Ayolinx's own RSA public key (for
+    verifying inbound callbacks) — independently matching `AyolinxSigner`'s already-built
+    `signAccessTokenRequest` (signed with the merchant's own private key) and `verifyCallback`
+    (verified against Ayolinx's public key) without either side having been designed by looking at
+    the other.
+  - **`client-key`/`client-secret` come from a separate "API Key Sandbox" panel**, revealed only
+    after an emailed-OTP step (`SCf7598...`/`SS4d6cb...`-shaped values in this run) — these feed
+    `AyolinxTokenService`'s `client-key` and `AyolinxSigner.signApiRequest`'s HMAC-SHA512 key,
+    confirming that scheme's shape too, distinct from the RSA-keyed token request.
+  - **`POST /api/v1/orders` (Section 23.4), with `ppob2.payment.gateway=ayolinx` and all five
+    `ppob2.payment.ayolinx.*` credential properties pointed at the real sandbox, produced `201
+    CREATED`** with a `qr_payload` that decodes as a genuine EMV/QRIS string carrying real BNC
+    acquirer data (`ID.CO.BANKNEOCOMMERCE.WWW`, merchant name, city, the exact requested
+    `parent_amount`) — not the stub's synthetic payload. Zero `WARN`/`ERROR` log lines across the
+    whole call: the RSA-SHA256 B2B token request and the HMAC-SHA512 `qr-mpm-generate` request both
+    succeeded on the first attempt against a freshly-registered sandbox identity. `payment.pg_reference`
+    persisted as our own `orderNo`, confirming the "no Ayolinx-side reference in the response" reading
+    of the docs (see the reference-identity note above) against a real response, not just the docs.
+  - **Inbound callback path registered but not yet round-tripped.** The QRIS channel's `Callback
+    URL` was set (via the portal's per-channel-product configuration under "Payment Channel" /
+    "Integrations") to this app's `/internal/webhooks/ayolinx`, tunneled to the public internet via
+    a `cloudflared` quick tunnel and confirmed reachable (`/actuator/health` returned `200` through
+    the tunnel). No real payment was made against the issued QR in this run, so the callback's
+    `ROUTE` signing component, the real non-success `responseCode` values, and the full `00`–`07`
+    status table remain the same "documented but unconfirmed" state flagged above — only the
+    *outbound* Generate QRIS leg has a real, confirmed round-trip so far.
+  - **Credential handling**: the RSA keypair was generated locally and only the public half was
+    ever transmitted anywhere (to the Ayolinx portal, itself not a secret by definition); the
+    `client-key`/`client-secret` and the generated private key were placed directly into local
+    process environment variables for this run, never committed to the repository or written
+    anywhere under version control.
 
 - **Webhook Retry Sweep** (Section 23.8 / 40.4) closes the gap this README used to flag as "no
   delivery/retry machinery, no persisted delivery-attempt-count, and no scheduled re-driver" —

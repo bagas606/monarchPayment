@@ -25,9 +25,14 @@ import org.springframework.web.reactive.function.client.WebClientResponseExcepti
 
 /**
  * Real integration against doc.ayolinx.id's public QRIS API (Generate/Query/Cancel QRIS,
- * Access Token B2B — see backend/README.md for the endpoints consulted). Built entirely from
- * that public documentation; there is no sandbox credential to round-trip it against yet (that
- * requires merchant registration + KYB — see README). Activated by setting
+ * Access Token B2B — see backend/README.md for the endpoints consulted). Originally built entirely
+ * from that public documentation with no sandbox credential to round-trip it against — sandbox
+ * merchant registration turned out to need no KYB at all (self-service signup at
+ * merchant.ayolinx.id), and {@code createDynamicQris} has since been confirmed against the real
+ * sandbox: a genuine EMV/QRIS payload carrying real BNC acquirer data came back for a real
+ * {@code POST /api/v1/orders} call, with zero warnings across the RSA-signed token request and the
+ * HMAC-SHA512-signed generate-QR request (see README's "Real sandbox round-trip" entry). The
+ * inbound callback path is registered but not yet round-tripped by a real payment. Activated by setting
  * {@code ppob2.payment.gateway=ayolinx}; the default stays {@link
  * id.ppob2.payment.gateway.StubQrisPaymentGateway} ({@code stub}, dev default) — a
  * {@code @Profile} guard was deliberately replaced with this property so the real gateway can
