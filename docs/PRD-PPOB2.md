@@ -19,6 +19,7 @@
 | Version | Date | Author | Description |
 |---|---|---|---|
 | 0.1 | 2026-09-12 | Combined authoring roles | Initial full-draft PRD generated from Master Prompt |
+| 0.2 | 2026-09-14 | Combined authoring roles | Added per-partner settlement allocation (BR-REC-002, FR-REC-004, Section 22.28, 37.3, 41.8, Risk Register, EPIC-06.4) — closes a gap identified when the platform's downstream reseller topology grew beyond a single partner (PPOB1) to include externally-owned reseller entities requiring their own attributable settlement figures |
 
 ### 1.2 How to Read This Document
 
@@ -321,6 +322,7 @@ Functional Requirements are grouped and IDed by domain, each traceable to Busine
 - **FR-REC-001**: System shall record Order Ledger, Payment Ledger, Provider/Fulfillment Ledger, and Settlement Ledger as separate, append-only ledgers.
 - **FR-REC-002**: System shall support reconciliation across: Payment vs PG, Payment vs Settlement, Order vs Fulfillment, Provider purchase vs Provider report, Expected vs Actual margin.
 - **FR-REC-003**: System shall record and expose reconciliation discrepancies for operational resolution via Admin Web.
+- **FR-REC-004**: System shall attribute each ingested settlement to the partner(s) whose payments it covers, per Section 37.3, and expose the resulting per-partner breakdown via Admin Web (Section 41.8). This is an allocation/attribution record only — it does NOT constitute or trigger a payout to the partner (Section 37.3 scope note).
 
 ### 15.10 Admin / Backoffice (FR-ADM)
 
@@ -400,6 +402,7 @@ Business rules use the ID scheme from Section 67 of the master prompt (`BR-ORD`,
 ### 17.7 Reconciliation (BR-REC)
 
 - **BR-REC-001**: All five reconciliation types (Section 39) MUST be supported and discrepancies MUST be tracked to resolution.
+- **BR-REC-002**: Where a settlement covers payments from more than one `partner`, the settled amount MUST be attributable back to each contributing partner (Section 37.3). The sum of all partner allocations for a settlement MUST equal `settlement.actual_amount` exactly (and, separately, allocated fees MUST sum to `settlement.fee_amount` exactly) — an allocation computation that cannot satisfy this invariant MUST be rejected, never silently rounded away. Which party bears the MDR per partner is a commercial term and **must be verified against each partner's contract** before this is treated as a fixed rule.
 
 ### 17.8 Admin (BR-ADM)
 
@@ -1058,6 +1061,25 @@ Index: `configuration_key_uk`.
 
 Index: `audit_log_actor_idx`, `audit_log_target_idx`, `audit_log_occurred_idx`. **Append-only.**
 
+### 22.28 `settlement_partner_allocation`
+
+Records how one `settlement` (Section 22.22, always platform-aggregate — Ayolinx settles one figure per date, with no partner awareness) is attributed back across the partner(s) whose payments contributed to it. This is a computed **allocation** record, not a payout instruction — see Section 37.3 for the distinction and the full attribution methodology.
+
+| Column | Type | Constraint | Purpose |
+|---|---|---|---|
+| id | BIGINT | PK | Surrogate key |
+| settlement_id | BIGINT | FK → settlement.id NOT NULL | Parent settlement batch |
+| partner_id | BIGINT | FK → partner.id NOT NULL | Attributed partner |
+| gross_amount | NUMERIC(18,0) | NOT NULL | This partner's share of `settlement.actual_amount` |
+| fee_allocated | NUMERIC(18,0) | NOT NULL | This partner's share of `settlement.fee_amount` |
+| net_amount | NUMERIC(18,0) | NOT NULL | `gross_amount - fee_allocated` (defense-in-depth: stored, not solely derived — see Section 37.3's reconciliation-invariant discussion for why a stored, checked value is preferred over a value trusted to always be recomputed identically) |
+| allocation_method | VARCHAR(16) | NOT NULL | `EXACT` (per-transaction settlement lines available) or `PRO_RATA` (batch-total only, apportioned by each partner's share of `expected_amount`) — Section 37.3 |
+| computed_at | TIMESTAMPTZ | NOT NULL DEFAULT now() | When this allocation was computed |
+
+Index: `settlement_partner_allocation_settlement_idx` on `settlement_id`; `UNIQUE(settlement_id, partner_id)` (`settlement_partner_allocation_uk`) — at most one allocation row per partner per settlement, re-computation replaces rather than duplicates.
+
+Invariant (enforced at write time by `SettlementAllocationService`, not by a DB constraint alone, since it is a cross-row sum rather than a single-row check): for a given `settlement_id`, `SUM(gross_amount) = settlement.actual_amount` and `SUM(fee_allocated) = settlement.fee_amount`, exactly — see BR-REC-002.
+
 ---
 
 ## 23. Open API (PPOB1 / Partner → PPOB2)
@@ -1606,6 +1628,23 @@ Ayolinx settles collected QRIS funds to PPOB2's bank account on a contractual sc
 
 Per Section 22.22 schema: `settlement_date`, `pg_reference`, `expected_amount`, `actual_amount`, `fee_amount`, `status` (`PENDING`/`MATCHED`/`DISCREPANCY`). A `DISCREPANCY` status automatically opens a linked `reconciliation` record (`recon_type = PAYMENT_VS_SETTLEMENT`) for Finance/Reconciliation team resolution via Admin Web (Section 40.8).
 
+### 37.3 Per-Partner Settlement Allocation
+
+**Why this exists**: Section 22.2/22.3 already model multiple `partner` rows (PPOB1, and any additional reseller onboarded per Section 18/24 — including reseller entities that are separately-owned businesses, not just sub-accounts of one owner). Section 37.1's settlement, however, is inherently platform-aggregate: Ayolinx settles one figure per `settlement_date` with no awareness of which of PPOB2's partners' end-customers generated it. Whenever more than one partner is active, "how much of today's settlement belongs to partner X" is a question PPOB2 must answer itself — Ayolinx cannot.
+
+**Attribution method — branches on a fact that must be verified against the actual Ayolinx settlement report before this is finalized (same caveat as Section 37.1's format itself):**
+
+1. **`EXACT` (preferred)** — if the Ayolinx settlement report carries per-transaction line items (not just a batch total), each settled line is matched to its originating `payment` (via `pg_reference`/PG transaction id) and attributed to that payment's `parent_order.partner_id` directly. No apportionment is needed; this is a direct join, not an estimate.
+2. **`PRO_RATA` (fallback, only if the report is a batch total with no line items)** — each partner's `gross_amount` is apportioned in proportion to that partner's share of `expected_amount` (i.e., that partner's sum of `SUCCESS` payments for the settlement date, divided by the settlement's total `expected_amount`), applied to the PG-reported `actual_amount`. `fee_amount` is apportioned the same way unless the partner contract specifies a different fee-bearing arrangement (**must be verified per partner contract** — see BR-REC-002).
+
+   Because Section 21.1 prohibits floating-point money arithmetic, pro-rata division produces integer remainders that a naive per-partner multiply-and-floor will not distribute exactly. **Largest-remainder method** is the specified rounding rule: compute each partner's raw share, floor it, then distribute the leftover units (the difference between `actual_amount` and the sum of floored shares) one unit at a time to the partners with the largest fractional remainders, until the invariant in Section 22.28 holds exactly. An allocation that cannot be made to sum exactly (e.g., due to a data inconsistency in `expected_amount`) is rejected and surfaced as an operational error, not silently forced to balance.
+
+**Scope, held deliberately narrow**: this section covers **attribution only** — recording how much of an already-received settlement belongs to which partner, for reporting/reconciliation purposes. It does **not** cover disbursing that amount to the partner's own bank account; that is a separate, not-yet-specified payout/disbursement capability (Section 7, Future Scope candidate) with its own authorization, timing, and ledger-posting design. Conflating the two would mean an attribution computation implicitly gains money-movement authority it was never designed to carry.
+
+**When to compute**: triggered immediately after `SettlementIngestionService.ingest` (Section 37.1) persists a `settlement` row, in the same transaction, mirroring the existing settlement→reconciliation composition pattern (Section 38.2) rather than an `AFTER_COMMIT` listener — for the same reason already established elsewhere in this codebase: there is no external I/O forcing the transaction apart, and "every settlement gets allocated" is intended as an invariant, not a best-effort side effect.
+
+**Interaction with `DISCREPANCY`**: allocation is computed regardless of whether the parent `settlement.status` is `MATCHED` or `DISCREPANCY` — same treatment Section 37.2 already gives the Settlement Ledger posting itself (a discrepancy is about the total amount being wrong, not about whether it can be attributed). A `DISCREPANCY` settlement's allocation is therefore itself provisional and should be re-derived (replacing the existing `settlement_partner_allocation` rows for that `settlement_id`, per Section 22.28's uniqueness constraint) once the discrepancy is `RESOLVED`.
+
 ---
 
 ## 38. Reconciliation
@@ -1767,6 +1806,7 @@ Admin Web is a **mandatory** operational interface (not optional tooling) for Op
 - Actual settlement view
 - Fee breakdown
 - Discrepancy list/detail
+- **Per-partner allocation breakdown** (Section 37.3): for a selected settlement, view each contributing partner's `gross_amount`/`fee_allocated`/`net_amount` and `allocation_method` (`EXACT`/`PRO_RATA`); the view MUST also surface the reconciling total (sum of partner rows vs. `settlement.actual_amount`) so a broken invariant is visible to Finance, not just rejected silently at write time
 
 ### 41.9 Reconciliation
 
@@ -2585,6 +2625,7 @@ The RTM links Business Requirement → Functional Requirement → Module → API
 | BR-BUS-004 | FR-RTE-001..003 | `routing` | (internal) | `pattern_economics`, `pattern_usage` | TC-BE-021 |
 | BR-BUS-005 | FR-ADM-001..003 | `admin` | `/admin/api/v1/*` | `admin_user`, `role`, `permission`, `audit_log` | TC-ADM-001..015 |
 | BR-BUS-006 | FR-REC-001..003 | `ledger`, `reconciliation` | Admin Web reconciliation views | `ledger_entry`, `reconciliation`, `settlement` | TC-BE-028 |
+| BR-REC-002 | FR-REC-004 | `settlement` | Admin Web settlement view (Section 41.8 partner breakdown) | `settlement_partner_allocation` | TC-BE-033..034 (exact-attribution join; pro-rata largest-remainder invariant) |
 | BR-BUS-007 | (architectural, Section 18/24/28) | `order`, `channel` | `/api/v1/orders` (Partner), future `/api/v1/customer/orders` | `channel`, `parent_order.channel_id/order_source` | (architecture review, no single TC — validated via ArchUnit dependency tests) |
 | BR-BUS-009 | FR-CAT-004 | `configuration`, `pricing` | `GET /api/v1/config/supported-amounts` | `supported_amount` | TC-BE-002 |
 
@@ -2603,6 +2644,7 @@ The RTM links Business Requirement → Functional Requirement → Module → API
 | Reconciliation mismatch | Medium | Medium-High | Daily reconciliation batch, discrepancy workflow | Finance/Reconciliation | Open discrepancy count/age |
 | Provider deposit shortage | Medium | High (blocks fulfillment) | Balance threshold alerting (Section 39.2) | Finance/Ops | Days-of-runway metric per provider |
 | Settlement delay | Low-Medium | Medium | Settlement reconciliation, escalation SOP | Finance | Settlement `DISCREPANCY` status frequency/age |
+| Partner allocation dispute / unverifiable split | Medium | Medium-High (multiplies with partner count; higher when a partner is an externally-owned business, not an internal sub-account) | `EXACT` attribution preferred over `PRO_RATA` wherever the Ayolinx report supports it (Section 37.3); largest-remainder rounding invariant enforced at write time; allocation method and reconciling total always visible in Admin Web (Section 41.8), never computed ad hoc outside the system | Finance/Product | `PRO_RATA` allocation frequency (should trend toward `EXACT` as report fidelity improves); count of allocations failing the sum-invariant (should be zero, all rejected before persist) |
 | Negative margin | Medium | Medium-High | Real-time/daily eligibility exclusion, alerting | Product/Finance | Count of negative-margin patterns/orders |
 | Stale pricing | Medium | Medium | Versioned pricing with mandatory `effective_from`, alert on stale (no update > N days) | Product/Finance | Days since last `provider_price` update per SKU |
 | Pattern failure (no eligible pattern) | Medium | High (blocks transaction) | Generation coverage target (Section 29.3), alerting, fallback amount suggestions | Product/Engineering | Count of `REFUND_PENDING` due to no-pattern |
@@ -2712,6 +2754,7 @@ Backlog uses EPIC → Feature → User Story → Technical Task, classified MVP 
 - **Feature 06.1**: Four-ledger append-only posting (P0, M)
 - **Feature 06.2**: Settlement ingestion + matching (P0, M, Dep: Ayolinx settlement report format — Phase 0)
 - **Feature 06.3**: Five reconciliation types + discrepancy workflow (P0, L)
+- **Feature 06.4**: Per-partner settlement allocation — `EXACT`/`PRO_RATA` attribution, largest-remainder rounding, Admin Web breakdown view (P1, M, Dep: confirming whether the Ayolinx settlement report carries per-transaction lines, same open dependency as Feature 06.2 — Section 37.3)
 
 ### EPIC-07: Admin / Backoffice [MVP Mandatory]
 
