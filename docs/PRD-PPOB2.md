@@ -1304,6 +1304,25 @@ Future gateways (`XenditPaymentGateway`, `MidtransPaymentGateway`, etc.) can be 
 | PG unavailable | Circuit breaker opens after N consecutive failures; order creation returns `503 PG_UNAVAILABLE`; alert fired |
 | Payment SUCCESS but fulfillment fails | Order state machine `PARTIAL_FAILED`/`FAILED` with funds already collected — MUST NOT be silently lost; ops workflow (retry fulfillment, or refund) required — see Sections 27–28 |
 
+#### 25.2.1 Sandbox Verification Log (2026-09-14)
+
+Section 52's `TC-BE-001`–`TC-BE-006` (create order: supported/unsupported/over-ceiling amount,
+idempotent replay, idempotency conflict) were run for real against `sandbox.ayolinx.id` with live
+credentials — all five matched this section's design exactly (see `backend/README.md`'s "PRD
+Section 52 order-creation test matrix" entry for the full result table).
+
+The inbound side (`TC-BE-008`–`TC-BE-012`) was also exercised against a **genuine** Ayolinx-
+originated callback (sandbox Demo Mode auto-completes an issued QR and calls back the registered
+URL a few minutes later) — the payload shape, tunnel reachability, and JSON deserialization all
+confirmed correct against real traffic, but **signature verification rejected it**. The portal-
+issued Ayolinx public key was confirmed correctly loaded, which rules out a missing-credential
+explanation and narrows this row's "Callback authentication" design to a specific open unknown: the
+literal `ROUTE` string this app assumes for the signed-string construction
+(`callback-route` config, currently defaulting to the documented `/v1/qr/qr-mpm-notify`) is not
+confirmed to be what Ayolinx actually signs against when calling back a merchant-supplied URL.
+Confirming it requires capturing the real inbound `X-SIGNATURE`/`X-TIMESTAMP` headers, which isn't
+currently logged anywhere — flagged as the concrete next step for whoever picks this back up.
+
 ### 25.3 QRIS & Amount Constraints
 
 Baseline assumption: QRIS nominal maximum **Rp10,000,000/transaction** (flagged: **must be verified against latest QRIS regulation/Ayolinx contract**). `parent_amount` validation MUST also enforce this ceiling independent of the supported-amount table (defense in depth).

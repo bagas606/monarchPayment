@@ -1039,19 +1039,64 @@ database — see that slice's notes.
     succeeded on the first attempt against a freshly-registered sandbox identity. `payment.pg_reference`
     persisted as our own `orderNo`, confirming the "no Ayolinx-side reference in the response" reading
     of the docs (see the reference-identity note above) against a real response, not just the docs.
-  - **Inbound callback path registered but not yet round-tripped.** The QRIS channel's `Callback
-    URL` was set (via the portal's per-channel-product configuration under "Payment Channel" /
-    "Integrations") to this app's `/internal/webhooks/ayolinx`, tunneled to the public internet via
-    a `cloudflared` quick tunnel and confirmed reachable (`/actuator/health` returned `200` through
-    the tunnel). No real payment was made against the issued QR in this run, so the callback's
-    `ROUTE` signing component, the real non-success `responseCode` values, and the full `00`–`07`
-    status table remain the same "documented but unconfirmed" state flagged above — only the
-    *outbound* Generate QRIS leg has a real, confirmed round-trip so far.
+  - **Inbound callback path: round-tripped, and the exact gap is now narrowed.** The QRIS channel's
+    `Callback URL` was set (via the portal's per-channel-product configuration under "Payment
+    Channel" / "Integrations") to this app's `/internal/webhooks/ayolinx`, tunneled to the public
+    internet via a `cloudflared` quick tunnel and confirmed reachable (`/actuator/health` returned
+    `200` through the tunnel). Ayolinx's sandbox "Demo Mode" auto-completes an issued dynamic QR as
+    paid after a short delay (no real wallet/scan needed) and **did deliver a genuine inbound
+    callback** to that URL a few minutes later — `webhook_event` recorded it (`direction=INBOUND`,
+    `source=AYOLINX`) with a real, non-synthetic payload: `latestTransactionStatus="00"`,
+    `originalPartnerReferenceNo` matching our `orderNo`, `originalReferenceNo` matching the portal's
+    own transaction id, and an `additionalInfo` block carrying real-shaped fields (`RRN`, `channel`,
+    `paymentNtb`, `settleDate`, plus a few not modeled in `AyolinxCallbackPayload.AdditionalInfo` —
+    harmless, since `@JsonIgnoreProperties(ignoreUnknown = true)` already covers that). This
+    confirms the callback payload shape assumed from public docs is correct, and that the tunnel +
+    routing + JSON deserialization path all work end-to-end against a real Ayolinx-originated
+    request — previously a completely untested leg.
+    **Signature verification, however, rejected it** (`SIGNATURE_INVALID`, HTTP 401,
+    `webhook_event.status=FAILED`). This was *not* a missing-key problem — the portal-issued
+    `PPOB2_AYOLINX_PUBLIC_KEY_PEM` (Ayolinx's own public key, captured at registration, see above)
+    was confirmed loaded and is definitionally the correct key for this purpose. A control
+    experiment — signing a same-shaped callback body with our own keypair as a stand-in and posting
+    it to the same endpoint after a clean app restart — also failed verification, which rules out a
+    stale-process/config-loading issue and isolates the mismatch to the **`ROUTE` component of the
+    signed string** (`METHOD:ROUTE:SHA256_HEX(BODY):TIMESTAMP`, `AyolinxSigner.verifyCallback`):
+    `callback-route` currently defaults to the *documented* `/v1/qr/qr-mpm-notify` per Section 25.2,
+    but nothing confirms that's the exact literal string Ayolinx signs against for a callback sent
+    to a *merchant-supplied* URL rather than a fixed Ayolinx-hosted path — exactly the "genuinely
+    undocumented" caveat `AyolinxSigner`'s own Javadoc already flagged, now backed by a real,
+    reproducible rejection instead of a guess. Diagnosing the exact string Ayolinx signs would
+    require capturing the real `X-SIGNATURE`/`X-TIMESTAMP` headers from a live callback (not
+    currently logged/persisted anywhere — `webhookEventRecorder` only records the body) — flagged
+    as the concrete next step, not attempted here since it needs a code change and wasn't asked for
+    in this pass.
   - **Credential handling**: the RSA keypair was generated locally and only the public half was
     ever transmitted anywhere (to the Ayolinx portal, itself not a secret by definition); the
     `client-key`/`client-secret` and the generated private key were placed directly into local
     process environment variables for this run, never committed to the repository or written
     anywhere under version control.
+
+- **PRD Section 52 (`TC-BE-*`) order-creation test matrix, run for real against the sandbox** —
+  Section 52 lists positive and negative test cases for order creation and payment; the ones that
+  don't require a real inbound callback were driven end-to-end against `POST /api/v1/orders` with
+  `ppob2.payment.gateway=ayolinx` and live sandbox credentials (not mocked/stubbed), all matching
+  the PRD's expected result exactly:
+
+  | Test Case | Result |
+  |---|---|
+  | TC-BE-001/006 — create order, supported amount | `201`, `PAYMENT_PENDING`, real QRIS payload |
+  | TC-BE-004 — duplicate request, same Idempotency-Key + same body | Same `order_id` returned, `201` both times |
+  | TC-BE-005 — idempotency conflict, same key + different body | `409 IDEMPOTENCY_KEY_CONFLICT` |
+  | TC-BE-002 — unsupported amount | `422 UNSUPPORTED_AMOUNT` |
+  | TC-BE-003 — amount above QRIS ceiling | `422 UNSUPPORTED_AMOUNT` ("exceeds the QRIS transaction ceiling") |
+
+  `TC-BE-008`–`TC-BE-012` (callback success/duplicate/replay/invalid-signature) could not be
+  exercised the same way — every attempt is gated on `verifyCallbackSignature` succeeding first,
+  which is exactly the open item the bullet above describes, so those remain unverified pending
+  that fix. `TC-BE-007` (QR expiry sweep) and `TC-BE-033/034` (settlement allocation) were already
+  covered — the former needs a longer-running observation not attempted in this pass, the latter by
+  `SettlementAllocationServiceTest` plus the real-Postgres run documented above.
 
 - **Webhook Retry Sweep** (Section 23.8 / 40.4) closes the gap this README used to flag as "no
   delivery/retry machinery, no persisted delivery-attempt-count, and no scheduled re-driver" —

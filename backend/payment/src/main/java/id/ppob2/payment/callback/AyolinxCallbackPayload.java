@@ -8,9 +8,15 @@ import java.time.OffsetDateTime;
 
 /**
  * Parsed shape of an inbound Ayolinx QRIS callback (doc.ayolinx.id/api-299374923, "Payment
- * Notify" for {@code qr-mpm-notify}), verified against the public docs — no sandbox credential
- * exists yet to confirm this against a real callback, so still flagged for a final check once
- * one arrives.
+ * Notify" for {@code qr-mpm-notify}). Confirmed 2026-09-14 against a genuine callback delivered by
+ * Ayolinx's sandbox (Demo Mode auto-completes an issued QR and calls back the registered URL): the
+ * fields this record models ({@code callbackType}, {@code latestTransactionStatus},
+ * {@code originalPartnerReferenceNo}, {@code originalReferenceNo}, {@code amount},
+ * {@code customerNumber}) all deserialized correctly, and unmodeled {@code additionalInfo} fields
+ * from the real payload were tolerated by {@code @JsonIgnoreProperties(ignoreUnknown = true)} as
+ * intended. Signature verification of that same callback failed — see
+ * {@code AyolinxPaymentGateway}'s Javadoc and {@code backend/README.md} for that separate,
+ * still-open issue; it is unrelated to this class's parsing, which is now real-traffic-verified.
  *
  * <p>{@code @JsonNaming(LowerCamelCaseStrategy)} is required here specifically: the app's global
  * Jackson config ({@code spring.jackson.property-naming-strategy: SNAKE_CASE}, for our own

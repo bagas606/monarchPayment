@@ -32,7 +32,12 @@ import org.springframework.web.reactive.function.client.WebClientResponseExcepti
  * sandbox: a genuine EMV/QRIS payload carrying real BNC acquirer data came back for a real
  * {@code POST /api/v1/orders} call, with zero warnings across the RSA-signed token request and the
  * HMAC-SHA512-signed generate-QR request (see README's "Real sandbox round-trip" entry). The
- * inbound callback path is registered but not yet round-tripped by a real payment. Activated by setting
+ * inbound callback path has since been round-tripped too — sandbox Demo Mode auto-completes an
+ * issued QR and delivers a genuine callback to the registered URL — confirming the payload shape
+ * ({@link id.ppob2.payment.callback.AyolinxCallbackPayload}) and tunnel/routing, but
+ * {@link #verifyCallbackSignature} rejected it; see {@code backend/README.md}'s "Inbound callback
+ * path" entry for the narrowed-down open issue (the {@code callbackRoute} signed-string component
+ * is unconfirmed, not a missing- or wrong-key problem). Activated by setting
  * {@code ppob2.payment.gateway=ayolinx}; the default stays {@link
  * id.ppob2.payment.gateway.StubQrisPaymentGateway} ({@code stub}, dev default) — a
  * {@code @Profile} guard was deliberately replaced with this property so the real gateway can
