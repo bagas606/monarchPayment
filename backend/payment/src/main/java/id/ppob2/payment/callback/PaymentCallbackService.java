@@ -65,6 +65,13 @@ public class PaymentCallbackService {
         boolean signatureValid = paymentGateway.verifyCallbackSignature(rawBody, headers);
 
         if (!signatureValid) {
+            // Debug aid for the open "unconfirmed callback-route signed-string" gap (see
+            // AyolinxPaymentGateway's Javadoc / README) -- these headers are Ayolinx's own
+            // per-request signature and timestamp, not a secret of ours, so they're safe to log
+            // and are exactly what's needed to work out the real signed-string format once a
+            // genuine rejected callback is captured.
+            log.warn("Ayolinx callback signature verification failed. X-SIGNATURE={} X-TIMESTAMP={}",
+                    headers.get("X-SIGNATURE"), headers.get("X-TIMESTAMP"));
             webhookEventRecorder.record(WebhookDirection.INBOUND, SOURCE, "CALLBACK", recordablePayload(rawBody), "FAILED", null);
             return PaymentCallbackOutcome.SIGNATURE_INVALID;
         }
