@@ -1124,10 +1124,25 @@ database — see that slice's notes.
   would fail signature verification, not exercise dedup logic at all) — `webhook_event.payload` is
   `jsonb`, which reformats/reorders on storage, so a one-line temporary log of the raw body
   (alongside the existing header log, removed again immediately after use) captured it verbatim from
-  a real "Mark success"-triggered callback for replay. `TC-BE-009`/`TC-BE-011` (failed-payment
-  callback, stale-timestamp replay) still aren't exercised — the sandbox simulator only produces a
-  SUCCESS-shaped callback, and a stale-but-otherwise-valid-signature replay wasn't attempted.
-  `TC-BE-007` (QR expiry sweep) and `TC-BE-033/034` (settlement allocation) were already covered —
+  a real "Mark success"-triggered callback for replay.
+
+  **`TC-BE-009` (failed payment callback) confirmed too, via a substitute-key HTTP round-trip** —
+  the sandbox's "Mark success"/"Check Transaction" simulator has no equivalent for a failed payment
+  (there is no genuine way to make Ayolinx sign a `latestTransactionStatus=06` body without an
+  actual failed real-money transaction, which Demo Mode doesn't produce), so this couldn't be tested
+  with Ayolinx's real signing key. Instead, `ppob2.payment.ayolinx.public-key-pem` was temporarily
+  pointed at *our own* generated test public key (private half already held locally — see the RSA
+  keypair from the "Real sandbox round-trip" entry), a `06`-status callback body was signed with the
+  matching private key using the same `AyolinxSigner.verifyCallback` scheme
+  (`METHOD:ROUTE:SHA256_HEX(BODY):TIMESTAMP`, confirmed `ROUTE`), and posted to the real
+  `/internal/webhooks/ayolinx` endpoint against a real order. Result: `payment.status=FAILED`,
+  `parent_order.state` stayed `PAYMENT_PENDING` (matching `PaymentCallbackService`'s own comment —
+  no `PAYMENT_PENDING → FAILED` order transition is defined; the order is left to expire naturally),
+  and no ledger entry was posted — exactly `TC-BE-009`'s expected result. This exercises the real
+  HTTP/Jackson/JPA path end-to-end, short of Ayolinx's own signature (unavoidable without a genuine
+  failed transaction); the app was restarted back onto Ayolinx's real public key immediately after.
+  `TC-BE-011` (stale-timestamp replay) still isn't exercised. `TC-BE-007` (QR expiry sweep) and
+  `TC-BE-033/034` (settlement allocation) were already covered —
   the former needs a longer-running observation not attempted in this pass, the latter by
   `SettlementAllocationServiceTest` plus the real-Postgres run documented above.
 

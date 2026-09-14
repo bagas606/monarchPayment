@@ -1332,8 +1332,13 @@ that row is also now confirmed for real as a side effect.
 the live endpoint: a garbage `X-SIGNATURE` produces `401`/`FAILED` with no state change, and an exact
 replay of a real, validly-signed callback re-verifies (same bytes) but is correctly not reprocessed
 — `payment_event`'s `dedup_key` unique constraint holds it to exactly one row, `payment.paid_at`
-unchanged. `TC-BE-009`/`TC-BE-011` (failed-payment callback, stale-timestamp replay) remain
-unexercised — see `backend/README.md` for the full account and what's still open.
+unchanged. `TC-BE-009` (failed payment callback) is confirmed as well: since the sandbox has no way
+to make Ayolinx genuinely sign a failed-status callback, this used a substitute keypair (our own,
+matching key held locally) as a temporary stand-in verifier against the real endpoint and a real
+order — `payment.status` went to `FAILED`, the order stayed `PAYMENT_PENDING` (no transition is
+defined for this case, by design), and no ledger entry was posted, exactly as expected; the app was
+restarted back onto Ayolinx's real key immediately after. `TC-BE-011` (stale-timestamp replay)
+remains unexercised — see `backend/README.md` for the full account and what's still open.
 
 ### 25.3 QRIS & Amount Constraints
 
