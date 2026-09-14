@@ -1,6 +1,8 @@
 package id.ppob2.app.web;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.PropertyNamingStrategies;
+import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import id.ppob2.admin.security.AdminPrincipal;
 import id.ppob2.app.settlement.SettlementIngestionOrchestrator;
 import id.ppob2.audit.AuditService;
@@ -39,6 +41,27 @@ import org.springframework.web.bind.annotation.RestController;
  * the request that produced it. This audit entry is therefore recorded post-hoc: {@code
  * beforeState} is always {@code null}, {@code targetId} is the newly-created settlement's id, and
  * {@code afterState} is the resulting settlement.
+ *
+ * <p><b>Real bug found only by driving this end-to-end against a real Postgres instance and a
+ * real HTTP call</b> (not by {@code SettlementIngestionServiceTest}, which exercises the service
+ * layer directly and never touches Jackson): the app's global Jackson config is {@code
+ * spring.jackson.property-naming-strategy: SNAKE_CASE} (same as {@code AyolinxCallbackPayload}'s
+ * own Javadoc already documents), but {@link SettlementIngestionRequest}/{@link
+ * SettlementIngestionResponse} previously declared plain camelCase fields with no {@code
+ * @JsonNaming} override. A request body shaped like the Java field names (e.g. {@code
+ * "actualAmount"}) — the shape anyone reaching for these record names would naturally send —
+ * silently deserialized to an all-null record instead of failing validation, since Jackson found
+ * no {@code snake_case}-named property to bind any field to; that null then reached {@link
+ * id.ppob2.sharedkernel.money.Money#of(java.math.BigInteger)}, which threw a bare {@code
+ * NullPointerException} rather than a clear {@code VALIDATION_ERROR}. Confirmed live: a
+ * camelCase-keyed request produced the NPE; the identical request re-sent with {@code
+ * snake_case} keys (the shape the global config actually expects) ingested correctly. Fixed by
+ * giving both records their own {@code @JsonNaming(LowerCamelCaseStrategy.class)} override — the
+ * same mechanism {@code AyolinxCallbackPayload} already uses for the opposite reason (there, to
+ * accept Ayolinx's fixed external camelCase contract despite the global default; here, so this
+ * internal ops endpoint's request/response shape matches its own Java field names rather than
+ * silently depending on a global default a caller has no reason to know about) — applied to both
+ * records so the endpoint's input and output casing stay symmetric, not just the input.
  */
 @RestController
 public class SettlementIngestionController {
@@ -82,6 +105,7 @@ public class SettlementIngestionController {
         }
     }
 
+    @JsonNaming(PropertyNamingStrategies.LowerCamelCaseStrategy.class)
     public record SettlementIngestionRequest(
             @NotNull LocalDate settlementDate,
             @NotBlank String pgReference,
@@ -90,6 +114,7 @@ public class SettlementIngestionController {
     ) {
     }
 
+    @JsonNaming(PropertyNamingStrategies.LowerCamelCaseStrategy.class)
     public record SettlementIngestionResponse(
             Long settlementId,
             String status,

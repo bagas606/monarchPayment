@@ -1276,20 +1276,36 @@ Known gaps to close before this is production-real:
       code. The existing `ledger_entry` (`SETTLEMENT`/`CREDIT`/100001) and `reconciliation`
       (`PAYMENT_VS_SETTLEMENT`/`OPEN`, since 100001 ≠ the 100000 expected) rows were also confirmed
       present and unaffected by this slice's addition, in the same transaction.
-    - **A real, pre-existing bug (not introduced by this slice) surfaced during this run**:
-      `SettlementIngestionController.SettlementIngestionRequest` declares plain camelCase fields
-      (`actualAmount`, `pgReference`, ...) with no `@JsonNaming` override, but `application.yml`
-      configures `spring.jackson.property-naming-strategy: SNAKE_CASE` globally — the same
-      mismatch `AyolinxCallbackPayload` already works around with its own `@JsonNaming(...
-      LowerCamelCaseStrategy.class)`. A camelCase request body — the shape anyone would reach for
-      from the Java field names — silently deserializes to an all-null record (Jackson finds no
-      matching `snake_case` property for any field), which then NPEs inside `Money.of(null)`
-      rather than failing with a clear validation error. Only visible by actually calling the
-      endpoint over HTTP; `SettlementIngestionServiceTest` tests the service layer directly and
-      never touches Jackson, so it could not have caught this. Confirmed and worked around by
-      resending the identical request with snake_case keys (`settlement_date`, `actual_amount`,
-      ...), which ingested correctly — not fixed here, since it's orthogonal to this slice; flagged
-      as its own follow-up rather than silently patched in passing.
+    - **A real, pre-existing bug (not introduced by this slice) surfaced during this run, and
+      since fixed**: `SettlementIngestionController.SettlementIngestionRequest` declared plain
+      camelCase fields (`actualAmount`, `pgReference`, ...) with no `@JsonNaming` override, but
+      `application.yml` configures `spring.jackson.property-naming-strategy: SNAKE_CASE` globally
+      — the same mismatch `AyolinxCallbackPayload` already works around with its own
+      `@JsonNaming(LowerCamelCaseStrategy.class)`. A camelCase request body — the shape anyone
+      would reach for from the Java field names — silently deserialized to an all-null record
+      (Jackson found no matching `snake_case` property for any field), which then NPE'd inside
+      `Money.of(null)` rather than failing with a clear validation error. Only visible by actually
+      calling the endpoint over HTTP; `SettlementIngestionServiceTest` tests the service layer
+      directly and never touches Jackson, so it could not have caught this. Confirmed live by
+      resending the identical request with `snake_case` keys (`settlement_date`, `actual_amount`,
+      ...), which ingested correctly.
+      - **Fixed**: both `SettlementIngestionRequest` and `SettlementIngestionResponse` now carry
+        their own `@JsonNaming(LowerCamelCaseStrategy.class)`, the same mechanism
+        `AyolinxCallbackPayload` uses for the opposite reason (there, to accept a fixed *external*
+        camelCase contract despite the global default; here, so this internal ops endpoint's
+        request/response shape matches its own Java field names instead of silently depending on
+        a global default no caller has reason to know about). Applied to the response too, not
+        just the request, so the endpoint's input/output casing stays symmetric.
+      - **`SettlementIngestionControllerTest`** (new) proves this the way `AyolinxCallbackPayloadTest`
+        already proves the equivalent fix for the payment webhook slice: against an
+        `ObjectMapper` configured exactly like the app's real bean (`SNAKE_CASE` + `findAndRegisterModules()`
+        for `LocalDate`), the request's own camelCase JSON now deserializes correctly; the old
+        `snake_case` workaround shape now fails loudly (`UnrecognizedPropertyException`) instead
+        of silently producing an all-null record — a strictly better failure mode than the bug
+        itself; and the response serializes back out in the same camelCase shape. All three cases
+        verified with real JDK 21 (now installed, portable zip, alongside the already-installed 8
+        and 17) — no toolchain override needed for this one. Full existing suite (26 test classes,
+        the 25 from before plus this new one) still passes.
     - `order`/`payment`/`settlement`/`reconciliation`/`ledger` migrations and the native
       `sumSuccessfulPaymentAmountByPartnerForDate` join query are therefore now real-database
       verified, not merely unit-tested — the caveat this bullet previously carried no longer
