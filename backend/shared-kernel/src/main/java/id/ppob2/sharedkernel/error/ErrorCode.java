@@ -20,6 +20,13 @@ public enum ErrorCode {
      * underlying `settlement_date_uk` constraint violation. */
     SETTLEMENT_ALREADY_INGESTED(409),
 
+    /** Not part of Section 23.9's table either -- Section 37.3's per-partner allocation invariant
+     * (BR-REC-002: partner allocations MUST sum to exactly {@code actual_amount}/{@code
+     * fee_amount}). Thrown by {@code SettlementAllocationService} when the pro-rata computation
+     * cannot satisfy that invariant (e.g. contributing partners sum to a zero expected amount) --
+     * surfaced as a real error the operator must investigate, never silently rounded away. */
+    SETTLEMENT_ALLOCATION_INVALID(500),
+
     /** Not part of Section 23.9's table either — Section 34.1's Admin Web compensating retry is
      * an internal ops action. Covers every reason a retry can't proceed: the child order isn't
      * {@code FAILED}, its parent isn't {@code PARTIAL_FAILED}, or it lost a race with another

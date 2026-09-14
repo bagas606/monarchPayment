@@ -1,12 +1,16 @@
 package id.ppob2.app.settlement;
 
+import id.ppob2.order.repository.ParentOrderRepository;
 import id.ppob2.payment.repository.PaymentRepository;
 import id.ppob2.reconciliation.ReconciliationService;
 import id.ppob2.reconciliation.domain.ReconciliationType;
+import id.ppob2.settlement.SettlementAllocationService;
 import id.ppob2.settlement.SettlementIngestionService;
 import id.ppob2.settlement.domain.Settlement;
 import id.ppob2.sharedkernel.money.Money;
 import java.time.LocalDate;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -27,19 +31,31 @@ import org.springframework.transaction.annotation.Transactional;
  * no error surfaced anywhere, which is exactly the invariant Section 38.2 says must not happen
  * ("every discrepancy is persisted"). Settlement row, ledger entry, and reconciliation record now
  * commit together or not at all; a failure is a 500 the operator retries, not a silent gap.
+ *
+ * <p>Section 37.3: also resolves each contributing partner's share of {@code expected_amount} (via
+ * {@code order}'s {@code payment}-join query -- `settlement` itself has no edge to either module)
+ * and hands it to {@link SettlementAllocationService} for pro-rata attribution, in the same
+ * transaction as the settlement/reconciliation writes above -- allocation is meant to be computed
+ * for every settlement, not a best-effort side effect that can silently fail to run.
  */
 @Service
 public class SettlementIngestionOrchestrator {
 
     private final PaymentRepository paymentRepository;
+    private final ParentOrderRepository parentOrderRepository;
     private final SettlementIngestionService settlementIngestionService;
+    private final SettlementAllocationService settlementAllocationService;
     private final ReconciliationService reconciliationService;
 
     public SettlementIngestionOrchestrator(PaymentRepository paymentRepository,
+                                            ParentOrderRepository parentOrderRepository,
                                             SettlementIngestionService settlementIngestionService,
+                                            SettlementAllocationService settlementAllocationService,
                                             ReconciliationService reconciliationService) {
         this.paymentRepository = paymentRepository;
+        this.parentOrderRepository = parentOrderRepository;
         this.settlementIngestionService = settlementIngestionService;
+        this.settlementAllocationService = settlementAllocationService;
         this.reconciliationService = reconciliationService;
     }
 
@@ -53,6 +69,11 @@ public class SettlementIngestionOrchestrator {
             reconciliationService.open(ReconciliationType.PAYMENT_VS_SETTLEMENT, settlement.getSettlementDate(),
                     settlement.getId(), settlement.getExpectedAmount(), settlement.getActualAmount());
         }
+
+        Map<Long, Money> partnerExpectedAmounts = new LinkedHashMap<>();
+        parentOrderRepository.sumSuccessfulPaymentAmountByPartnerForDate(settlementDate)
+                .forEach(row -> partnerExpectedAmounts.put(row.getPartnerId(), Money.of(row.getAmount().toBigInteger())));
+        settlementAllocationService.allocateProRata(settlement, partnerExpectedAmounts);
 
         return settlement;
     }

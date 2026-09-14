@@ -1207,6 +1207,69 @@ Known gaps to close before this is production-real:
   of the same event — worse, not better. Left as-is; this entry replaces an earlier, vaguer version
   of this note that read as an open gap when the code already had a considered answer.
 
+- **Per-partner settlement allocation** (PRD Section 37.3 / 22.28, added when the platform's
+  downstream reseller topology grew beyond a single partner) — `settlement`'s new
+  `SettlementAllocationService.allocateProRata` attributes one platform-aggregate `settlement`
+  batch across the partner(s) whose payments contributed to it, persisting `settlement_partner_
+  allocation` rows (V20 migration). Wired into `SettlementIngestionOrchestrator`, in the same
+  transaction as the settlement/reconciliation writes it already composes — allocation is meant to
+  be computed for every settlement, not a best-effort side effect.
+  - **Only `PRO_RATA` is implemented, `EXACT` is not** — see `AllocationMethod`'s Javadoc. `EXACT`
+    needs the Ayolinx settlement report to carry per-transaction lines so each can be joined
+    straight back to its `payment`/`parent_order.partner_id`; Section 37.1 still flags that report
+    format as unverified, and this codebase has no data model for a line-itemed report to build
+    `EXACT` against. Adding it later is a new producer of `SettlementPartnerAllocation` rows, not a
+    schema change — `allocation_method` already distinguishes the two.
+  - **Per-partner input is resolved in `order`, not `settlement` or `payment`** — `payment` carries
+    no `partner_id` at all (Section 22.17 has none; attribution lives on `parent_order`), and
+    Section 20.2 grants `order -> payment` but nothing the other way and nothing from `settlement`
+    to either — so `ParentOrderRepository.sumSuccessfulPaymentAmountByPartnerForDate` (a native
+    query joining `parent_order`/`payment` by table name, same "FK lives outside the JPA
+    relationship" precedent as `ProviderPrice.providerSkuId`) lives on the permitted side of that
+    edge, and `SettlementIngestionOrchestrator` — already the composition root for `payment`/
+    `settlement`/`reconciliation` — is where the result is handed to `SettlementAllocationService`.
+  - **Largest-remainder rounding, not floor-and-drop or floor-and-give-it-all-to-one-partner.**
+    Section 21.1 prohibits float money, so a naive per-partner `actual_amount * weight / total`
+    leaves integer remainder units unaccounted for; `distributeByLargestRemainder` floors every
+    partner's share via `BigInteger.divideAndRemainder`, then hands the leftover units — always
+    strictly fewer than the number of partners, which follows algebraically from `sum(weight) =
+    total` rather than being merely assumed — to the partners with the largest remainders,
+    ascending `partner_id` breaking ties for determinism. Gross (`actual_amount`) and fee
+    (`fee_amount`) are distributed independently through the same routine, since a fee-pool
+    remainder and a gross-pool remainder don't need to land on the same partner.
+  - **BR-REC-002's sum invariant is checked explicitly after the fact**, not merely trusted from the
+    arithmetic: `allocateProRata` re-sums every computed share and compares against
+    `settlement.actual_amount`/`fee_amount` before persisting, throwing `SETTLEMENT_ALLOCATION_
+    INVALID` (a new `ErrorCode`, 500 — an invariant failure here is a bug to investigate, not a
+    caller error) rather than persisting a total that's merely close.
+  - **Re-computation replaces rather than accumulates** — `deleteBySettlementId` runs unconditionally
+    at the top of `allocateProRata`, before either the empty-partner-map or zero-total-expected
+    early exits, so a settlement that later has zero contributing partners (shouldn't happen today,
+    every order is `RESELLER_API`, but not schema-prevented) ends up with an empty allocation set
+    rather than a stale one left over from a previous run.
+  - **No partner-facing endpoint** — `AdminSettlementController`'s `GET /admin/settlements/{id}/
+    allocations` is Admin Web only (Section 41.8), gated behind the existing `settlement:ingest`
+    permission rather than a new `settlement:view` (flagged in that controller's Javadoc as worth
+    splitting out if a broader settlement read surface gets built later). Attribution is recorded
+    for reporting; it does not disburse anything to the partner — see Section 37.3's explicit scope
+    note and the "Gap" note this leaves below.
+  - **Verified by unit test only (`SettlementAllocationServiceTest`), not against a real Postgres
+    run** — this development environment has no JDK 21 installed (only 8 and 17; the toolchain was
+    temporarily overridden to 17 to compile and run the test suite, then reverted — the code uses
+    no Java-21-specific syntax) and no local Postgres reachable to exercise the migration and the
+    full ingest → allocate path end-to-end the way this README's other slices were verified. All
+    five `SettlementAllocationServiceTest` cases pass (even split, an uneven three-way split
+    confirming the largest-remainder tie-break lands on the lowest `partner_id`, a single-partner
+    settlement, an empty partner map, and the zero-total-expected rejection), and the full existing
+    suite (25 test classes across every module) still passes unchanged — but the V20 migration
+    itself, and the `order`/`payment` native join query, have **not** been run against a real
+    database. Treat this the same way the codebase treats any other Mockito-only slice: the logic
+    is verified, the schema and cross-table query are not.
+  - **Gap, not built**: an actual payout/disbursement to each partner's own bank account. Section
+    37.3 scopes this deliberately narrow — attribution only — and Section 7 lists a future
+    payout/disbursement capability as its own not-yet-specified feature, with its own
+    authorization, timing, and ledger-posting design.
+
 ## Running locally
 
 ```bash
