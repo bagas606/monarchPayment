@@ -1141,8 +1141,25 @@ database — see that slice's notes.
   and no ledger entry was posted — exactly `TC-BE-009`'s expected result. This exercises the real
   HTTP/Jackson/JPA path end-to-end, short of Ayolinx's own signature (unavoidable without a genuine
   failed transaction); the app was restarted back onto Ayolinx's real public key immediately after.
-  `TC-BE-011` (stale-timestamp replay) still isn't exercised. `TC-BE-007` (QR expiry sweep) and
-  `TC-BE-033/034` (settlement allocation) were already covered —
+  **`TC-BE-011` (stale-timestamp replay) — tested, and it exposes a real gap against this
+  section's own design (not just an untested case).** Section 25.2 calls for "Replay protection:
+  Timestamp window + nonce/dedup_key, same pattern as Section 23.2" for the inbound callback path,
+  but `AyolinxSigner.verifyCallback`/`AyolinxPaymentGateway.verifyCallbackSignature` only checks
+  that the signature is valid for whatever `X-TIMESTAMP` the caller supplies — there is no check
+  anywhere in this path that the timestamp is *recent*. Proven with the same substitute-key
+  technique as `TC-BE-009` above: a callback body was signed with a genuinely 1-hour-old
+  `X-TIMESTAMP` (the signature itself is valid — it's computed over that exact timestamp string,
+  exactly as a genuinely delayed-but-real Ayolinx retry would look) and posted against a fresh
+  order. It was accepted and fully processed: `payment.status=SUCCESS`, a `PAYMENT` ledger `CREDIT`
+  entry posted, identical to a fresh callback — the 1-hour-old timestamp had zero effect on the
+  outcome. Section 23.2's own timestamp-window check (for the *outbound*-facing partner API) is a
+  precedent that exists elsewhere in this codebase; it was just never carried over to this inbound
+  path. Flagged as a real, fixable gap — not attempted here since a fix wasn't asked for in this
+  pass, and choosing the right window width needs a decision (Ayolinx's callback docs don't state
+  one, and this app's own retry/redelivery behavior, observed for real in the `TC-BE-008` entry
+  above, means whatever window is chosen must tolerate Ayolinx's own legitimate redelivery delay).
+
+  `TC-BE-007` (QR expiry sweep) and `TC-BE-033/034` (settlement allocation) were already covered —
   the former needs a longer-running observation not attempted in this pass, the latter by
   `SettlementAllocationServiceTest` plus the real-Postgres run documented above.
 

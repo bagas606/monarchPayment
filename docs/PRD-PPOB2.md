@@ -1337,8 +1337,20 @@ to make Ayolinx genuinely sign a failed-status callback, this used a substitute 
 matching key held locally) as a temporary stand-in verifier against the real endpoint and a real
 order — `payment.status` went to `FAILED`, the order stayed `PAYMENT_PENDING` (no transition is
 defined for this case, by design), and no ledger entry was posted, exactly as expected; the app was
-restarted back onto Ayolinx's real key immediately after. `TC-BE-011` (stale-timestamp replay)
-remains unexercised — see `backend/README.md` for the full account and what's still open.
+restarted back onto Ayolinx's real key immediately after.
+
+**`TC-BE-011` (stale-timestamp replay) was tested and failed — a real gap against this section's
+own "Replay protection: Timestamp window + nonce/dedup_key" design, not just an unverified case.**
+A callback signed with a genuinely 1-hour-old `X-TIMESTAMP` (valid signature — the signature is
+computed over that exact timestamp) was accepted and fully processed identically to a fresh one:
+`payment.status=SUCCESS`, ledger entry posted. No timestamp-freshness window exists anywhere in
+`verifyCallbackSignature`/`AyolinxSigner.verifyCallback` — only the signature's own validity and
+`payment_event.dedup_key` are checked. Section 23.2 already has this exact check for the
+*outbound*-facing partner API; it was never carried over to this inbound callback path. Not fixed
+in this pass (a fix wasn't requested); the window width also isn't a free choice — Ayolinx's own
+docs don't state one, and this app's own callback-retry behavior (real redelivery observed for
+`TC-BE-008` above) means too tight a window would reject Ayolinx's own legitimate retries. See
+`backend/README.md` for the full account and what else remains unexercised (`TC-BE-007`).
 
 ### 25.3 QRIS & Amount Constraints
 
@@ -2675,6 +2687,7 @@ The RTM links Business Requirement → Functional Requirement → Module → API
 | Provider downtime | Medium | High | Circuit breaker, multi-provider routing diversity, health checks | Engineering/Ops | Provider error rate, circuit breaker open events |
 | Payment downtime (Ayolinx) | Low-Medium | High | Circuit breaker, clear customer-facing error, alerting | Engineering/Ops | PG error rate, `PG_UNAVAILABLE` frequency |
 | Duplicate callbacks | Medium | Low (if handled) / High (if not) | Idempotency via `dedup_key`, thoroughly tested (TC-BE-010) | Engineering | Duplicate-callback rejection count (should be non-zero and handled, not absent) |
+| Stale/replayed callback with a valid signature accepted (no timestamp window) | Medium (needs a leaked/logged old signed callback to exploit) | Medium — bounded by `dedup_key` catching a literal re-send, but a *new* dedup_key (e.g. Section 22.24's `webhook_event` isn't PII-safe to leak but a captured header pair could still be replayed as a "new" event) with an old timestamp is accepted and fully processed today (confirmed 2026-09-14, TC-BE-011) | Add the Section 23.2-style timestamp-window check to the inbound callback path (`AyolinxSigner.verifyCallback` currently checks signature validity only, not timestamp recency) — not yet implemented | Engineering | Age distribution of accepted callbacks' `X-TIMESTAMP` vs `received_at` (should be near-zero; currently unmeasured) |
 | Duplicate fulfillment | Low (if idempotency holds) | High | Idempotency key + distributed lock (Section 34.1) | Engineering | `provider_transaction` idempotency constraint violations (should trend to zero exceptions, all caught) |
 | Partial failure (parent stuck) | Medium | Medium | Explicit `PARTIAL_FAILED` state, Ops runbook, alerting | Engineering/Ops | Count of orders in `PARTIAL_FAILED` beyond SLA |
 | Reconciliation mismatch | Medium | Medium-High | Daily reconciliation batch, discrepancy workflow | Finance/Reconciliation | Open discrepancy count/age |
