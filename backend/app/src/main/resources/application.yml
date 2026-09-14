@@ -63,8 +63,10 @@ ppob2:
       channel: ${PPOB2_AYOLINX_CHANNEL:BNC_QRIS}
       # Registered in each Generate QRIS call's urlParams; must be this app's own reachable /internal/webhooks/ayolinx URL.
       notification-url: ${PPOB2_AYOLINX_NOTIFICATION_URL:}
-      # See AyolinxPaymentGateway's Javadoc "Known unknowns" — genuinely undocumented, this is a best-effort default.
-      callback-route: ${PPOB2_AYOLINX_CALLBACK_ROUTE:/v1/qr/qr-mpm-notify}
+      # Confirmed 2026-09-14 against a real Ayolinx sandbox callback: Ayolinx signs against the
+      # merchant-supplied callback URL's own path, not a fixed Ayolinx-hosted doc path. See
+      # AyolinxPaymentGateway's Javadoc / backend/README.md's "Inbound callback path" entry.
+      callback-route: ${PPOB2_AYOLINX_CALLBACK_ROUTE:/internal/webhooks/ayolinx}
       timezone: ${PPOB2_AYOLINX_TIMEZONE:Asia/Jakarta}
   webhook:
     # Section 23.8: how often WebhookRetrySweepJob checks for due webhook_delivery rows.

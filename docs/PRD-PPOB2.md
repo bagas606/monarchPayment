@@ -1311,17 +1311,24 @@ idempotent replay, idempotency conflict) were run for real against `sandbox.ayol
 credentials — all five matched this section's design exactly (see `backend/README.md`'s "PRD
 Section 52 order-creation test matrix" entry for the full result table).
 
-The inbound side (`TC-BE-008`–`TC-BE-012`) was also exercised against a **genuine** Ayolinx-
-originated callback (sandbox Demo Mode auto-completes an issued QR and calls back the registered
-URL a few minutes later) — the payload shape, tunnel reachability, and JSON deserialization all
-confirmed correct against real traffic, but **signature verification rejected it**. The portal-
-issued Ayolinx public key was confirmed correctly loaded, which rules out a missing-credential
-explanation and narrows this row's "Callback authentication" design to a specific open unknown: the
-literal `ROUTE` string this app assumes for the signed-string construction
-(`callback-route` config, currently defaulting to the documented `/v1/qr/qr-mpm-notify`) is not
-confirmed to be what Ayolinx actually signs against when calling back a merchant-supplied URL.
-Confirming it requires capturing the real inbound `X-SIGNATURE`/`X-TIMESTAMP` headers, which isn't
-currently logged anywhere — flagged as the concrete next step for whoever picks this back up.
+The inbound side (`TC-BE-008`) was also exercised against a **genuine** Ayolinx-originated callback
+(sandbox Demo Mode auto-completes an issued QR and calls back the registered URL) — the payload
+shape, tunnel reachability, and JSON deserialization all confirmed correct against real traffic, but
+**signature verification initially rejected it**. The portal-issued Ayolinx public key was confirmed
+correctly loaded, ruling out a missing-credential explanation; logging the real
+`X-SIGNATURE`/`X-TIMESTAMP` headers on rejection and replaying that same real signature against a
+short list of candidate route strings identified the actual cause: the literal `ROUTE` this app
+signs/verifies against must be **its own registered callback path**
+(`/internal/webhooks/ayolinx`), not the documented `/v1/qr/qr-mpm-notify` Ayolinx-hosted path this
+config used to default to. **Fixed same-day** (`callback-route`'s default corrected in
+`application.yml`) and **confirmed twice against real traffic**: a fresh callback via the sandbox
+portal's "Mark success" simulator, and — unprompted — Ayolinx's own webhook retry mechanism
+redelivering an earlier failed callback, both now processing to `payment.status=SUCCESS` with a
+ledger entry posted. Both test orders landed in `REFUND_PENDING` rather than fully fulfilled, which
+is `TC-BE-018`'s own expected result (no decomposition pattern exists for the test fixture SKU), so
+that row is also now confirmed for real as a side effect. `TC-BE-009`–`TC-BE-012` (failed/duplicate/
+replay callback) remain unexercised — see `backend/README.md` for the full account and what's still
+open.
 
 ### 25.3 QRIS & Amount Constraints
 

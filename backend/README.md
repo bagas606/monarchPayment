@@ -1054,23 +1054,42 @@ database — see that slice's notes.
     confirms the callback payload shape assumed from public docs is correct, and that the tunnel +
     routing + JSON deserialization path all work end-to-end against a real Ayolinx-originated
     request — previously a completely untested leg.
-    **Signature verification, however, rejected it** (`SIGNATURE_INVALID`, HTTP 401,
+    **Signature verification initially rejected it** (`SIGNATURE_INVALID`, HTTP 401,
     `webhook_event.status=FAILED`). This was *not* a missing-key problem — the portal-issued
     `PPOB2_AYOLINX_PUBLIC_KEY_PEM` (Ayolinx's own public key, captured at registration, see above)
     was confirmed loaded and is definitionally the correct key for this purpose. A control
     experiment — signing a same-shaped callback body with our own keypair as a stand-in and posting
-    it to the same endpoint after a clean app restart — also failed verification, which rules out a
-    stale-process/config-loading issue and isolates the mismatch to the **`ROUTE` component of the
+    it to the same endpoint after a clean app restart — also failed verification, which ruled out a
+    stale-process/config-loading issue and isolated the mismatch to the **`ROUTE` component of the
     signed string** (`METHOD:ROUTE:SHA256_HEX(BODY):TIMESTAMP`, `AyolinxSigner.verifyCallback`):
-    `callback-route` currently defaults to the *documented* `/v1/qr/qr-mpm-notify` per Section 25.2,
-    but nothing confirms that's the exact literal string Ayolinx signs against for a callback sent
-    to a *merchant-supplied* URL rather than a fixed Ayolinx-hosted path — exactly the "genuinely
-    undocumented" caveat `AyolinxSigner`'s own Javadoc already flagged, now backed by a real,
-    reproducible rejection instead of a guess. Diagnosing the exact string Ayolinx signs would
-    require capturing the real `X-SIGNATURE`/`X-TIMESTAMP` headers from a live callback (not
-    currently logged/persisted anywhere — `webhookEventRecorder` only records the body) — flagged
-    as the concrete next step, not attempted here since it needs a code change and wasn't asked for
-    in this pass.
+    `callback-route` used to default to the *documented* `/v1/qr/qr-mpm-notify` per Section 25.2,
+    which was never confirmed to be the exact literal string Ayolinx signs against for a callback
+    sent to a *merchant-supplied* URL rather than a fixed Ayolinx-hosted path.
+
+    **Root-caused and fixed the same day.** `PaymentCallbackService` was given a one-line debug log
+    of the real `X-SIGNATURE`/`X-TIMESTAMP` headers on rejection (they weren't captured anywhere
+    before), and a temporary probe in `AyolinxPaymentGateway.verifyCallbackSignature` replayed that
+    *same real signature* against a short list of candidate route strings using the actual
+    `AyolinxSigner.verifyCallback` — no guessing, no re-derivation, just asking "does this literal
+    string verify". The very first real rejected callback answered it: **`/internal/webhooks/ayolinx`
+    — this app's own registered callback path — is what Ayolinx signs against**, not any
+    Ayolinx-hosted doc path. `callback-route`'s default was corrected accordingly (`application.yml`),
+    the probe removed (it did its job), and the Javadocs updated to state this as confirmed rather
+    than assumed.
+
+    **Verified fixed, twice, for real**: after restarting with the corrected default, using the
+    Ayolinx sandbox portal's own "Transaction Simulator" ("Mark success" button on a pending
+    transaction) to trigger a fresh callback for `ORD-20260914-000004` produced
+    `webhook_event.status=RECEIVED` (not `FAILED`), `payment.status=SUCCESS`, `paid_at` populated,
+    and a `PAYMENT` ledger `CREDIT` entry posted — the full inbound path, for the first time, working
+    end-to-end. Separately, and unprompted, **Ayolinx's own webhook retry mechanism** (per
+    doc.ayolinx.id/api-299374923, redelivery on a non-2xx response) redelivered the *earlier* failed
+    callback for `ORD-20260914-000003` a few seconds later, and it now succeeded too — confirming the
+    fix without any manual replay on that one. Both orders landed in `REFUND_PENDING` rather than
+    fully fulfilled, which is the *correct* PRD behavior here, not a new bug: `E2E_PRODUCT` (the test
+    fixture SKU) has no real `decomposition_pattern` rows, so `ParentOrderTransitionService` logged
+    "No eligible decomposition pattern ... BR-DEC exhaustion, routing to REFUND_PENDING" — exactly
+    `TC-BE-018`'s expected result, now also confirmed for real as a side effect of this run.
   - **Credential handling**: the RSA keypair was generated locally and only the public half was
     ever transmitted anywhere (to the Ayolinx portal, itself not a secret by definition); the
     `client-key`/`client-secret` and the generated private key were placed directly into local
@@ -1091,10 +1110,14 @@ database — see that slice's notes.
   | TC-BE-002 — unsupported amount | `422 UNSUPPORTED_AMOUNT` |
   | TC-BE-003 — amount above QRIS ceiling | `422 UNSUPPORTED_AMOUNT` ("exceeds the QRIS transaction ceiling") |
 
-  `TC-BE-008`–`TC-BE-012` (callback success/duplicate/replay/invalid-signature) could not be
-  exercised the same way — every attempt is gated on `verifyCallbackSignature` succeeding first,
-  which is exactly the open item the bullet above describes, so those remain unverified pending
-  that fix. `TC-BE-007` (QR expiry sweep) and `TC-BE-033/034` (settlement allocation) were already
+  `TC-BE-008` (payment success callback → `payment` row `SUCCESS`, ledger entry posted) is now also
+  confirmed for real, for the same reason as the bullet above (the `callback-route` fix unblocked
+  it) — see that entry for the full account, including `TC-BE-018`'s incidental real confirmation.
+  `TC-BE-009`–`TC-BE-012` (failed/duplicate/replay/invalid-signature callback) still weren't
+  exercised — they need a deliberately-malformed or deliberately-stale callback, which the sandbox's
+  own "Mark success" simulator doesn't produce; a genuinely invalid signature was tested (Section
+  "Real sandbox round-trip" above, before the fix, as a synthetic negative case) but not replayed
+  since. `TC-BE-007` (QR expiry sweep) and `TC-BE-033/034` (settlement allocation) were already
   covered — the former needs a longer-running observation not attempted in this pass, the latter by
   `SettlementAllocationServiceTest` plus the real-Postgres run documented above.
 

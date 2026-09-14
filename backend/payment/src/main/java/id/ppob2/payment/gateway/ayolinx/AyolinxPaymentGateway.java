@@ -32,12 +32,12 @@ import org.springframework.web.reactive.function.client.WebClientResponseExcepti
  * sandbox: a genuine EMV/QRIS payload carrying real BNC acquirer data came back for a real
  * {@code POST /api/v1/orders} call, with zero warnings across the RSA-signed token request and the
  * HMAC-SHA512-signed generate-QR request (see README's "Real sandbox round-trip" entry). The
- * inbound callback path has since been round-tripped too — sandbox Demo Mode auto-completes an
- * issued QR and delivers a genuine callback to the registered URL — confirming the payload shape
- * ({@link id.ppob2.payment.callback.AyolinxCallbackPayload}) and tunnel/routing, but
- * {@link #verifyCallbackSignature} rejected it; see {@code backend/README.md}'s "Inbound callback
- * path" entry for the narrowed-down open issue (the {@code callbackRoute} signed-string component
- * is unconfirmed, not a missing- or wrong-key problem). Activated by setting
+ * inbound callback path has since been round-tripped too, closing the last open gap:
+ * {@code callbackRoute} now correctly defaults to this app's own registered callback path
+ * ({@code /internal/webhooks/ayolinx}), confirmed by replaying a real rejected callback's
+ * signature against several candidates — Ayolinx signs against the merchant-supplied notification
+ * URL's own path, not a fixed Ayolinx-hosted doc path. See {@code backend/README.md}'s "Inbound
+ * callback path" entry for the full account. Activated by setting
  * {@code ppob2.payment.gateway=ayolinx}; the default stays {@link
  * id.ppob2.payment.gateway.StubQrisPaymentGateway} ({@code stub}, dev default) — a
  * {@code @Profile} guard was deliberately replaced with this property so the real gateway can
@@ -171,9 +171,12 @@ public class AyolinxPaymentGateway implements PaymentGateway {
     }
 
     /**
-     * See class Javadoc's "Known unknowns" — {@code callbackRoute} is a best-effort default
-     * ({@code /v1/qr/qr-mpm-notify}, Ayolinx's documented QRIS notify path), not a confirmed
-     * value for what they actually sign against when calling *our* registered URL.
+     * Confirmed 2026-09-14 against a real Ayolinx sandbox callback: {@code callbackRoute} is
+     * *our own* registered callback path ({@code /internal/webhooks/ayolinx}, this app's actual
+     * {@code AyolinxWebhookController} mapping) — Ayolinx signs against the path of the
+     * merchant-supplied notification URL, not a fixed Ayolinx-hosted doc path. Found by replaying
+     * a real rejected callback's signature/timestamp/body against a handful of route candidates;
+     * see {@code backend/README.md}'s "Inbound callback path" entry for the full account.
      */
     @Override
     public boolean verifyCallbackSignature(String rawBody, Map<String, String> headers) {
