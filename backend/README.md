@@ -1168,9 +1168,18 @@ database — see that slice's notes.
   was switched to a dynamic "now" value since it would otherwise now fail this same check for an
   unrelated reason.
 
-  `TC-BE-007` (QR expiry sweep) and `TC-BE-033/034` (settlement allocation) were already covered —
-  the former needs a longer-running observation not attempted in this pass, the latter by
-  `SettlementAllocationServiceTest` plus the real-Postgres run documented above.
+  **`TC-BE-007` (QR expiry sweep) is now confirmed too, two ways.** Organically: several orders in
+  this run (`ORD-...-000001`, `...-000002`) simply reached their real 15-minute `QRIS_EXPIRY` TTL
+  over the course of testing and were picked up by `QrExpirySweepJob`'s next 60-second tick with no
+  intervention — visible in the app log as `"QR expiry sweep: expiring N parent_order(s) past their
+  QR TTL"`. Deliberately, for a fast and precisely-timed repro: a fresh order
+  (`ORD-20260914-000011`) was created, then its `parent_order.expires_at` backdated by one minute
+  directly in Postgres (a standard TTL-testing technique — it exercises the exact same
+  `findByStateAndExpiresAtBefore` query and `expirePaymentPending` transition the real 15-minute
+  wait would, just without waiting 15 real minutes for it) — the very next sweep tick (within ~10s)
+  transitioned it to `parent_order.state=EXPIRED` **and** `payment.status=EXPIRED`, matching this
+  test case's expected result exactly. `TC-BE-033/034` (settlement allocation) was already covered
+  by `SettlementAllocationServiceTest` plus the real-Postgres run documented above.
 
 - **Webhook Retry Sweep** (Section 23.8 / 40.4) closes the gap this README used to flag as "no
   delivery/retry machinery, no persisted delivery-attempt-count, and no scheduled re-driver" —

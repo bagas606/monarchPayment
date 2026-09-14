@@ -1350,8 +1350,13 @@ ledger entry posted — no timestamp-freshness window existed anywhere in
 outbound-facing check. The window is deliberately generous, not tight, because Ayolinx's own
 callback redelivery (observed for real, see `TC-BE-008`) can legitimately arrive up to an hour
 later — a narrower window would reject Ayolinx's own retries, not just genuine replay attempts.
-Re-verified against the exact same attack: now correctly rejected (`401`, no state change). See
-`backend/README.md` for the full account and what else remains unexercised (`TC-BE-007`).
+Re-verified against the exact same attack: now correctly rejected (`401`, no state change).
+
+**`TC-BE-007` (QR expiry sweep) is confirmed too** — organically, via orders that simply reached
+their real 15-minute TTL during this run and were swept automatically, and deliberately via a
+backdated `expires_at` on a fresh order for a fast, precise repro: the next `QrExpirySweepJob` tick
+(~60s cadence) transitioned it to `parent_order.state=EXPIRED` and `payment.status=EXPIRED`, exactly
+as this row specifies. See `backend/README.md` for the full account.
 
 ### 25.3 QRIS & Amount Constraints
 
