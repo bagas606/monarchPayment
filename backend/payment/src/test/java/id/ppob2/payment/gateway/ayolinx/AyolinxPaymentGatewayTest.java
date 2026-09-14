@@ -10,6 +10,9 @@ import id.ppob2.sharedkernel.money.Money;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.Base64;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -74,11 +77,37 @@ class AyolinxPaymentGatewayTest {
                 "Asia/Jakarta", publicPem);
 
         String body = "{\"latestTransactionStatus\":\"00\"}";
-        String timestamp = "2024-09-12T12:55:00+07:00";
+        // Must be "now" (not a fixed historical value): verifyCallbackSignature enforces the
+        // Section 25.2 replay window (see AyolinxPaymentGateway's Javadoc on that check) before
+        // even checking the signature, and a stale timestamp is covered separately below.
+        String timestamp = OffsetDateTime.now(ZoneOffset.UTC).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
         String signature = signFor(keyPair, body, timestamp);
 
         assertThat(gateway.verifyCallbackSignature(body, Map.of("X-SIGNATURE", signature, "X-TIMESTAMP", timestamp))).isTrue();
         assertThat(gateway.verifyCallbackSignature("{\"tampered\":true}", Map.of("X-SIGNATURE", signature, "X-TIMESTAMP", timestamp))).isFalse();
+    }
+
+    @Test
+    void verifyCallbackSignatureRejectsAValidlySignedButStaleTimestamp() throws Exception {
+        // TC-BE-011, confirmed 2026-09-14 as a real gap and closed: a callback signed correctly
+        // for a 2-hour-old X-TIMESTAMP must not verify, even though the signature itself is
+        // genuinely valid for that exact (stale) timestamp string.
+        KeyPair keyPair = generateRsaKeyPair();
+        String publicPem = "-----BEGIN PUBLIC KEY-----\n"
+                + Base64.getMimeEncoder(64, new byte[]{'\n'}).encodeToString(keyPair.getPublic().getEncoded())
+                + "\n-----END PUBLIC KEY-----\n";
+        AyolinxPaymentGateway gateway = new AyolinxPaymentGateway(
+                new AyolinxTokenService(UNREACHABLE_BASE_URL, "client-key", ""),
+                UNREACHABLE_BASE_URL, "client-key", "client-secret", "BNC_QRIS", "", "/v1/qr/qr-mpm-notify",
+                "Asia/Jakarta", publicPem);
+
+        String body = "{\"latestTransactionStatus\":\"00\"}";
+        String staleTimestamp = OffsetDateTime.now(ZoneOffset.UTC).minusHours(2)
+                .format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
+        String signature = signFor(keyPair, body, staleTimestamp);
+
+        assertThat(gateway.verifyCallbackSignature(body, Map.of("X-SIGNATURE", signature, "X-TIMESTAMP", staleTimestamp)))
+                .isFalse();
     }
 
     private static AyolinxPaymentGateway gatewayWithUnreachableBaseUrl() {

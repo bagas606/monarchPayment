@@ -83,6 +83,7 @@ public class AyolinxPaymentGateway implements PaymentGateway {
     private static final Logger log = LoggerFactory.getLogger(AyolinxPaymentGateway.class);
     private static final Duration TIMEOUT = Duration.ofSeconds(10);
     private static final DateTimeFormatter TIMESTAMP_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssXXX");
+    private static final Duration CALLBACK_TIMESTAMP_WINDOW = Duration.ofHours(1);
 
     private final WebClient webClient = WebClient.builder().build();
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -189,7 +190,34 @@ public class AyolinxPaymentGateway implements PaymentGateway {
         if (signature == null || signature.isBlank() || timestamp == null || timestamp.isBlank()) {
             return false;
         }
+        if (!withinCallbackTimestampWindow(timestamp)) {
+            log.warn("Ayolinx callback X-TIMESTAMP {} outside the {} replay window — rejecting", timestamp, CALLBACK_TIMESTAMP_WINDOW);
+            return false;
+        }
         return AyolinxSigner.verifyCallback(ayolinxPublicKey, "POST", callbackRoute, rawBody, timestamp, signature);
+    }
+
+    /**
+     * Section 25.2's "Replay protection: Timestamp window + nonce/dedup_key" for the inbound
+     * callback path, confirmed 2026-09-14 as a real gap (a validly-signed but 1-hour-old callback
+     * was accepted and fully processed) and closed here — mirroring
+     * {@code HmacAuthenticationFilter#checkTimestampWindow}'s pattern for the outbound-facing
+     * partner API, adapted to Ayolinx's ISO-8601-with-offset {@code X-TIMESTAMP} format rather than
+     * epoch millis. A generous 1-hour window (rather than that filter's 5 minutes) is deliberate:
+     * doc.ayolinx.id/api-299374923 documents callback redelivery "up to 4x over 1h" on a non-2xx
+     * response, and this app's own retry-redelivery was independently observed for real (see
+     * backend/README.md's "Inbound callback path" entry) — too tight a window would reject
+     * Ayolinx's own legitimate retries, not just genuine replay attempts. A malformed timestamp is
+     * treated as out-of-window (fails closed), same as a missing one above.
+     */
+    private boolean withinCallbackTimestampWindow(String timestampHeader) {
+        try {
+            OffsetDateTime callbackTime = OffsetDateTime.parse(timestampHeader);
+            Duration drift = Duration.between(callbackTime.toInstant(), java.time.Instant.now()).abs();
+            return drift.compareTo(CALLBACK_TIMESTAMP_WINDOW) <= 0;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private String post(String path, String body) {
