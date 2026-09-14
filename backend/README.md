@@ -1253,18 +1253,50 @@ Known gaps to close before this is production-real:
     splitting out if a broader settlement read surface gets built later). Attribution is recorded
     for reporting; it does not disburse anything to the partner — see Section 37.3's explicit scope
     note and the "Gap" note this leaves below.
-  - **Verified by unit test only (`SettlementAllocationServiceTest`), not against a real Postgres
-    run** — this development environment has no JDK 21 installed (only 8 and 17; the toolchain was
-    temporarily overridden to 17 to compile and run the test suite, then reverted — the code uses
-    no Java-21-specific syntax) and no local Postgres reachable to exercise the migration and the
-    full ingest → allocate path end-to-end the way this README's other slices were verified. All
-    five `SettlementAllocationServiceTest` cases pass (even split, an uneven three-way split
-    confirming the largest-remainder tie-break lands on the lowest `partner_id`, a single-partner
-    settlement, an empty partner map, and the zero-total-expected rejection), and the full existing
-    suite (25 test classes across every module) still passes unchanged — but the V20 migration
-    itself, and the `order`/`payment` native join query, have **not** been run against a real
-    database. Treat this the same way the codebase treats any other Mockito-only slice: the logic
-    is verified, the schema and cross-table query are not.
+  - **Verified end-to-end against a real Postgres instance and a real HTTP call**, not just
+    `SettlementAllocationServiceTest`'s mocked-repository cases. This development environment had
+    no JDK 21 (only 8 and 17) and no local Postgres when the code was first written — both gaps
+    closed for this verification: JDK 21 installed as a portable zip (the MSI installer's UAC
+    prompt couldn't be approved non-interactively, so the no-install distribution was used
+    instead), Postgres started from the `docker-compose.yml` already checked into this repo. All 20
+    migrations applied cleanly, including V20.
+    - Seeded two partners directly via SQL (bypassing the not-yet-built order-creation flow, the
+      same pragmatic shortcut this README already uses elsewhere for un-built upstream pipelines):
+      Partner A with a `SUCCESS` payment of 33,000, Partner B with 67,000, both dated the same
+      settlement day. `POST /internal/settlement/ingest` with `actual_amount=100001,
+      fee_amount=1` deliberately chosen so neither pool divides evenly by the 33,000:67,000
+      weighting — a real test of the rounding rule, not just the tie-break case
+      `SettlementAllocationServiceTest` already covers with equal weights.
+    - Result, read back from `GET /admin/settlements/{id}/allocations` **and** independently via
+      `SELECT` against `settlement_partner_allocation` directly (not trusting the API response
+      alone): Partner A `gross=33000/fee=0/net=33000`, Partner B `gross=67001/fee=1/net=67000`.
+      Partner B — the larger weight, hence the larger remainder — correctly won both leftover
+      units; `SUM(gross_amount)=100001` and `SUM(fee_allocated)=1` matched `settlement.actual_amount`/
+      `fee_amount` exactly, confirmed by a direct `SUM(...)` query, not recomputed in application
+      code. The existing `ledger_entry` (`SETTLEMENT`/`CREDIT`/100001) and `reconciliation`
+      (`PAYMENT_VS_SETTLEMENT`/`OPEN`, since 100001 ≠ the 100000 expected) rows were also confirmed
+      present and unaffected by this slice's addition, in the same transaction.
+    - **A real, pre-existing bug (not introduced by this slice) surfaced during this run**:
+      `SettlementIngestionController.SettlementIngestionRequest` declares plain camelCase fields
+      (`actualAmount`, `pgReference`, ...) with no `@JsonNaming` override, but `application.yml`
+      configures `spring.jackson.property-naming-strategy: SNAKE_CASE` globally — the same
+      mismatch `AyolinxCallbackPayload` already works around with its own `@JsonNaming(...
+      LowerCamelCaseStrategy.class)`. A camelCase request body — the shape anyone would reach for
+      from the Java field names — silently deserializes to an all-null record (Jackson finds no
+      matching `snake_case` property for any field), which then NPEs inside `Money.of(null)`
+      rather than failing with a clear validation error. Only visible by actually calling the
+      endpoint over HTTP; `SettlementIngestionServiceTest` tests the service layer directly and
+      never touches Jackson, so it could not have caught this. Confirmed and worked around by
+      resending the identical request with snake_case keys (`settlement_date`, `actual_amount`,
+      ...), which ingested correctly — not fixed here, since it's orthogonal to this slice; flagged
+      as its own follow-up rather than silently patched in passing.
+    - `order`/`payment`/`settlement`/`reconciliation`/`ledger` migrations and the native
+      `sumSuccessfulPaymentAmountByPartnerForDate` join query are therefore now real-database
+      verified, not merely unit-tested — the caveat this bullet previously carried no longer
+      applies. `SettlementAllocationServiceTest`'s five cases (even split, the uneven three-way
+      split whose tie-break lands on the lowest `partner_id`, a single partner, an empty partner
+      map, and the zero-total-expected rejection) and the full existing suite (25 test classes)
+      still pass unchanged.
   - **Gap, not built**: an actual payout/disbursement to each partner's own bank account. Section
     37.3 scopes this deliberately narrow — attribution only — and Section 7 lists a future
     payout/disbursement capability as its own not-yet-specified feature, with its own
