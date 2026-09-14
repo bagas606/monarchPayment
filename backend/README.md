@@ -1113,12 +1113,22 @@ database — see that slice's notes.
   `TC-BE-008` (payment success callback → `payment` row `SUCCESS`, ledger entry posted) is now also
   confirmed for real, for the same reason as the bullet above (the `callback-route` fix unblocked
   it) — see that entry for the full account, including `TC-BE-018`'s incidental real confirmation.
-  `TC-BE-009`–`TC-BE-012` (failed/duplicate/replay/invalid-signature callback) still weren't
-  exercised — they need a deliberately-malformed or deliberately-stale callback, which the sandbox's
-  own "Mark success" simulator doesn't produce; a genuinely invalid signature was tested (Section
-  "Real sandbox round-trip" above, before the fix, as a synthetic negative case) but not replayed
-  since. `TC-BE-007` (QR expiry sweep) and `TC-BE-033/034` (settlement allocation) were already
-  covered — the former needs a longer-running observation not attempted in this pass, the latter by
+  `TC-BE-010` (duplicate callback) and `TC-BE-012` (invalid signature) are now confirmed too:
+
+  | Test Case | Result |
+  |---|---|
+  | TC-BE-012 — garbage `X-SIGNATURE` | `401`, `webhook_event.status=FAILED`, no payment/order state change |
+  | TC-BE-010 — exact replay of a real, validly-signed callback | `200` (signature still verifies — same body/timestamp/signature triple), but `payment_event`'s `dedup_key` unique constraint held: only 1 row for that key exists, `payment.paid_at` unchanged, not reprocessed |
+
+  `TC-BE-010`'s replay needed the *exact* original bytes Ayolinx sent (a byte-for-byte difference
+  would fail signature verification, not exercise dedup logic at all) — `webhook_event.payload` is
+  `jsonb`, which reformats/reorders on storage, so a one-line temporary log of the raw body
+  (alongside the existing header log, removed again immediately after use) captured it verbatim from
+  a real "Mark success"-triggered callback for replay. `TC-BE-009`/`TC-BE-011` (failed-payment
+  callback, stale-timestamp replay) still aren't exercised — the sandbox simulator only produces a
+  SUCCESS-shaped callback, and a stale-but-otherwise-valid-signature replay wasn't attempted.
+  `TC-BE-007` (QR expiry sweep) and `TC-BE-033/034` (settlement allocation) were already covered —
+  the former needs a longer-running observation not attempted in this pass, the latter by
   `SettlementAllocationServiceTest` plus the real-Postgres run documented above.
 
 - **Webhook Retry Sweep** (Section 23.8 / 40.4) closes the gap this README used to flag as "no

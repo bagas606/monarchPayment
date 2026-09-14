@@ -1326,9 +1326,14 @@ portal's "Mark success" simulator, and — unprompted — Ayolinx's own webhook 
 redelivering an earlier failed callback, both now processing to `payment.status=SUCCESS` with a
 ledger entry posted. Both test orders landed in `REFUND_PENDING` rather than fully fulfilled, which
 is `TC-BE-018`'s own expected result (no decomposition pattern exists for the test fixture SKU), so
-that row is also now confirmed for real as a side effect. `TC-BE-009`–`TC-BE-012` (failed/duplicate/
-replay callback) remain unexercised — see `backend/README.md` for the full account and what's still
-open.
+that row is also now confirmed for real as a side effect.
+
+`TC-BE-012` (invalid signature) and `TC-BE-010` (duplicate callback) are also now confirmed against
+the live endpoint: a garbage `X-SIGNATURE` produces `401`/`FAILED` with no state change, and an exact
+replay of a real, validly-signed callback re-verifies (same bytes) but is correctly not reprocessed
+— `payment_event`'s `dedup_key` unique constraint holds it to exactly one row, `payment.paid_at`
+unchanged. `TC-BE-009`/`TC-BE-011` (failed-payment callback, stale-timestamp replay) remain
+unexercised — see `backend/README.md` for the full account and what's still open.
 
 ### 25.3 QRIS & Amount Constraints
 
