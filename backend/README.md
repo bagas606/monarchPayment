@@ -1181,6 +1181,242 @@ database — see that slice's notes.
   test case's expected result exactly. `TC-BE-033/034` (settlement allocation) was already covered
   by `SettlementAllocationServiceTest` plus the real-Postgres run documented above.
 
+- **Full test cycle, 2026-09-27 — every remaining `TC-BE-*` / `TC-ADM-*` case run for real, nine
+  pre-existing defects found and fixed, plus four defects in those fixes caught on review.** Run
+  against a wiped Postgres volume (all 20 migrations re-applied from zero, clean), the app booted on
+  the default profile, `./gradlew build` green throughout. The end-to-end scripts this produced
+  (`scripts/e2e/`) finish 70/70 on a clean slate.
+
+  **Newly confirmed PASS this run** (real signed HTTP + `psql` row inspection, not reasoning):
+
+  | TC | Evidence |
+  |---|---|
+  | `TC-BE-013` | New `timeout-provider-sku-ids` knob: 3 attempt log lines (`attempt 1/3`, `2/3`, `3/3`), **exactly one** `provider_transaction` row (`child-2-attempt-1`, status `TIMEOUT`), child `FAILED` after exhaustion, parent `FAILED`, **no** PROVIDER ledger debit |
+  | `TC-BE-014` | Child on the injected-failure SKU → `FAILED` with `attempt_count=1`. Not a missing retry: `FAILED` is the non-retryable class per Section 27.2, and only `TIMEOUT` is retried — the exhaustion half is `TC-BE-013` above |
+  | `TC-BE-015` | Two levels. DB: a duplicate `(provider_id, idempotency_key)` insert is rejected by `provider_transaction_idem_uk`. App: two **concurrent** admin retries on the same child order produced exactly one new row (`child-4-attempt-2`) and `attempt_count` 1→2, never 3 — `markExecuting`'s guard held |
+  | `TC-BE-016` | `40000 -> [A ok, B fail]` → parent `PARTIAL_FAILED`, never silently `SUCCESS` |
+  | `TC-BE-017` | `20000 -> [A]` → parent `SUCCESS`, `provider_transaction` `SUCCESS` |
+  | `TC-BE-020` | SKU quota exhausted (`quota_daily=2` vs `daily_usage=4`): the higher-scored pattern (99) became ineligible and routing picked the alternate (50) |
+  | `TC-BE-021` | `pattern_economics.eligible=false` + negative `net_contribution`: excluded, alternate selected |
+  | `TC-BE-023` | SKU `INACTIVE` → every pattern containing it excluded **at routing**. The Section 30.3 *invalidation* half is still a gap — see below |
+  | `TC-BE-028` | `ORDER_VS_FULFILLMENT` rows opened automatically with correct values (`20000` vs `0`; `40000` vs `20000` for the partial), status `OPEN` |
+  | `TC-BE-029` / `TC-BE-030` | `200` + `CANCELLED` from `PAYMENT_PENDING`; `409 ORDER_NOT_CANCELLABLE` from `SUCCESS`, state unchanged |
+  | Section 34.1 | Ambiguous purchase → `inquire()` confirmed success → child `SUCCESS` via `resolveAmbiguous`, `purchase()` never called twice |
+
+  **Bugs found and fixed.** Each was reproduced first, fixed, then re-reproduced. Numbered 1–7 here;
+  two more (`04`/`05` terminal statuses, and the missing `private-key-pem` check) are in the review
+  pass below, which also corrected four defects in these very fixes:
+
+  1. **Every framework-level rejection returned `500 INTERNAL_ERROR`** with a full stack trace.
+     An unknown path, a POST-only route called with `GET`, a malformed JSON body and a missing
+     `Idempotency-Key` header **all** returned `500`. Only application-thrown `ApiException`s
+     mapped correctly. This is a partner-facing correctness bug, not cosmetics: Section 23.1 tells
+     partners to retry on `5xx`, so a permanently-failing request was inviting an infinite retry
+     loop, and every scanner hitting an unknown URL logged an `ERROR` that buries real incidents.
+     Fixed in `GlobalExceptionHandler` (`NOT_FOUND` 404, `METHOD_NOT_ALLOWED` 405,
+     `VALIDATION_ERROR` 400). Re-verified: all six cases now return the correct status in the
+     Section 50.1 envelope.
+  2. **`TC-BE-032`'s anomaly was completely silent.** A `FAILED` callback arriving after terminal
+     `SUCCESS`: `Payment.markFailed()` correctly returns `false` and the `SUCCESS` was never
+     overwritten (that guard was always right) — but `PaymentCallbackService` **discarded the
+     return value**, so there was no log line, no record, and a `200 Successful` acknowledgement.
+     Section 25.2 requires "logged and flagged for manual review".
+  3. **`TC-BE-031`'s reconciliation record did not exist.** A late `SUCCESS` callback after
+     `EXPIRED` correctly did not auto-fulfil, but only logged a WARN whose own text said
+     *"needs a reconciliation record once that module exists"* — a stale claim; the
+     `reconciliation` module has existed since the reconciliation slice.
+     **The `CANCELLED` variant was materially worse and had never been tested**: the payment DID
+     reach `SUCCESS` and a full `CREDIT` was posted to the payment ledger (funds collected), the
+     order stayed `CANCELLED` with zero child orders (nothing delivered), and nothing was recorded
+     anywhere — so no Admin Web view would ever have surfaced that a customer paid and got nothing.
+  4. **A callback could claim any amount and be believed.** `processCallback` never compared the
+     callback's own amount with `payment.amount`. Reproduced: a validly-signed `SUCCESS` callback
+     claiming `"1.00"` against a 20,000 order marked the payment `SUCCESS`, posted a **20,000**
+     `CREDIT`, and fulfilled **20,000** of goods. Now a *parsed* amount that disagrees is not applied
+     at all (shipping goods against an amount the PG never says it collected is the one outcome an
+     operator cannot undo) and opens a discrepancy instead. An amount this code cannot parse is
+     handled differently and deliberately so — see the amount-guard rebalancing below, which reviewed
+     and corrected this fix.
+
+     Bugs 2–4 are fixed together: `payment` publishes `PaymentCallbackAnomalyEvent` and `order`
+     publishes `LatePaymentOnUntransitionableOrderEvent` (Section 20.2 grants neither module an
+     edge to `reconciliation`), and `PaymentCallbackAnomalyOrchestrator` in `app` opens the record —
+     the same composition-root shape as `OrderFulfillmentReconciliationOrchestrator`. This is also
+     the **first** writer of `ReconciliationType.PAYMENT_VS_PG`, which this README previously
+     listed as unwired. Re-verified, each row read back out of Postgres:
+
+     | Case | Record opened (values as finally recorded — see the discrepancy-semantics fix below) |
+     |---|---|
+     | Amount mismatch (20000 billed, 1 reported) | `PAYMENT_VS_PG`, expected 20000, actual 1, **discrepancy −19999**, `OPEN`; payment stayed `PENDING`, zero ledger rows, zero child orders |
+     | `04`/`05`/`06` after a terminal `SUCCESS` | `PAYMENT_VS_PG`, `TERMINAL_STATUS_AFTER_SUCCESS`, expected 20000, actual 0, **discrepancy −20000**; payment stayed `SUCCESS` with `paid_at` unchanged |
+     | `SUCCESS` after `EXPIRED` | `PAYMENT_VS_PG`, `SUCCESS_ON_TERMINAL_PAYMENT`, expected 0, actual 20000, **discrepancy +20000** (a surplus: funds collected against an order we abandoned) |
+     | Unparseable amount | `PAYMENT_VS_PG`, `AMOUNT_UNVERIFIED`, expected 20000, actual 20000, discrepancy 0 — the payment *was* applied in full; the record says only that the check was skipped |
+     | `SUCCESS` on a `CANCELLED` order | `ORDER_VS_FULFILLMENT`, expected 20000, actual 0, **discrepancy −20000**, `OPEN` |
+
+     All four still answer `200` to Ayolinx deliberately — it redelivers anything it considers
+     unacknowledged, and redelivering a mismatched callback would not make it match. Idempotency
+     comes from `payment_event.dedup_key`, which stops a redelivery before it reaches these
+     branches, so the payment-level listener commits in the callback's own transaction; the
+     order-level one needs `REQUIRES_NEW` for the reason `markPaid`'s Javadoc documents at length
+     (it runs in an `AFTER_COMMIT` call tree) — verified by reading the row back from Postgres,
+     not by a passing unit test.
+  5. **`TC-BE-027` failed on three counts.** With Postgres stopped under a running app, a signed
+     `POST /orders` hung for the **full 30s** (Hikari's default `connectionTimeout`) and then
+     returned `500` — with Spring Boot's **default** error body, not the Section 50.1 envelope, so
+     a partner parsing `error_code` got nothing. `/actuator/health` hung past 20s. Fixed:
+     `connection-timeout: 5000`, a new `SERVICE_UNAVAILABLE` (503) code, and — critically — a
+     `DataAccessException` catch **inside `HmacAuthenticationFilter`**, because that filter's
+     `api_client` lookup is the first datastore touch of every request and fails *before*
+     `DispatcherServlet`, where no `@RestControllerAdvice` can see it. Re-verified: **6s**, `503
+     SERVICE_UNAVAILABLE` in the proper envelope, health `DOWN`/503 in 5s, recovery without an app
+     restart, and **zero** orphan/partial rows. The "no partial writes" half always passed.
+  6. **A misconfigured real gateway booted healthy.** Every `ayolinx.*` credential defaults to
+     empty (it must — the stub is the default), so `ppob2.payment.gateway=ayolinx` with no secrets
+     started up fine and failed per-request instead, as a customer-visible order error rather than
+     an alert. Worst of these is a blank `notification-url`: the Generate QRIS call then registers
+     no NOTIFICATION `urlParams` at all, so Ayolinx never calls back and **no payment is ever
+     confirmed**. Added a `@PostConstruct` check (not a constructor check — `AyolinxPaymentGatewayTest`
+     deliberately builds a blank-config instance to assert `verifyCallbackSignature` fails closed,
+     and validating in the constructor deleted that test's ability to exist; six tests went red on
+     the first attempt). Verified: the context now fails with the missing property names listed.
+  7. **`ppob2.security.signature-window-ms` was dead config.** Declared in `application.yml` as
+     "5 minutes, PRD Section 23.2" and read by nothing — `HmacAuthenticationFilter` used a
+     hardcoded constant, so the property looked adjustable and silently was not. Now bound.
+
+  **Reviewing the above found four more things, all fixed in the same pass:**
+
+  - **The out-of-order fix initially covered only `06`.** `AyolinxCallbackPayload`'s own status table
+    treats `04 Refunded` and `05 Canceled` as terminal too, and both were broken differently: `05`
+    only logged, and `04` was in **no status bucket at all**, so a refund landing on a payment whose
+    goods this platform had already delivered fell through to the "Unrecognized status" WARN and was
+    answered `200` with nothing recorded — the same silent class as the original bug. The check is now
+    written once over `isTerminalNonSuccess()` rather than per status code, because enumerating status
+    codes one at a time is exactly what produced three differently-broken branches. The anomaly kind
+    is `TERMINAL_STATUS_AFTER_SUCCESS` (was `FAILED_AFTER_SUCCESS`), and a unit test now loops over
+    all three codes.
+  - **The amount guard was rebalanced, because its own premise is unverified.** Every amount check run
+    on 2026-09-27 used callbacks this repo's own harness generated, so they agreed by construction.
+    The **inbound** amount format has never actually been captured: a genuine sandbox callback was
+    received (see the "Inbound callback path" entry above) but its `amount` field was not recorded
+    against an order with a known billed amount. A strict guard on an unproven format would turn one
+    wrong assumption into a **total payment outage** — every real payment stuck `PENDING`. So the two
+    cases are now separated:
+
+    | Callback amount | Behaviour | Why |
+    |---|---|---|
+    | parses, disagrees with `payment.amount` | payment **not** applied, `AMOUNT_MISMATCH` opened | a disagreement between two parsed numbers is a confident finding about money |
+    | parses, agrees | applied normally | — |
+    | absent or unparseable | payment **is** applied, `AMOUNT_UNVERIFIED` opened | "this code could not parse the field" is an admission about *our* assumption, not a finding about the money; a human is told rather than the payment refused |
+
+    Grouping separators are stripped rather than rejected for the same reason. Sub-rupiah values are
+    still treated as unparseable, never rounded — IDR has no sub-rupiah denomination, so a fractional
+    value means the field does not mean what this code assumes. **Before go-live, capture a real
+    callback's `amount` for an order with a known billed amount and pin it in
+    `AyolinxCallbackPayloadTest`**; until then the inbound format is assumed, and that test says so.
+  - **The startup validation missed `private-key-pem`.** It checked the four properties
+    `AyolinxPaymentGateway` itself reads, but `AyolinxTokenService` needs the private key to sign the
+    B2B access-token request — so a deployment with the other four set and the private key blank would
+    still have booted "healthy" and failed every order. Same `@PostConstruct` check added there.
+  - **`dev-seed.sql` was shipping inside the production bootJar.** It was written to
+    `app/src/main/resources/db/seed/`, which put a `SUPER_ADMIN` row with a known password hash on the
+    deployable artifact's classpath. Flyway would not have executed it (`locations` is
+    `classpath:db/migration`), but "one config property away" is not a boundary worth having. Moved to
+    `scripts/e2e/dev-seed.sql`; verified absent from `app-0.1.0-SNAPSHOT.jar`.
+
+  **A second review pass found four defects in the round-2 code itself** — all four invisible to the
+  end-to-end suite, for one instructive reason: the harness asserted `count(*) = 1` on the
+  reconciliation table and never once looked at what the row actually *said*. Asserting that a record
+  exists is not asserting that it is legible.
+
+  - **The two most dangerous anomalies were being recorded with a discrepancy of `0`.**
+    `reconciliation` has no reason/notes column, so `expected`, `actual` and the derived `discrepancy`
+    are the *only* things an operator sees in Admin Web — the anomaly `Kind` survives only in a log
+    line. Recording `expected = payment.amount, actual = reportedAmount` for every kind meant a
+    `SUCCESS` callback on an `EXPIRED` payment (funds collected for an abandoned order) and a refund
+    landing after goods were delivered **both showed 20000/20000 → discrepancy 0**, which reads as
+    noise and gets resolved unread. The columns now mean "collected per our payment row" vs "collected
+    per the PG", so a surplus reads `+20000` and a reversal reads `−20000`; `TC-BE-028` asks for the
+    *correct* discrepancy value, and it now gets one. Pinned by
+    `PaymentCallbackAnomalyOrchestratorTest` and by discrepancy assertions in the e2e scripts.
+  - **`hasOpenDiscrepancy` on the payment-level listener suppressed real reversals.** Redeliveries are
+    already stopped upstream by `payment_event.dedup_key`, so the guard bought nothing for its stated
+    purpose — while actively swallowing the case that matters most: in the degraded mode
+    `AMOUNT_UNVERIFIED` exists for (the format assumption turns out wrong, so *every* payment opens a
+    record), a later `04`/`05`/`06` for that payment would have been dropped with an `INFO` line.
+    Removed from the payment-level path; kept on the order-level one, where repeated late callbacks for
+    one order genuinely are the same finding.
+  - **Tolerating grouping separators contradicted the rule it was added under.** `.replace(",", "")`
+    turns `"20.000,00"` — the pt/id/de convention, dot grouping and comma decimal — into `"20.000"`
+    into **`Money 20`**. Not `null`: a *confident wrong number*, which then trips `AMOUNT_MISMATCH` and
+    refuses a correctly paid 20,000 order. Being lenient about an unverified format is precisely how
+    you end up blocking money on a guess. Only two unambiguous shapes are accepted now
+    (`1234[.00]` and `1,234,567[.00]`); everything else returns `null` and routes to
+    `AMOUNT_UNVERIFIED`.
+  - **A `06` on an `EXPIRED`/`FAILED` payment opened a `TERMINAL_STATUS_AFTER_SUCCESS` record.** The
+    inline comment said "terminal but NOT SUCCESS" and the code then published the after-success kind.
+    Neither side collected money in that case — it is just a failed attempt on a lapsed QR — so it
+    would have produced one meaningless `OPEN` row per expired order and taught operators to ignore the
+    whole reconciliation type. Now logged at `INFO` and acknowledged, with no record. `TC-BE-009` was
+    re-verified end-to-end after this restructuring, since its only prior e2e evidence predated it.
+
+  **Also verified, since `TC-BE-027` had only been tested on `/api/v1/**`:** a callback posted to
+  `/internal/webhooks/ayolinx` during a database outage returns **`503` in ~6s**, not a `200`
+  acknowledgement — so Ayolinx redelivers rather than the confirmation being silently lost. (Minor
+  known inconsistency: that 503 carries this codebase's `ErrorResponse` envelope, not Ayolinx's
+  `{responseCode, responseMessage}` shape. It is still a JSON body on a non-2xx, which is what
+  triggers redelivery.)
+
+  Also fixed, smaller: the retry loop logged `"…timed out, retrying"` on its *final* attempt too,
+  telling an operator mid-incident to wait for an attempt that would never come. Spotted only
+  because `TC-BE-013` finally exercised that loop end-to-end.
+
+  **Regression re-run after the callback-service changes**, all still passing: `TC-BE-002`
+  (422), `TC-BE-003` (422, ceiling), `TC-BE-004` (same `order_id` twice), `TC-BE-005` (409),
+  `TC-BE-009` (payment `FAILED`, no fulfilment, no ledger), `TC-BE-010` (replay: `paid_at`
+  unchanged, exactly 1 `payment_event` for the dedup key, 1 child order, 1 ledger row),
+  `TC-BE-012` (401, `webhook_event` `FAILED`), `TC-BE-016`/`017`, `TC-ADM-003`/`013`/`015`.
+
+  **Still not implemented** — features, not bugs, and each is a go-live scope decision, not
+  something this run could close:
+  - `TC-BE-019` **pattern-level** quota: `RoutingService` enforces SKU quota only; nothing reads
+    `pattern_usage` for eligibility, and `decomposition_pattern` has no quota column.
+  - `TC-BE-023`'s Section 30.3 **invalidation**: `structural_status` is only ever *read* (filtered
+    to `'VALID'`); nothing in the codebase ever writes it. Confirmed: a pattern whose only SKU is
+    `INACTIVE` stayed `VALID`. Runtime routing does exclude it, so the effect is covered while the
+    mechanism is not.
+  - `TC-BE-024` / `TC-BE-025` (generation validation failure, rollback) and `TC-PROP-001..005`:
+    all require the Rust offline pattern-generation engine, which does not exist.
+  - `TC-BE-026` (Redis down): **nothing is Redis-backed** — `NonceStore` is an in-memory map and
+    pattern lookup goes straight to Postgres. The test case is vacuous as written, but the reason
+    it is vacuous is itself the finding: replay protection and the expiry sweep have no
+    cross-instance coordination, so this is **single-instance-only** until Redis lands.
+  - `TC-ADM-006..011` (transaction search, parent/child drilldown, pricing update, configuration
+    update, pattern viewing, generation trigger): no implementation to test.
+
+- **`TC-ADM-002` / `TC-ADM-005` / `TC-ADM-012` — the three Admin Web gaps this README has flagged
+  twice are now closed and re-verified** (2026-09-27). All three were "specified, half-built":
+  the blocking always worked, the recording did not.
+
+  | TC | Before | After |
+  |---|---|---|
+  | `TC-ADM-002` | `401` correctly, `audit_log` **empty** — no authentication-event listener existed at all | `401` + `ADMIN_LOGIN_FAILED` row: attempted username, `BadCredentialsException`, client IP. `actor_id` is null, not invented — by definition the credentials did not resolve to an account |
+  | `TC-ADM-005` | `403` correctly, `audit_log` **empty** — `AuditService` was only ever called on success paths | `403 PERMISSION_DENIED` + `ADMIN_PERMISSION_DENIED` row with the **real** `actor_id` (the admin is authenticated; only unauthorized), method and path |
+  | `TC-ADM-012` | permission enforced, but the endpoint took **no body**, so `audit_log` recorded *that* a retry happened and by whom, never *why* | `reason` required and validated before any state change: `400 VALIDATION_ERROR` when absent **or blank** (accepting blank would satisfy the signature and not the control), and recorded in `audit_log.after_state` |
+
+  `AdminSecurityAuditListener` listens to the abstract `AbstractAuthenticationFailureEvent`, not
+  just `AuthenticationFailureBadCredentialsEvent`: a disabled/locked `admin_user` raises a
+  different subclass and is just as security-relevant, and the original gap was partly a failure to
+  enumerate cases. The submitted password is never recorded, not even on failure — a mistyped
+  password is frequently another account's correct one. Auditing a denial can never turn a clean
+  `403` into a `500`: a recording failure is logged and swallowed.
+
+  Known limit, stated rather than implied: the denial audit covers `@PreAuthorize` denials (which
+  is `TC-ADM-005`'s exact case) because those reach `DispatcherServlet`'s exception resolution. A
+  URL-level denial thrown by `AuthorizationFilter` before the servlet is entered reaches no
+  `@RestControllerAdvice` and is **not** audited. `audit_log` after the run held exactly one row
+  per action across both success and denial paths — the 1:1 ratio the risk register asked for,
+  previously 0 on the denied side.
+
 - **PRD Section 54 (`TC-ADM-*`) Admin Web test matrix, run for real** — this codebase has no
   browser-based Admin Web (Section 54's own "Method" column names Playwright/Cypress; none exists
   here), so "Admin Web" in practice is real HTTP Basic Auth against the actual `/admin/**` REST
@@ -1195,7 +1431,7 @@ database — see that slice's notes.
   | Test Case | Result |
   |---|---|
   | TC-ADM-001 — login, valid credentials | `200` on an authorized admin call |
-  | TC-ADM-002 — login, invalid credentials | `401` — rejected correctly, **but see gap below** |
+  | TC-ADM-002 — login, invalid credentials | `401` — rejected correctly, **but see gap below** (audit half closed 2026-09-27) |
   | TC-ADM-003 — RBAC: VIEWER attempts a mutating action | `403 PERMISSION_DENIED`, blocked |
   | TC-ADM-004 — RBAC: FINANCE accesses reconciliation module | `200`, granted per the seeded permission matrix |
   | TC-ADM-005 — permission: user without `retry:execute` attempts retry | `403 PERMISSION_DENIED` — blocked correctly, **but see gap below** |
@@ -1204,8 +1440,10 @@ database — see that slice's notes.
   | TC-ADM-014 — settlement display | `200`, real per-partner allocation breakdown returned (gross/fee/net/reconciling total) — see gap below for what this doesn't cover |
   | TC-ADM-015 — reconciliation handling | Full `OPEN → INVESTIGATING → RESOLVED` lifecycle driven for real on `reconciliation` id 1, `resolved_by` correctly recorded as the resolving admin's id |
 
-  **Two real gaps found, not fixed in this pass** (same "tested for real, found a real spec-vs-code
-  gap" pattern as `TC-BE-011`):
+  **Two real gaps found, not fixed in that pass** (same "tested for real, found a real spec-vs-code
+  gap" pattern as `TC-BE-011`). **Both were closed on 2026-09-27 — see the `TC-ADM-002` /
+  `TC-ADM-005` / `TC-ADM-012` entry above for what they now do and how it was re-verified.** The
+  original findings are kept below as the record of what was actually observed:
   - **`TC-ADM-002`/`TC-ADM-005`'s "…audit-logged" half is not implemented.** Both test cases
     explicitly expect a *denied* attempt to still produce an audit trail ("failure audit-logged" /
     "audit-logged as denied attempt"), but `AdminReconciliationController`/`AdminFulfillmentController`
@@ -1547,17 +1785,35 @@ The app validates its schema against Flyway migrations (`spring.jpa.hibernate.dd
 rather than letting Hibernate generate DDL, per Section 22's explicit column types
 (`NUMERIC(18,0)`, `TIMESTAMPTZ`, `GENERATED ALWAYS AS IDENTITY`).
 
-To exercise the one implemented endpoint you need a `channel` / `partner` / `api_client` /
-`product` / `supported_amount` row — there is no seed data yet. Example (adjust the secret to
-whatever you insert into `secret_hash` — see the gap noted above):
+There is no automatic seed data. One runnable fixture covers everything the test matrices below
+need — channel / partner / api_client / product / supported_amount, four provider SKUs (one per
+`StubGameProviderAdapter` outcome), their mandatory `provider_price` rows, six decomposition
+patterns with economics, and an Admin Web user:
 
-```sql
-INSERT INTO channel (code, name) VALUES ('RESELLER_API', 'Reseller API');
-INSERT INTO partner (code, name, channel_id, contract_ref) VALUES ('PPOB1', 'PPOB1', 1, NULL);
-INSERT INTO api_client (client_id, partner_id, secret_hash) VALUES ('ppob1-client', 1, 'dev-secret');
-INSERT INTO product (code, name, category) VALUES ('MOBILE_LEGENDS', 'Mobile Legends', 'GAME_TOPUP');
-INSERT INTO supported_amount (product_category, amount) VALUES ('GAME_TOPUP', 10000), ('GAME_TOPUP', 20000);
+```bash
+docker exec -i backend-postgres-1 psql -U ppob2 -d ppob2 -v ON_ERROR_STOP=1 -1 \
+  < scripts/e2e/dev-seed.sql
 ```
+
+It resolves every id by lookup instead of hardcoding, and it lives under `scripts/` rather than
+`src/main/resources/` on purpose — it briefly did live there, which packaged a `SUPER_ADMIN` row with
+a known password hash into the production bootJar. Flyway would not have run it, but that is one
+config property away from being the only thing that stopped it.
+
+It is a file rather than a README snippet on purpose too: **the snippet that used to live here had silently rotted in two ways**, both
+found on 2026-09-27 by running it verbatim against a fresh database.
+
+- It inserted into `provider (provider_code, ...)`. That column has never existed — it is `code`
+  (`V7__catalog_provider_and_sku.sql`). The statement simply errored out.
+- It predated `V13__provider_price.sql`, and never inserted a `provider_price` row. Without one,
+  `FulfillmentDispatchListener` refuses to dispatch (`"references provider_sku N with no active
+  provider_price — flagging unresolvable rather than dispatching with an unknown cost"`), so every
+  child order went straight to `FAILED` and the parent to `FAILED` — while this README told the
+  reader to expect `SUCCESS`. The app's behaviour was correct; the documentation was not.
+
+The seeded `api_client.secret_hash` holds the HMAC secret verbatim, not a hash — see
+`HmacAuthenticationFilter`'s NOTE. That is a flagged open assumption (Section 73.3) and a real
+go-live blocker, not a property of this fixture.
 
 Then sign a request per Section 23.2 (`HmacSigner` in `shared-kernel` implements the exact
 canonical string) and call:
@@ -1604,19 +1860,8 @@ The order should move to `PAID`, then — since no decomposition pattern is seed
 matching pattern first (note the components must sum exactly to `parent_amount`, per Section
 28.2 — this is now enforced at runtime, see above):
 
-```sql
-INSERT INTO provider (provider_code, name, status, rate_limit_per_min) VALUES ('PROV1', 'Provider 1', 'ACTIVE', 8000);
-INSERT INTO provider_sku (provider_id, product_id, provider_sku_code, face_value, status)
-  VALUES (1, 1, 'ML-20000', 20000, 'ACTIVE');
-INSERT INTO pattern_generation (status, triggered_by, scope, started_at, activated_at)
-  VALUES ('ACTIVE', 'MANUAL', 'FULL', now(), now());
-INSERT INTO decomposition_pattern (generation_id, parent_amount, components, component_count, total_quantity, pattern_hash)
-  VALUES (1, 20000, '[{"provider_sku_id":1,"quantity":1,"face_value":20000}]', 1, 1, repeat('a', 64));
-INSERT INTO decomposition_component (pattern_id, provider_sku_id, quantity, face_value) VALUES (1, 1, 1, 20000);
-INSERT INTO pattern_economics (pattern_id, snapshot_date, provider_cost_total, gross_profit, gross_margin_pct,
-    payment_fee, net_contribution, net_margin_pct, score, eligible)
-  VALUES (1, CURRENT_DATE, 18000, 2000, 10.0, 500, 1500, 7.5, 90.0, true);
-```
+`dev-seed.sql` above already seeds all of this (pattern `a`: `20000 -> [ML-20000-A x1]`), plus a
+`provider_price` row per SKU without which dispatch refuses to run at all.
 
 Once `DECOMPOSITION_SELECTED` is reached, fulfillment dispatch begins automatically (Section 33.2)
 and — with `StubGameProviderAdapter` (`@Profile("!prod")`) as the only `GameProvider` — every
@@ -1768,3 +2013,17 @@ UPDATE partner SET webhook_secret = 'dev-outbound-secret' WHERE code = 'PPOB1';
 ./gradlew build   # compiles every module, packages app/build/libs/app-*.jar (bootJar)
 ./gradlew test    # unit tests (Money, HmacSigner) + a WebMvcTest slice per endpoint
 ```
+
+A green build is **not** evidence that the money paths work. Three of the bugs found on 2026-09-27
+were invisible to this suite and would have stayed invisible: the Section 27.2 retry loop had never
+run against real HTTP, a `FAILED`-after-`SUCCESS` callback was silently swallowed, and a
+paid-but-`CANCELLED` order recorded nothing anywhere. The end-to-end matrices run against a real
+app and a real Postgres, and assert on the resulting rows:
+
+```bash
+scripts/e2e/run-core.sh                  # 57 assertions
+scripts/e2e/run-routing-and-sweeps.sh    # 13 assertions (waits on the 60s expiry-sweep tick)
+```
+
+See `scripts/e2e/README.md` for the prerequisites (fresh seed, the three injection knobs and their
+exact env-var spelling) and for what these deliberately do not cover.

@@ -31,6 +31,17 @@ import org.springframework.stereotype.Component;
  * FulfillmentExecutionService} is exercisable predictably rather than depending on real network
  * flakiness that doesn't exist in a stub.
  *
+ * <p>{@code timeout-provider-sku-ids} is the third knob, added 2026-09-27 to close a real testing
+ * gap rather than to add a feature: {@code FulfillmentExecutionService.executeWithRetry} implements
+ * Section 27.2's bounded retry ({@code MAX_ATTEMPTS = 3}) for the one idempotent-safe-retry class,
+ * {@link PurchaseStatus#TIMEOUT} — and with only the FAILED and AMBIGUOUS knobs above, no
+ * end-to-end path in this codebase could ever produce a TIMEOUT, so that loop had never once run
+ * against a real database and real HTTP. It was unit-tested only, which is exactly the "looks
+ * applied in Java, never lands" class of gap that has already bitten this codebase twice. A
+ * configured provider_sku id returns TIMEOUT from every {@link #purchase} call, so retry
+ * *exhaustion* is deterministic; combine it with nothing else to see all 3 attempts burn and the
+ * child order end {@code FAILED} (TC-BE-013's "FAILED after exhaustion" branch).
+ *
  * <p>{@link #inquire} always confirms {@code SUCCESS} — simulating Section 34.1's canonical
  * ambiguous case (the purchase actually went through; only the response was lost) — with a
  * provider-shaped reference synthesized fresh, not the caller's own idempotency key echoed back:
@@ -45,11 +56,14 @@ public class StubGameProviderAdapter implements GameProvider {
 
     private final Set<Long> failProviderSkuIds;
     private final Set<Long> ambiguousProviderSkuIds;
+    private final Set<Long> timeoutProviderSkuIds;
 
     public StubGameProviderAdapter(@Value("${ppob2.fulfillment.stub-provider.fail-provider-sku-ids:}") String failProviderSkuIds,
-                                    @Value("${ppob2.fulfillment.stub-provider.ambiguous-provider-sku-ids:}") String ambiguousProviderSkuIds) {
+                                    @Value("${ppob2.fulfillment.stub-provider.ambiguous-provider-sku-ids:}") String ambiguousProviderSkuIds,
+                                    @Value("${ppob2.fulfillment.stub-provider.timeout-provider-sku-ids:}") String timeoutProviderSkuIds) {
         this.failProviderSkuIds = parseIds(failProviderSkuIds);
         this.ambiguousProviderSkuIds = parseIds(ambiguousProviderSkuIds);
+        this.timeoutProviderSkuIds = parseIds(timeoutProviderSkuIds);
     }
 
     private static Set<Long> parseIds(String csv) {
@@ -77,6 +91,11 @@ public class StubGameProviderAdapter implements GameProvider {
         }
         if (ambiguousProviderSkuIds.contains(request.providerSkuId())) {
             return PurchaseResult.ambiguous("STUB_INJECTED_AMBIGUOUS for provider_sku " + request.providerSkuId());
+        }
+        // Checked after the two knobs above so a sku listed in more than one keeps a deterministic,
+        // documented precedence (fail > ambiguous > timeout) instead of depending on ordering.
+        if (timeoutProviderSkuIds.contains(request.providerSkuId())) {
+            return PurchaseResult.timeout("STUB_INJECTED_TIMEOUT for provider_sku " + request.providerSkuId());
         }
         return PurchaseResult.success("STUBPROV-" + UUID.randomUUID());
     }

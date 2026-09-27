@@ -124,8 +124,17 @@ public class FulfillmentExecutionService {
             if (!result.isRetryable()) {
                 return result;
             }
-            log.warn("Provider purchase attempt {}/{} timed out for child_order {} (idempotency_key={}), retrying",
-                    attempt, MAX_ATTEMPTS, command.childOrderId(), idempotencyKey);
+            // The final attempt is not followed by a retry, so saying "retrying" there misleads an
+            // operator reading this log during an incident into waiting for an attempt that will
+            // never come. Spotted while exercising this loop end-to-end for the first time on
+            // 2026-09-27 (TC-BE-013, via StubGameProviderAdapter's new timeout knob).
+            boolean willRetry = attempt < MAX_ATTEMPTS;
+            log.warn("Provider purchase attempt {}/{} timed out for child_order {} (idempotency_key={}) — {}",
+                    attempt, MAX_ATTEMPTS, command.childOrderId(), idempotencyKey,
+                    willRetry ? "retrying" : "retries exhausted, giving up");
+            if (!willRetry) {
+                break;
+            }
             backoff(attempt);
         }
         return result;
