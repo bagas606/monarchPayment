@@ -96,6 +96,7 @@ public class AyolinxPaymentGateway implements PaymentGateway {
     private final String callbackRoute;
     private final ZoneId zone;
     private final PublicKey ayolinxPublicKey;
+    private final boolean publicKeyConfigured;
 
     AyolinxPaymentGateway(AyolinxTokenService tokenService,
                           @Value("${ppob2.payment.ayolinx.base-url}") String baseUrl,
@@ -115,6 +116,62 @@ public class AyolinxPaymentGateway implements PaymentGateway {
         this.callbackRoute = callbackRoute;
         this.zone = ZoneId.of(timezone);
         this.ayolinxPublicKey = publicKeyPem.isBlank() ? null : AyolinxSigner.loadPublicKey(publicKeyPem);
+        this.publicKeyConfigured = !publicKeyPem.isBlank();
+    }
+
+    /**
+     * Fails the application context rather than the first live customer's order. Every {@code
+     * ayolinx.*} credential property defaults to an empty string in {@code application.yml} (it
+     * has to — the stub gateway is the default and must boot without them), so before this check a
+     * {@code ppob2.payment.gateway=ayolinx} deployment that was missing its secrets started up
+     * perfectly healthy and then failed per-request: {@code createDynamicQris} catches its own
+     * exceptions and returns {@code PaymentCreateResult.failure}, so the symptom was customers
+     * getting order-creation errors, not an alert. Confirmed by inspection on 2026-09-27 that all
+     * five of these were reachable as blank.
+     *
+     * <p>{@code notification-url} is included deliberately even though nothing throws on it: blank
+     * means the Generate QRIS call registers no {@code urlParams} NOTIFICATION entry at all, so
+     * Ayolinx never calls back, so no payment is ever confirmed — the quietest possible failure in
+     * the whole payment path. {@code public-key-pem} is included for the mirror-image reason: blank
+     * means {@link #verifyCallbackSignature} rejects every inbound callback (it does fail closed,
+     * which is right, but discovering that from rejected production callbacks is not).
+     *
+     * <p>Deliberately NOT validated here: whether the credentials are *correct*. That needs a live
+     * Ayolinx round-trip, which is not something to run during context startup.
+     *
+     * <p>{@code @PostConstruct} rather than the constructor, deliberately: this must fail a Spring
+     * context that wires the real gateway without its secrets, but it must NOT make a
+     * blank-config instance impossible to *construct* — {@code AyolinxPaymentGatewayTest} builds
+     * exactly such an instance on purpose to assert that {@link #verifyCallbackSignature} fails
+     * closed when no public key is configured, which is real behaviour worth keeping testable.
+     * Putting the check in the constructor deleted that test's ability to exist (it did, on the
+     * first attempt at this fix — six tests went red).
+     */
+    @jakarta.annotation.PostConstruct
+    void requireConfigured() {
+        java.util.List<String> missing = new java.util.ArrayList<>();
+        if (baseUrl == null || baseUrl.isBlank()) {
+            missing.add("ppob2.payment.ayolinx.base-url");
+        }
+        if (clientId == null || clientId.isBlank()) {
+            missing.add("ppob2.payment.ayolinx.client-key");
+        }
+        if (clientSecret == null || clientSecret.isBlank()) {
+            missing.add("ppob2.payment.ayolinx.client-secret");
+        }
+        if (notificationUrl == null || notificationUrl.isBlank()) {
+            missing.add("ppob2.payment.ayolinx.notification-url");
+        }
+        if (!publicKeyConfigured) {
+            missing.add("ppob2.payment.ayolinx.public-key-pem");
+        }
+        if (!missing.isEmpty()) {
+            throw new IllegalStateException(
+                    "ppob2.payment.gateway=ayolinx but these required properties are not configured: "
+                            + String.join(", ", missing)
+                            + ". Refusing to start rather than issuing QR codes no customer can pay, or "
+                            + "silently never receiving payment callbacks.");
+        }
     }
 
     @Override

@@ -46,6 +46,27 @@ class AyolinxTokenService {
         this.privateKey = privateKeyPem.isBlank() ? null : AyolinxSigner.loadPrivateKey(privateKeyPem);
     }
 
+    /**
+     * Same fail-at-startup reasoning as {@code AyolinxPaymentGateway.requireConfigured}, for the one
+     * required property that lives here rather than there: without {@code private-key-pem} this
+     * service cannot sign the B2B token request, so every single Ayolinx API call fails — yet the
+     * first version of that startup check validated only the gateway's own four properties and would
+     * have let a deployment with a blank private key boot "healthy" and fail every order. Kept in
+     * this class because this is the class that needs the key.
+     *
+     * <p>{@code @PostConstruct} rather than the constructor for the same reason as the gateway's
+     * check: tests construct this with a blank key on purpose.
+     */
+    @jakarta.annotation.PostConstruct
+    void requirePrivateKey() {
+        if (privateKey == null) {
+            throw new IllegalStateException(
+                    "ppob2.payment.gateway=ayolinx but ppob2.payment.ayolinx.private-key-pem is not configured. "
+                            + "It signs the B2B access-token request, so without it every Ayolinx API call fails. "
+                            + "Refusing to start rather than failing every order at runtime.");
+        }
+    }
+
     synchronized String getAccessToken() {
         Instant now = Instant.now();
         if (cachedToken != null && now.isBefore(cachedExpiry)) {
