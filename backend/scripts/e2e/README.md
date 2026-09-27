@@ -61,7 +61,7 @@ PPOB2_FULFILLMENT_STUBPROVIDER_TIMEOUTPROVIDERSKUIDS=4 \
 
 ## What these do NOT cover
 
-Per-ID status for all 53 PRD test cases, including everything below, lives in
+Per-ID status for all 54 PRD test cases, including everything below, lives in
 [`docs/TEST-STATUS.md`](../../../docs/TEST-STATUS.md). The cases these scripts skip are not gaps in
 the harness — there is nothing to drive:
 

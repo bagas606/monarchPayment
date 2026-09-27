@@ -21,7 +21,7 @@ Five documents, each with one job. Read them in this order.
 |---|---|---|
 | **this file** | Entry point: orientation, quickstart, status, blockers | first |
 | [`docs/PRD-PPOB2.md`](docs/PRD-PPOB2.md) | The specification — business rules (`BR-*`), functional requirements (`FR-*`), the full data model, and the `TC-*` test matrices. **The source of truth for what the system is supposed to do.** | deciding what *should* happen |
-| [`docs/TEST-STATUS.md`](docs/TEST-STATUS.md) | One table covering all 53 PRD test-case IDs: verified, verified-earlier, unit-only, or not implemented — and where the evidence lives | asking "is X actually tested?" |
+| [`docs/TEST-STATUS.md`](docs/TEST-STATUS.md) | One table covering all 54 PRD test-case IDs: verified, verified-earlier, unit-only, or not implemented — and where the evidence lives | asking "is X actually tested?" |
 | [`backend/README.md`](backend/README.md) | The engineering record: module-by-module notes on what is real vs. scaffolded, every deliberate design trade-off, and the dated evidence behind each verified behaviour. Long and chronological by design. | deciding what the code *does*, and why |
 | [`backend/scripts/e2e/README.md`](backend/scripts/e2e/README.md) | Mechanics of the end-to-end harness | running the matrices yourself |
 

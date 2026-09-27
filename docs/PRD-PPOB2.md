@@ -20,6 +20,7 @@
 |---|---|---|---|
 | 0.1 | 2026-09-12 | Combined authoring roles | Initial full-draft PRD generated from Master Prompt |
 | 0.2 | 2026-09-14 | Combined authoring roles | Added per-partner settlement allocation (BR-REC-002, FR-REC-004, Section 22.28, 37.3, 41.8, Risk Register, EPIC-06.4) — closes a gap identified when the platform's downstream reseller topology grew beyond a single partner (PPOB1) to include externally-owned reseller entities requiring their own attributable settlement figures |
+| 0.3 | 2026-09-27 | Combined authoring roles | Defined `TC-BE-033` and `TC-BE-034` in Section 52's matrix. Both were already cited by BR-REC-002's traceability row but had no matrix entry, so the matrix jumped from `TC-BE-032` to nothing while the RTM pointed at two IDs that did not exist. Also moved implementation-status narrative out of Sections 25.2 and 54 into `backend/README.md` / `docs/TEST-STATUS.md`, so this document describes only what the system must do, not what has been built so far. |
 
 ### 1.2 How to Read This Document
 
@@ -2379,6 +2380,8 @@ Response:
 | TC-BE-030 | Cancel order in `SUCCESS` state | 409 `ORDER_NOT_CANCELLABLE` |
 | TC-BE-031 | Late callback after order EXPIRED | No auto-fulfillment; reconciliation record created for manual review |
 | TC-BE-032 | Out-of-order terminal callbacks (FAILED after SUCCESS) | SUCCESS not overwritten; anomaly logged for review |
+| TC-BE-033 | Settlement attribution when the report carries per-transaction lines (`EXACT`) | Each settled line joined to its originating `payment` and attributed to that payment's `parent_order.partner_id`; `allocation_method = EXACT`, no apportionment applied |
+| TC-BE-034 | Settlement attribution from a batch total (`PRO_RATA`) where the amount does not divide evenly | Each partner's raw share floored, then the leftover units distributed one at a time to the largest fractional remainders (ties broken by ascending `partner_id`, for determinism). `SUM(gross_amount) = settlement.actual_amount` and `SUM(fee_allocated) = settlement.fee_amount` hold **exactly** (Section 22.28 / BR-REC-002), with the gross and fee pools apportioned independently. An allocation that cannot be made to sum exactly is rejected as an operational error, never silently forced to balance |
 
 ---
 
@@ -2638,7 +2641,7 @@ The RTM links Business Requirement → Functional Requirement → Module → API
 | BR-BUS-004 | FR-RTE-001..003 | `routing` | (internal) | `pattern_economics`, `pattern_usage` | TC-BE-021 |
 | BR-BUS-005 | FR-ADM-001..003 | `admin` | `/admin/api/v1/*` | `admin_user`, `role`, `permission`, `audit_log` | TC-ADM-001..015 |
 | BR-BUS-006 | FR-REC-001..003 | `ledger`, `reconciliation` | Admin Web reconciliation views | `ledger_entry`, `reconciliation`, `settlement` | TC-BE-028 |
-| BR-REC-002 | FR-REC-004 | `settlement` | Admin Web settlement view (Section 41.8 partner breakdown) | `settlement_partner_allocation` | TC-BE-033 (exact-attribution join). **Open spec question:** this row previously cited `TC-BE-034` for the pro-rata largest-remainder invariant, but no `TC-BE-034` is defined in Section 52's matrix, which ends at `TC-BE-033`. Either add the case or drop the reference — not resolved here, since inventing a test-case ID in the spec is worse than naming the inconsistency. |
+| BR-REC-002 | FR-REC-004 | `settlement` | Admin Web settlement view (Section 41.8 partner breakdown) | `settlement_partner_allocation` | TC-BE-033 (exact-attribution join), TC-BE-034 (pro-rata largest-remainder invariant) |
 | BR-BUS-007 | (architectural, Section 18/24/28) | `order`, `channel` | `/api/v1/orders` (Partner), future `/api/v1/customer/orders` | `channel`, `parent_order.channel_id/order_source` | (architecture review, no single TC — validated via ArchUnit dependency tests) |
 | BR-BUS-009 | FR-CAT-004 | `configuration`, `pricing` | `GET /api/v1/config/supported-amounts` | `supported_amount` | TC-BE-002 |
 
@@ -2769,7 +2772,7 @@ Backlog uses EPIC → Feature → User Story → Technical Task, classified MVP 
 - **Feature 06.1**: Four-ledger append-only posting (P0, M)
 - **Feature 06.2**: Settlement ingestion + matching (P0, M, Dep: Ayolinx settlement report format — Phase 0)
 - **Feature 06.3**: Five reconciliation types + discrepancy workflow (P0, L)
-- **Feature 06.4**: Per-partner settlement allocation — `EXACT`/`PRO_RATA` attribution, largest-remainder rounding, Admin Web breakdown view (P1, M, Dep: confirming whether the Ayolinx settlement report carries per-transaction lines, same open dependency as Feature 06.2 — Section 37.3)
+- **Feature 06.4**: Per-partner settlement allocation — `EXACT`/`PRO_RATA` attribution, largest-remainder rounding, Admin Web breakdown view (P1, M, AC: TC-BE-033/034, Dep: confirming whether the Ayolinx settlement report carries per-transaction lines, same open dependency as Feature 06.2 — Section 37.3)
 
 ### EPIC-07: Admin / Backoffice [MVP Mandatory]
 

@@ -2059,4 +2059,4 @@ scripts/e2e/run-routing-and-sweeps.sh    # 13 assertions (waits on the 60s expir
 
 See [`scripts/e2e/README.md`](scripts/e2e/README.md) for the prerequisites (fresh seed, the three
 injection knobs and their exact env-var spelling) and for what these deliberately do not cover, and
-[`docs/TEST-STATUS.md`](../docs/TEST-STATUS.md) for the per-ID status of all 53 PRD test cases.
+[`docs/TEST-STATUS.md`](../docs/TEST-STATUS.md) for the per-ID status of all 54 PRD test cases.

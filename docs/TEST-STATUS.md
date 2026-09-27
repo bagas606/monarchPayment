@@ -1,4 +1,4 @@
-# Test status — all 53 PRD test-case IDs
+# Test status — all 54 PRD test-case IDs
 
 One table per matrix, covering every ID in [`PRD-PPOB2.md`](PRD-PPOB2.md) Sections 52 (`TC-BE-*`),
 53 (`TC-PROP-*`) and 54 (`TC-ADM-*`). This file answers "is X actually tested, and how do I know?"
@@ -20,7 +20,7 @@ Be suspicious of any claim here that is not tagged **R**.
 | **U** | Covered by a unit test only. No end-to-end path exists to drive it |
 | **X** | **Not implemented.** There is nothing to test |
 
-Counts: **R 28 · R\* 4 · P 5 · U 1 · X 15** — 53 total.
+Counts: **R 28 · R\* 4 · P 5 · U 1 · X 16** — 54 total.
 
 ## Section 52 — Backend (`TC-BE-*`)
 
@@ -58,7 +58,8 @@ Counts: **R 28 · R\* 4 · P 5 · U 1 · X 15** — 53 total.
 | TC-BE-030 | Cancel order in `SUCCESS` | **R** | `409 ORDER_NOT_CANCELLABLE`, state unchanged |
 | TC-BE-031 | Late callback after order `EXPIRED` | **R** | Order stays `EXPIRED`, no fulfilment, **and** a `PAYMENT_VS_PG` record with a `+20000` surplus. The `CANCELLED` variant is also covered and was the more dangerous one: funds were collected and a ledger `CREDIT` posted while nothing was delivered and nothing recorded |
 | TC-BE-032 | Out-of-order terminal callbacks | **R** | `SUCCESS` never overwritten, and the anomaly is now recorded with a `-20000` discrepancy. Covers `06` Failed, `05` Canceled **and** `04` Refunded — all three were previously broken differently |
-| TC-BE-033 | Per-partner settlement allocation | **P** | `SettlementAllocationServiceTest` plus a prior real-Postgres run |
+| TC-BE-033 | Settlement attribution via per-transaction report lines (`EXACT`) | **X** | **Not implemented.** `SettlementAllocationService` implements `PRO_RATA` only; `EXACT` needs the Ayolinx settlement report to carry per-transaction lines, a format Section 37.1 flags as unverified and for which this codebase has no data model. Previously mis-tagged **P** here — the prior evidence covered the pro-rata path (TC-BE-034), not this one |
+| TC-BE-034 | Settlement attribution from a batch total (`PRO_RATA`), uneven split | **P** | Largest-remainder rounding verified against a real Postgres and a real HTTP ingest call: with an indivisible pool the larger-weighted partner correctly won both leftover units and `SUM(gross_amount)=100001` / `SUM(fee_allocated)=1` matched `settlement.actual_amount` / `fee_amount` exactly. `SettlementAllocationServiceTest` covers the rounding rule directly (even split, uneven split with ascending-id tie-break, single partner, no partners, zero total). Not re-run in the 2026-09-27 pass, and not driven by the e2e scripts |
 
 ## Section 53 — Decomposition property tests (`TC-PROP-*`)
 
