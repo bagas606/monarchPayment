@@ -105,9 +105,11 @@ public class ParentOrderTransitionService {
      * PAID} trigger). Unlike {@link #markPaymentPending}, an invalid transition here is not a
      * programmer error to throw on — it is Section 25.2's "late callback" case (the order already
      * moved to {@code EXPIRED}/{@code CANCELLED} before payment confirmation arrived). The PRD
-     * response there is "do NOT auto-fulfill; create a reconciliation discrepancy record", which
-     * needs the not-yet-built `reconciliation` module; this logs the case as the interim marker
-     * rather than silently succeeding or throwing into the event-listener call stack.
+     * response there is "do NOT auto-fulfill; create a reconciliation discrepancy record" — both
+     * halves are now implemented: this returns {@code false} (no auto-fulfilment, unchanged) and
+     * publishes {@link LatePaymentOnUntransitionableOrderEvent} so the composition root opens the
+     * record. Until 2026-09-27 only the first half existed, on the since-outdated grounds that the
+     * `reconciliation` module had not been built yet.
      *
      * <p>{@code REQUIRES_NEW} is load-bearing, not defensive — verified both ways against real
      * Postgres, not just reasoned about. This method is invoked from a
@@ -130,8 +132,10 @@ public class ParentOrderTransitionService {
 
         if (!OrderStateMachine.canTransition(order.getState(), OrderState.PAID)) {
             log.warn("Late payment confirmation for parent_order {} in non-transitionable state {} — "
-                            + "Section 25.2 late-callback case, needs a reconciliation record once that module exists",
+                            + "Section 25.2 late-callback case, opening a reconciliation record",
                     parentOrderId, order.getState());
+            eventPublisher.publishEvent(new LatePaymentOnUntransitionableOrderEvent(
+                    parentOrderId, order.getState(), order.getParentAmount()));
             return false;
         }
         order.transitionTo(OrderState.PAID);
