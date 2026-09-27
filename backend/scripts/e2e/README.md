@@ -18,12 +18,11 @@ back with sweeping failures across unrelated cases, suspect the harness before t
 
 ## Running
 
-```bash
-docker compose up -d
-./gradlew :app:bootRun   # with the injection knobs below
-docker exec -i backend-postgres-1 psql -U ppob2 -d ppob2 -v ON_ERROR_STOP=1 -1 \
-  < scripts/e2e/dev-seed.sql
+Bring up Postgres, the app and the seed fixture as described in the
+[root README's quickstart](../../../README.md#quickstart) — but start the app with the three
+injection knobs below rather than a bare `bootRun`. Then, from `backend/`:
 
+```bash
 scripts/e2e/run-core.sh                  # 57 assertions
 scripts/e2e/run-routing-and-sweeps.sh    # 13 assertions, ~2 min (waits on the 60s sweep tick)
 ```
@@ -62,7 +61,9 @@ PPOB2_FULFILLMENT_STUBPROVIDER_TIMEOUTPROVIDERSKUIDS=4 \
 
 ## What these do NOT cover
 
-Not a gap in the harness — there is nothing to drive:
+Per-ID status for all 53 PRD test cases, including everything below, lives in
+[`docs/TEST-STATUS.md`](../../../docs/TEST-STATUS.md). The cases these scripts skip are not gaps in
+the harness — there is nothing to drive:
 
 - `TC-BE-019` (pattern-level quota), `TC-BE-023`'s invalidation half, `TC-BE-024`/`025`,
   `TC-PROP-001..005`, `TC-ADM-006..011` — all unimplemented. `run-routing-and-sweeps.sh` does assert

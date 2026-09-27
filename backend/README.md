@@ -1,7 +1,35 @@
 # PPOB2 Backend
 
-Modular monolith scaffold for the PPOB2 Core Backend, per [`docs/PRD-PPOB2.md`](../docs/PRD-PPOB2.md).
+Modular monolith for the PPOB2 Core Backend, per [`docs/PRD-PPOB2.md`](../docs/PRD-PPOB2.md).
 Java 21, Spring Boot 3.3, Gradle (Kotlin DSL) multi-module build, PostgreSQL, Flyway.
+
+## What this file is, and is not
+
+This is the **engineering record**: for each slice, what is actually real versus scaffolded, every
+deliberate design trade-off and why it was chosen, and the dated evidence behind every behaviour
+claimed to work. It is long (~2000 lines) and *chronological* — newer entries append rather than
+rewrite, so an entry can be superseded by a later one. When two entries disagree, the later one wins
+and says so.
+
+It is not the place to start. Read in this order:
+
+| You want | Go to |
+|---|---|
+| Orientation, quickstart, go-live blockers | [root `README.md`](../README.md) |
+| What the system is *supposed* to do | [`docs/PRD-PPOB2.md`](../docs/PRD-PPOB2.md) — every `Section N` reference below points here |
+| Whether a given `TC-*` case is verified | [`docs/TEST-STATUS.md`](../docs/TEST-STATUS.md) — all 53 IDs in one table |
+| Running the e2e matrices | [`scripts/e2e/README.md`](scripts/e2e/README.md) |
+
+**How to search this file.** Look up a PRD test-case ID (`TC-BE-013`), a class name
+(`PaymentCallbackService`), or a PRD section number (`Section 25.2`) — the record is written so that
+each of those lands you on the relevant entry. `docs/TEST-STATUS.md` is the index by test ID; this
+file is the evidence behind it.
+
+**A note on gaps.** Where the PRD asks for something this codebase does not do, the gap is named
+next to the thing it affects rather than left implicit. That is deliberate: several defects found
+here were originally *specified* and half-built, and the half that was missing had been recorded as
+a gap — which is how they were found again. Treat every "flagged as a gap" sentence as a real,
+open item, not as hedging.
 
 ## Module layout
 
@@ -1776,6 +1804,10 @@ Known gaps to close before this is production-real:
 
 ## Running locally
 
+The short version is in the [root README's quickstart](../README.md#quickstart); this section adds
+what that one omits — signing a partner request by hand, simulating a payment callback, and the
+dev-only failure-injection knobs.
+
 ```bash
 docker compose up -d          # starts Postgres on localhost:5432
 ./gradlew :app:bootRun
@@ -2025,5 +2057,6 @@ scripts/e2e/run-core.sh                  # 57 assertions
 scripts/e2e/run-routing-and-sweeps.sh    # 13 assertions (waits on the 60s expiry-sweep tick)
 ```
 
-See `scripts/e2e/README.md` for the prerequisites (fresh seed, the three injection knobs and their
-exact env-var spelling) and for what these deliberately do not cover.
+See [`scripts/e2e/README.md`](scripts/e2e/README.md) for the prerequisites (fresh seed, the three
+injection knobs and their exact env-var spelling) and for what these deliberately do not cover, and
+[`docs/TEST-STATUS.md`](../docs/TEST-STATUS.md) for the per-ID status of all 53 PRD test cases.
