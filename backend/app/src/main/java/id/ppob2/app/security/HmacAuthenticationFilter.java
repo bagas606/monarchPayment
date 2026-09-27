@@ -18,6 +18,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
 import org.springframework.core.annotation.Order;
+import org.springframework.dao.DataAccessException;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
@@ -30,17 +31,28 @@ import org.springframework.web.filter.OncePerRequestFilter;
 @Order(1)
 public class HmacAuthenticationFilter extends OncePerRequestFilter {
 
-    private static final Duration SIGNATURE_WINDOW = Duration.ofMinutes(5);
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(HmacAuthenticationFilter.class);
 
+    private final Duration signatureWindow;
     private final ApiClientRepository apiClientRepository;
     private final ChannelContextResolver channelContextResolver;
     private final NonceStore nonceStore;
     private final ObjectMapper objectMapper;
 
+    /**
+     * {@code signature-window-ms} was already declared in {@code application.yml} as "5 minutes,
+     * PRD Section 23.2" but nothing read it — the window was a hardcoded constant here, so the
+     * property was dead config that looked adjustable and silently wasn't. Bound properly rather
+     * than deleting the property, since Section 23.2 states the window as a requirement and an
+     * operator needs to be able to widen it if partner clock skew ever demands it.
+     */
     public HmacAuthenticationFilter(ApiClientRepository apiClientRepository,
                                      ChannelContextResolver channelContextResolver,
                                      NonceStore nonceStore,
-                                     ObjectMapper objectMapper) {
+                                     ObjectMapper objectMapper,
+                                     @org.springframework.beans.factory.annotation.Value(
+                                             "${ppob2.security.signature-window-ms:300000}") long signatureWindowMs) {
+        this.signatureWindow = Duration.ofMillis(signatureWindowMs);
         this.apiClientRepository = apiClientRepository;
         this.channelContextResolver = channelContextResolver;
         this.nonceStore = nonceStore;
@@ -62,6 +74,18 @@ public class HmacAuthenticationFilter extends OncePerRequestFilter {
             chain.doFilter(cachedRequest, response);
         } catch (AuthRejected rejected) {
             writeError(response, rejected.errorCode, rejected.message, request);
+        } catch (DataAccessException datastoreDown) {
+            // This filter's `api_client` lookup is the FIRST datastore touch of every /api/v1/**
+            // request, so a database outage fails here — before DispatcherServlet is ever entered,
+            // where no @RestControllerAdvice can see it. Confirmed for real on 2026-09-27 by
+            // stopping Postgres under a running app: the request returned Spring Boot's DEFAULT
+            // error body ({"timestamp":...,"status":500,...}), not this codebase's Section 50.1
+            // envelope, so a partner parsing `error_code` got nothing at all to branch on, and the
+            // 500 told them the request was un-retryable when in fact retrying was exactly right.
+            // Reported as 503 for the same reason as GlobalExceptionHandler's own handler.
+            log.error("Datastore unavailable authenticating {} {}: {}",
+                    request.getMethod(), request.getRequestURI(), datastoreDown.toString());
+            writeError(response, ErrorCode.SERVICE_UNAVAILABLE, "Service temporarily unavailable, retry later.", request);
         } finally {
             ChannelContextHolder.clear();
         }
@@ -103,7 +127,7 @@ public class HmacAuthenticationFilter extends OncePerRequestFilter {
         // Nonce is only consumed once the signature is proven genuine — otherwise an attacker
         // with no valid secret could burn arbitrary nonces, or a client retrying after a failed
         // signature could be locked out of reusing the same nonce on its next legitimate attempt.
-        if (!nonceStore.registerIfAbsent(clientId, nonce, SIGNATURE_WINDOW)) {
+        if (!nonceStore.registerIfAbsent(clientId, nonce, signatureWindow)) {
             throw new AuthRejected(ErrorCode.SIGNATURE_INVALID, "Duplicate nonce.");
         }
 
@@ -120,7 +144,7 @@ public class HmacAuthenticationFilter extends OncePerRequestFilter {
         }
         Instant requestTime = Instant.ofEpochMilli(timestampMs);
         Duration drift = Duration.between(requestTime, Instant.now()).abs();
-        if (drift.compareTo(SIGNATURE_WINDOW) > 0) {
+        if (drift.compareTo(signatureWindow) > 0) {
             throw new AuthRejected(ErrorCode.TIMESTAMP_OUT_OF_RANGE, "Request timestamp outside the allowed window.");
         }
     }

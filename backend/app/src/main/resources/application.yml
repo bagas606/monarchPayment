@@ -8,6 +8,14 @@ spring:
     url: ${PPOB2_DB_URL:jdbc:postgresql://localhost:5432/ppob2}
     username: ${PPOB2_DB_USER:ppob2}
     password: ${PPOB2_DB_PASSWORD:ppob2}
+    hikari:
+      # Default is 30_000. Confirmed for real on 2026-09-27 (Postgres stopped under a running app):
+      # a signed POST /api/v1/orders hung for the full 30s and THEN returned 500 — the opposite of
+      # TC-BE-027's "requests fail fast with retryable error", and long enough that partner-side
+      # timeouts and load-balancer health checks both fire before we answer. 5s is still comfortably
+      # above normal pool-checkout latency (sub-millisecond when the pool is warm) while turning a
+      # datastore outage into a prompt 503.
+      connection-timeout: ${PPOB2_DB_CONNECTION_TIMEOUT_MS:5000}
   jpa:
     hibernate:
       ddl-auto: validate

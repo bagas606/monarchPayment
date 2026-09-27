@@ -14,6 +14,26 @@ public enum ErrorCode {
     INTERNAL_ERROR(500),
     PG_UNAVAILABLE(503),
 
+    /** Not part of Section 23.9's partner-facing table — a request for a path this service does
+     * not route at all. Previously fell through {@code GlobalExceptionHandler}'s catch-all {@code
+     * Exception} handler and was reported as a {@code 500 INTERNAL_ERROR} with a full stack trace
+     * in the log, which both violates HTTP semantics and buries genuine incidents under routine
+     * scanner/typo traffic. */
+    NOT_FOUND(404),
+
+    /** Not part of Section 23.9's table either — a known path invoked with the wrong HTTP method
+     * (e.g. {@code GET /api/v1/orders}, which is POST-only). Same previously-a-500 class of bug as
+     * {@link #NOT_FOUND}. */
+    METHOD_NOT_ALLOWED(405),
+
+    /** Not part of Section 23.9's table either — the datastore is unreachable, so the request
+     * genuinely cannot be served now but is safe for the partner to retry later. Distinguished
+     * from {@link #INTERNAL_ERROR} deliberately: partners treat 5xx as retryable, and a 500 on a
+     * request that can never succeed (malformed body, unknown path) invites an infinite retry
+     * loop, while a 503 on a transient outage is exactly the signal they should act on.
+     * Distinct from {@link #PG_UNAVAILABLE}, which is specifically the payment gateway. */
+    SERVICE_UNAVAILABLE(503),
+
     /** Not part of Section 23.9's partner-facing table above — Section 37.1 defines no error
      * codes of its own for settlement report ingestion, an internal ops endpoint, not a partner
      * one. Added so a duplicate-date resubmission gets a clean 409 instead of a raw 500 from the

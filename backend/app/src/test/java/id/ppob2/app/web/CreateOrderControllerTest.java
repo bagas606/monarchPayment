@@ -28,6 +28,7 @@ import org.mockito.ArgumentMatchers;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import id.ppob2.audit.AuditService;
 import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.FilterType;
@@ -46,6 +47,12 @@ class CreateOrderControllerTest {
 
     @Autowired
     private MockMvc mockMvc;
+
+    /** GlobalExceptionHandler is component-scanned into every one of these slices and now takes
+     * an AuditService (it records permission-denied attempts, PRD TC-ADM-005). Mocked rather
+     * than excluded: these slices assert on the error envelope that handler produces. */
+    @MockBean
+    private AuditService auditService;
 
     @MockBean
     private ProductRepository productRepository;
