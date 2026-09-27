@@ -39,10 +39,17 @@ Needs Docker and a JDK 21.
 
 ```bash
 cd backend
-docker compose up -d                                    # Postgres 16 on localhost:5432
-./gradlew :app:bootRun                                  # Flyway migrates from zero
+docker compose up -d        # Postgres 16 on localhost:5432
+./gradlew :app:bootRun      # foreground; Flyway migrates from zero, then the app blocks
+```
+
+`bootRun` does not return. Once it logs `Started Ppob2Application`, seed from a **second terminal** —
+not before, because Flyway creates the tables during that boot:
+
+```bash
+cd backend
 docker exec -i backend-postgres-1 psql -U ppob2 -d ppob2 -v ON_ERROR_STOP=1 -1 \
-  < scripts/e2e/dev-seed.sql                            # no seed data ships; this is the fixture
+  < scripts/e2e/dev-seed.sql
 ```
 
 There is no automatic seed. `scripts/e2e/dev-seed.sql` creates everything the test matrices need —
@@ -56,7 +63,7 @@ payment callback, and the dev-only failure-injection knobs.
 ```bash
 cd backend
 ./gradlew build                          # 27 unit / slice test classes + ArchUnit
-scripts/e2e/run-core.sh                  # 57 assertions against a running app + real Postgres
+scripts/e2e/run-core.sh                  # 62 assertions against a running app + real Postgres
 scripts/e2e/run-routing-and-sweeps.sh    # 13 assertions (waits on the 60s expiry-sweep tick)
 ```
 

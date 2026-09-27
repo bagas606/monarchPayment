@@ -23,7 +23,7 @@ Bring up Postgres, the app and the seed fixture as described in the
 injection knobs below rather than a bare `bootRun`. Then, from `backend/`:
 
 ```bash
-scripts/e2e/run-core.sh                  # 57 assertions
+scripts/e2e/run-core.sh                  # 62 assertions
 scripts/e2e/run-routing-and-sweeps.sh    # 13 assertions, ~2 min (waits on the 60s sweep tick)
 ```
 

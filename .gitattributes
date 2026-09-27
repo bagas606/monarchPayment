@@ -1,0 +1,11 @@
+# Normalise line endings in the repository. core.autocrlf=true on Windows checkouts would
+# otherwise give the shell scripts CRLF, and Git Bash then fails them with
+# `$'\r': command not found` -- on a fresh clone, before anyone has changed anything.
+* text=auto
+
+*.sh    text eol=lf
+gradlew text eol=lf
+*.sql   text eol=lf
+
+*.bat   text eol=crlf
+*.jar   binary

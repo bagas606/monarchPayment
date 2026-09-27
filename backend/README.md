@@ -1213,7 +1213,7 @@ database — see that slice's notes.
   pre-existing defects found and fixed, plus four defects in those fixes caught on review.** Run
   against a wiped Postgres volume (all 20 migrations re-applied from zero, clean), the app booted on
   the default profile, `./gradlew build` green throughout. The end-to-end scripts this produced
-  (`scripts/e2e/`) finish 70/70 on a clean slate.
+  (`scripts/e2e/`) finish 75/75 on a clean slate.
 
   **Newly confirmed PASS this run** (real signed HTTP + `psql` row inspection, not reasoning):
 
@@ -2053,7 +2053,7 @@ paid-but-`CANCELLED` order recorded nothing anywhere. The end-to-end matrices ru
 app and a real Postgres, and assert on the resulting rows:
 
 ```bash
-scripts/e2e/run-core.sh                  # 57 assertions
+scripts/e2e/run-core.sh                  # 62 assertions
 scripts/e2e/run-routing-and-sweeps.sh    # 13 assertions (waits on the 60s expiry-sweep tick)
 ```
 

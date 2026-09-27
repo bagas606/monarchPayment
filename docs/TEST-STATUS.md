@@ -20,7 +20,7 @@ Be suspicious of any claim here that is not tagged **R**.
 | **U** | Covered by a unit test only. No end-to-end path exists to drive it |
 | **X** | **Not implemented.** There is nothing to test |
 
-Counts: **R 27 · R\* 5 · P 5 · U 1 · X 15** — 53 total.
+Counts: **R 28 · R\* 4 · P 5 · U 1 · X 15** — 53 total.
 
 ## Section 52 — Backend (`TC-BE-*`)
 
@@ -85,7 +85,7 @@ the `/admin/**` REST endpoints and Section 42's RBAC.
 |---|---|---|---|
 | TC-ADM-001 | Login, valid credentials | **R** | Every admin assertion in the harness authenticates for real |
 | TC-ADM-002 | Login, invalid credentials | **R** | `401` **and** an `ADMIN_LOGIN_FAILED` audit row (attempted username, failure class, client IP). Previously `audit_log` was empty — the audit half did not exist |
-| TC-ADM-003 | RBAC: VIEWER attempts a mutating action | **R\*** | `403 PERMISSION_DENIED` |
+| TC-ADM-003 | RBAC: VIEWER attempts a mutating action | **R** | `403 PERMISSION_DENIED` — asserted by `run-core.sh`, which drives a seeded VIEWER against a `retry:execute`-gated endpoint |
 | TC-ADM-004 | RBAC: FINANCE reaches reconciliation | **P** | `200`, per the seeded permission matrix |
 | TC-ADM-005 | Permission: no `retry:execute`, attempts retry | **R** | `403` **and** an `ADMIN_PERMISSION_DENIED` row carrying the real `actor_id`. Previously unrecorded |
 | TC-ADM-006 | Transaction search | **X** | No implementation |

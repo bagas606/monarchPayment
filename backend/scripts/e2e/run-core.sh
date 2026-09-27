@@ -24,6 +24,15 @@ chk "GET on POST-only -> 405"     "$(code "$($CALL GET /api/v1/orders)")" 405
 chk "malformed JSON -> 400"       "$(code "$($CALL POST /api/v1/orders '{"x":')")" 400
 chk "missing Idempotency-Key -> 400" "$(code "$($CALL POST /api/v1/orders '{"product_code":"MOBILE_LEGENDS","parent_amount":20000}')")" 400
 
+echo "== TC-BE-001 / TC-BE-006: create order, supported amount =="
+R=$(IDEMPOTENCY_KEY="f1-$RANDOM" $CALL POST /api/v1/orders '{"product_code":"MOBILE_LEGENDS","parent_amount":20000,"customer_reference":"F1"}')
+O1=$(echo "$R" | grep -o '"order_id":"[^"]*"' | cut -d'"' -f4)
+chk "TC-BE-001 HTTP 201"                "$(code "$R")" 201
+chk "TC-BE-001 state PAYMENT_PENDING"   "$(echo "$R" | grep -o '"state":"[^"]*"' | head -1 | cut -d'"' -f4)" PAYMENT_PENDING
+chk "TC-BE-001 persisted PAYMENT_PENDING" "$(state "$O1")" PAYMENT_PENDING
+chk "TC-BE-006 QR payload returned"     "$(echo "$R" | grep -co '"qr_payload":"00020101[^"]*"')" 1
+chk "TC-BE-006 payment row PENDING"     "$(scalar "select status from payment where parent_order_id = (select id from parent_order where order_no = '$O1')")" PENDING
+
 echo "== Order creation matrix =="
 chk "TC-BE-002 unsupported amount -> 422" "$(code "$(IDEMPOTENCY_KEY=f2-$RANDOM $CALL POST /api/v1/orders '{"product_code":"MOBILE_LEGENDS","parent_amount":15000,"customer_reference":"F2"}')")" 422
 chk "TC-BE-003 above ceiling -> 422"      "$(code "$(IDEMPOTENCY_KEY=f3-$RANDOM $CALL POST /api/v1/orders '{"product_code":"MOBILE_LEGENDS","parent_amount":20000000,"customer_reference":"F3"}')")" 422

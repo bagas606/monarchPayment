@@ -1304,59 +1304,12 @@ Future gateways (`XenditPaymentGateway`, `MidtransPaymentGateway`, etc.) can be 
 | PG unavailable | Circuit breaker opens after N consecutive failures; order creation returns `503 PG_UNAVAILABLE`; alert fired |
 | Payment SUCCESS but fulfillment fails | Order state machine `PARTIAL_FAILED`/`FAILED` with funds already collected — MUST NOT be silently lost; ops workflow (retry fulfillment, or refund) required — see Sections 27–28 |
 
-#### 25.2.1 Sandbox Verification Log (2026-09-14)
-
-Section 52's `TC-BE-001`–`TC-BE-006` (create order: supported/unsupported/over-ceiling amount,
-idempotent replay, idempotency conflict) were run for real against `sandbox.ayolinx.id` with live
-credentials — all five matched this section's design exactly (see `backend/README.md`'s "PRD
-Section 52 order-creation test matrix" entry for the full result table).
-
-The inbound side (`TC-BE-008`) was also exercised against a **genuine** Ayolinx-originated callback
-(sandbox Demo Mode auto-completes an issued QR and calls back the registered URL) — the payload
-shape, tunnel reachability, and JSON deserialization all confirmed correct against real traffic, but
-**signature verification initially rejected it**. The portal-issued Ayolinx public key was confirmed
-correctly loaded, ruling out a missing-credential explanation; logging the real
-`X-SIGNATURE`/`X-TIMESTAMP` headers on rejection and replaying that same real signature against a
-short list of candidate route strings identified the actual cause: the literal `ROUTE` this app
-signs/verifies against must be **its own registered callback path**
-(`/internal/webhooks/ayolinx`), not the documented `/v1/qr/qr-mpm-notify` Ayolinx-hosted path this
-config used to default to. **Fixed same-day** (`callback-route`'s default corrected in
-`application.yml`) and **confirmed twice against real traffic**: a fresh callback via the sandbox
-portal's "Mark success" simulator, and — unprompted — Ayolinx's own webhook retry mechanism
-redelivering an earlier failed callback, both now processing to `payment.status=SUCCESS` with a
-ledger entry posted. Both test orders landed in `REFUND_PENDING` rather than fully fulfilled, which
-is `TC-BE-018`'s own expected result (no decomposition pattern exists for the test fixture SKU), so
-that row is also now confirmed for real as a side effect.
-
-`TC-BE-012` (invalid signature) and `TC-BE-010` (duplicate callback) are also now confirmed against
-the live endpoint: a garbage `X-SIGNATURE` produces `401`/`FAILED` with no state change, and an exact
-replay of a real, validly-signed callback re-verifies (same bytes) but is correctly not reprocessed
-— `payment_event`'s `dedup_key` unique constraint holds it to exactly one row, `payment.paid_at`
-unchanged. `TC-BE-009` (failed payment callback) is confirmed as well: since the sandbox has no way
-to make Ayolinx genuinely sign a failed-status callback, this used a substitute keypair (our own,
-matching key held locally) as a temporary stand-in verifier against the real endpoint and a real
-order — `payment.status` went to `FAILED`, the order stayed `PAYMENT_PENDING` (no transition is
-defined for this case, by design), and no ledger entry was posted, exactly as expected; the app was
-restarted back onto Ayolinx's real key immediately after.
-
-**`TC-BE-011` (stale-timestamp replay) was tested, found to fail this section's own "Replay
-protection: Timestamp window + nonce/dedup_key" design, and fixed the same day.** A callback signed
-with a genuinely 1-hour-old `X-TIMESTAMP` (valid signature — computed over that exact timestamp)
-was initially accepted and fully processed identically to a fresh one: `payment.status=SUCCESS`,
-ledger entry posted — no timestamp-freshness window existed anywhere in
-`verifyCallbackSignature`/`AyolinxSigner.verifyCallback`, only the signature's own validity and
-`payment_event.dedup_key`. **Closed**: `verifyCallbackSignature` now rejects any callback whose
-`X-TIMESTAMP` drifts more than a 1-hour window from server time, mirroring Section 23.2's existing
-outbound-facing check. The window is deliberately generous, not tight, because Ayolinx's own
-callback redelivery (observed for real, see `TC-BE-008`) can legitimately arrive up to an hour
-later — a narrower window would reject Ayolinx's own retries, not just genuine replay attempts.
-Re-verified against the exact same attack: now correctly rejected (`401`, no state change).
-
-**`TC-BE-007` (QR expiry sweep) is confirmed too** — organically, via orders that simply reached
-their real 15-minute TTL during this run and were swept automatically, and deliberately via a
-backdated `expires_at` on a fresh order for a fast, precise repro: the next `QrExpirySweepJob` tick
-(~60s cadence) transitioned it to `parent_order.state=EXPIRED` and `payment.status=EXPIRED`, exactly
-as this row specifies. See `backend/README.md` for the full account.
+> **Implementation status is not kept here.** This section's design was exercised against
+> Ayolinx's sandbox with live credentials, including a genuine Ayolinx-originated callback, and that
+> run also found and closed a real gap in the replay protection specified above. The account of what
+> was run, what broke and how it was fixed lives in
+> [`backend/README.md`](../backend/README.md); the per-test-case verdict lives in
+> [`docs/TEST-STATUS.md`](TEST-STATUS.md).
 
 ### 25.3 QRIS & Amount Constraints
 
@@ -2465,24 +2418,11 @@ Response:
 | TC-ADM-014 | Settlement display | Expected vs actual vs fee shown accurately for a given settlement_date |
 | TC-ADM-015 | Reconciliation handling | Discrepancy can be moved OPEN → INVESTIGATING → RESOLVED with resolver recorded |
 
-### 54.1 Verification Log (2026-09-14)
-
-No browser-based Admin Web exists in this codebase (this section's own "Method" column names
-Playwright/Cypress) — "Admin Web" here means real HTTP Basic Auth against the actual `/admin/**`
-REST endpoints and Section 42's RBAC. `TC-ADM-001`–`TC-ADM-005`, `TC-ADM-012`, `TC-ADM-013`, `TC-ADM-015`
-were all run for real this way (four throwaway `admin_user` rows seeded across VIEWER/OPERATIONS/
-FINANCE/SUSPENDED) and matched their expected result, with two exceptions: `TC-ADM-002` and
-`TC-ADM-005` both specify that a *denied* attempt should still be audit-logged, but neither
-`AdminReconciliationController`/`AdminFulfillmentController` nor Spring Security's authentication
-failure path calls `AuditService` on a rejection — confirmed via `audit_log`: zero rows for either
-the invalid-login or the permission-denied attempts tested. `TC-ADM-012`'s "reason text" requirement
-is also unimplemented — `AdminFulfillmentController.retry` takes no such parameter. `TC-ADM-014`
-was only partially exercised: the endpoint that exists shows the per-partner allocation breakdown
-(Section 37.3/41.8), not a settlement-level expected/actual/fee view (no `GET` on the raw
-`settlement` row exists). `TC-ADM-006`–`TC-ADM-011` have no corresponding implementation anywhere in
-`app`'s web layer to test — transaction search, parent-child drilldown, pricing update, configuration
-update, pattern viewing, and generation activation are all unbuilt. See `backend/README.md` for the
-full result table and reasoning.
+> **Implementation status is not kept here.** This codebase has no browser-based Admin Web — the
+> "Method" column above names Playwright/Cypress and none exists — so these cases are exercised as
+> HTTP Basic auth against the real `/admin/**` endpoints. Which of them pass, which are unbuilt, and
+> the evidence for each: [`docs/TEST-STATUS.md`](TEST-STATUS.md) and
+> [`backend/README.md`](../backend/README.md).
 
 ---
 
@@ -2698,7 +2638,7 @@ The RTM links Business Requirement → Functional Requirement → Module → API
 | BR-BUS-004 | FR-RTE-001..003 | `routing` | (internal) | `pattern_economics`, `pattern_usage` | TC-BE-021 |
 | BR-BUS-005 | FR-ADM-001..003 | `admin` | `/admin/api/v1/*` | `admin_user`, `role`, `permission`, `audit_log` | TC-ADM-001..015 |
 | BR-BUS-006 | FR-REC-001..003 | `ledger`, `reconciliation` | Admin Web reconciliation views | `ledger_entry`, `reconciliation`, `settlement` | TC-BE-028 |
-| BR-REC-002 | FR-REC-004 | `settlement` | Admin Web settlement view (Section 41.8 partner breakdown) | `settlement_partner_allocation` | TC-BE-033..034 (exact-attribution join; pro-rata largest-remainder invariant) |
+| BR-REC-002 | FR-REC-004 | `settlement` | Admin Web settlement view (Section 41.8 partner breakdown) | `settlement_partner_allocation` | TC-BE-033 (exact-attribution join). **Open spec question:** this row previously cited `TC-BE-034` for the pro-rata largest-remainder invariant, but no `TC-BE-034` is defined in Section 52's matrix, which ends at `TC-BE-033`. Either add the case or drop the reference — not resolved here, since inventing a test-case ID in the spec is worse than naming the inconsistency. |
 | BR-BUS-007 | (architectural, Section 18/24/28) | `order`, `channel` | `/api/v1/orders` (Partner), future `/api/v1/customer/orders` | `channel`, `parent_order.channel_id/order_source` | (architecture review, no single TC — validated via ArchUnit dependency tests) |
 | BR-BUS-009 | FR-CAT-004 | `configuration`, `pricing` | `GET /api/v1/config/supported-amounts` | `supported_amount` | TC-BE-002 |
 
@@ -2712,8 +2652,8 @@ The RTM links Business Requirement → Functional Requirement → Module → API
 | Provider downtime | Medium | High | Circuit breaker, multi-provider routing diversity, health checks | Engineering/Ops | Provider error rate, circuit breaker open events |
 | Payment downtime (Ayolinx) | Low-Medium | High | Circuit breaker, clear customer-facing error, alerting | Engineering/Ops | PG error rate, `PG_UNAVAILABLE` frequency |
 | Duplicate callbacks | Medium | Low (if handled) / High (if not) | Idempotency via `dedup_key`, thoroughly tested (TC-BE-010) | Engineering | Duplicate-callback rejection count (should be non-zero and handled, not absent) |
-| Stale/replayed callback with a valid signature accepted (no timestamp window) | Low (was Medium — mitigated 2026-09-14) | Low — closed by a Section 23.2-style timestamp-window check (`AyolinxPaymentGateway.CALLBACK_TIMESTAMP_WINDOW`, 1 hour, matching Ayolinx's documented callback-redelivery period) added to `verifyCallbackSignature`; re-verified against the exact attack that originally exposed this (TC-BE-011, confirmed rejected 2026-09-14) | Timestamp-window check implemented and tested; residual risk is the 1-hour window itself being wider than ideal (chosen to tolerate Ayolinx's own legitimate retries, per doc.ayolinx.id/api-299374923) | Engineering | Age distribution of accepted callbacks' `X-TIMESTAMP` vs `received_at` (should now cluster near zero, occasionally up to ~1h on a genuine PG retry) |
-| Denied/failed Admin Web actions leave no audit trail | Medium (undermines Section 43's "every action recorded" intent specifically for the security-relevant cases — failed logins, permission-denied attempts) | Medium — confirmed 2026-09-14 (TC-ADM-002/005): `audit_log` has zero rows for either an invalid-login or a permission-denied `retry`/`reconciliation` attempt; `AuditService.recordAdminAction` is only ever called on the success path in `AdminReconciliationController`/`AdminFulfillmentController`, and no `AuthenticationEventPublisher`/access-denied listener exists to cover the rejection paths | Not yet implemented — needs a failed-authentication listener and an `AccessDeniedException`/`AuthorizationDeniedException` handler that both call `AuditService` with the attempted (not necessarily resolvable) actor and action, distinct from today's success-only recording | Engineering/Security | Count of `401`/`403` responses on `/admin/**` vs corresponding `audit_log` rows (should trend to 1:1; currently 0 for the denied side) |
+| Stale/replayed callback with a valid signature accepted (no timestamp window) | Low (was Medium) | Low | **Mitigated.** A Section 23.2-style timestamp-window check was added to callback verification after this was confirmed as a real, exploitable gap, and re-verified against the exact attack that exposed it. The window is deliberately generous rather than tight, to tolerate the gateway's own legitimate redelivery; the residual risk is that width. See `backend/README.md` (TC-BE-011). | Engineering | Age distribution of accepted callbacks' `X-TIMESTAMP` vs `received_at` (should cluster near zero, occasionally up to ~1h on a genuine PG retry) |
+| Denied/failed Admin Web actions leave no audit trail | Medium (undermines Section 43's "every action recorded" intent for exactly the security-relevant cases — failed logins, permission-denied attempts) | Low | **Closed 2026-09-27.** A failed-authentication listener and a denial handler now both record to `audit_log`, and a retry additionally requires a reason. Verified end-to-end; see `backend/README.md` (TC-ADM-002/005/012). Residual: a URL-level denial thrown before the servlet is entered is still not audited. | Engineering/Security | Count of `401`/`403` responses on `/admin/**` vs corresponding `audit_log` rows (should be 1:1; was 0 on the denied side) |
 | Duplicate fulfillment | Low (if idempotency holds) | High | Idempotency key + distributed lock (Section 34.1) | Engineering | `provider_transaction` idempotency constraint violations (should trend to zero exceptions, all caught) |
 | Partial failure (parent stuck) | Medium | Medium | Explicit `PARTIAL_FAILED` state, Ops runbook, alerting | Engineering/Ops | Count of orders in `PARTIAL_FAILED` beyond SLA |
 | Reconciliation mismatch | Medium | Medium-High | Daily reconciliation batch, discrepancy workflow | Finance/Reconciliation | Open discrepancy count/age |
