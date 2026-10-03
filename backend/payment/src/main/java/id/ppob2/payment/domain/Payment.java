@@ -45,6 +45,10 @@ public class Payment {
     @Column(name = "paid_at")
     private Instant paidAt;
 
+    /** Mirrors {@link #paidAt} for the reversing side — see {@link #markRefunded(Instant)}. */
+    @Column(name = "refunded_at")
+    private Instant refundedAt;
+
     protected Payment() {
     }
 
@@ -95,6 +99,10 @@ public class Payment {
         return paidAt;
     }
 
+    public Instant getRefundedAt() {
+        return refundedAt;
+    }
+
     /** True only from PENDING — Section 25.2's out-of-order-callback rule: a terminal payment
      * status is never silently overwritten by a later callback. */
     public boolean markSuccess(Instant paidAt) {
@@ -123,6 +131,29 @@ public class Payment {
             return false;
         }
         this.status = PaymentStatus.EXPIRED;
+        return true;
+    }
+
+    /**
+     * True only from {@code SUCCESS} — PRD Section 33.2's {@code REFUND_PENDING -> REFUNDED}
+     * ("Refund executed via PaymentGateway"). The guard direction is the opposite of the three
+     * above and that is deliberate: {@code markSuccess}/{@code markFailed}/{@code markExpired}
+     * guard against overwriting a <em>resolved</em> payment, whereas a refund is only meaningful
+     * for a payment that actually collected money. Refunding a {@code PENDING}, {@code FAILED} or
+     * {@code EXPIRED} payment would post a reversing ledger entry against funds that were never
+     * credited, so this returns false and the caller refuses rather than inventing a reversal.
+     *
+     * <p>It is also the idempotency guard for the whole refund path: a second refund attempt on an
+     * already-{@code REFUNDED} payment returns false, so no second ledger DEBIT can be posted.
+     * {@code payment_event_dedup_uk} on {@code refund:{paymentId}} is the DB-level backstop for the
+     * same invariant.
+     */
+    public boolean markRefunded(Instant refundedAt) {
+        if (this.status != PaymentStatus.SUCCESS) {
+            return false;
+        }
+        this.status = PaymentStatus.REFUNDED;
+        this.refundedAt = refundedAt;
         return true;
     }
 }

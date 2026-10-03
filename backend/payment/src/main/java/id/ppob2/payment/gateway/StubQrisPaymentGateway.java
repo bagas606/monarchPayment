@@ -37,9 +37,12 @@ import org.springframework.stereotype.Component;
 public class StubQrisPaymentGateway implements PaymentGateway {
 
     private final String webhookSecret;
+    private final boolean supportsRefund;
 
-    public StubQrisPaymentGateway(@Value("${ppob2.payment.ayolinx-webhook-secret:dev-webhook-secret}") String webhookSecret) {
+    public StubQrisPaymentGateway(@Value("${ppob2.payment.ayolinx-webhook-secret:dev-webhook-secret}") String webhookSecret,
+                                   @Value("${ppob2.payment.stub-gateway.supports-refund:false}") boolean supportsRefund) {
         this.webhookSecret = webhookSecret;
+        this.supportsRefund = supportsRefund;
     }
 
     @Override
@@ -54,9 +57,34 @@ public class StubQrisPaymentGateway implements PaymentGateway {
         return new PaymentInquiryResult(pgReference, "PENDING", null);
     }
 
+    /**
+     * {@code false} by default — a stub has no PG to refund against, and defaulting to {@code true}
+     * would let a dev environment record gateway-executed refunds that never happened.
+     *
+     * <p>{@code ppob2.payment.stub-gateway.supports-refund=true} is a dev-only knob in the same
+     * family as {@code StubGameProviderAdapter}'s {@code fail-/ambiguous-/timeout-provider-sku-ids}:
+     * it exists so the gateway-executed refund branch can be driven end-to-end against a real app
+     * and a real database. Without it that branch would be unreachable in every environment this
+     * codebase can actually boot — no real gateway answers {@code true} — and "compiles, has a
+     * mocked test, has never run" is the exact profile of the three defects the 2026-09-27 pass
+     * found and the fourth the 2026-10-03 pass found.
+     */
+    @Override
+    public boolean supportsRefund() {
+        return supportsRefund;
+    }
+
     @Override
     public RefundResult refund(RefundRequest request) {
-        throw new UnsupportedOperationException("StubQrisPaymentGateway does not implement refunds; wire a real gateway first.");
+        if (!supportsRefund) {
+            throw new UnsupportedOperationException(
+                    "StubQrisPaymentGateway does not implement refunds; wire a real gateway first, or set "
+                            + "ppob2.payment.stub-gateway.supports-refund=true to exercise the gateway-executed path in dev.");
+        }
+        // No PG call to make. Returns a recognisably-fake reference for the same reason
+        // createDynamicQris returns a syntactically-fake QR payload: it must be obvious in any
+        // database or log that this did not come from a real payment gateway.
+        return new RefundResult(true, "STUB-REFUND-" + UUID.randomUUID(), null);
     }
 
     /**

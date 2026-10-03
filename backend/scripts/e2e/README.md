@@ -23,9 +23,14 @@ Bring up Postgres, the app and the seed fixture as described in the
 injection knobs below rather than a bare `bootRun`. Then, from `backend/`:
 
 ```bash
-scripts/e2e/run-core.sh                  # 68 assertions
+scripts/e2e/run-core.sh                  # 90 assertions
 scripts/e2e/run-routing-and-sweeps.sh    # 13 assertions, ~2 min (waits on the 60s sweep tick)
 ```
+
+`run-refund-gateway.sh` (15 assertions) is separate because it needs the app booted with a *fourth*
+knob, `PPOB2_PAYMENT_STUBGATEWAY_SUPPORTSREFUND=true` — see its own header. It asserts that mode is
+active before testing anything, since against a normally-booted app every case would pass for the
+wrong reason.
 
 Postgres does not have to be the docker-compose one. `q.sh` resolves it in three steps — an
 explicit `PPOB2_PSQL` command, then the compose container if it is actually running, then a native
@@ -64,7 +69,8 @@ PPOB2_FULFILLMENT_STUBPROVIDER_TIMEOUTPROVIDERSKUIDS=4 \
 | `call.sh` | Signs a partner Open API request per Section 23.2 and calls it. Signs the path **without** the query string, because `HmacAuthenticationFilter` signs `getRequestURI()` — matching the PRD, and worth knowing before debugging a 401. |
 | `cb.sh` | Posts an inbound Ayolinx QRIS callback in the real nested/camelCase shape, signed with the stub gateway's `X-Ayolinx-Signature` HMAC scheme. `ORIGREF` controls `originalReferenceNo`, which is half of `payment_event.dedup_key` — vary it to send a genuinely new callback, repeat it to test replay. `RAWAMT` puts a string into `amount.value` verbatim instead of the default "integer + `.00`"; the amount-format cases need it, and without it they pass for the wrong reason (`"20,000.00"` silently became `"20,000.00.00"`). |
 | `q.sh` | `psql` passthrough, and the one place that knows how to reach Postgres (see the resolution order above). Pass `-t` for a bare scalar. |
-| `run-core.sh` | Error-status mapping, order creation (`TC-BE-002..005`), fulfilment (`013`, `016`, `017`), BR-DEC exhaustion (`018` — including that the funds were collected, which is what makes the missing-record half detectable), cancel (`029`, `030`), the three callback anomalies, replay/signature (`010`, `012`), and the admin audit cases (`TC-ADM-002`, `005`, `012`). |
+| `run-core.sh` | Error-status mapping, order creation (`TC-BE-002..005`), fulfilment (`013`, `016`, `017`), BR-DEC exhaustion (`018` — including that the funds were collected, which is what makes the missing-record half detectable), cancel (`029`, `030`), the three callback anomalies, replay/signature (`010`, `012`), the admin audit cases (`TC-ADM-002`, `005`, `012`), and out-of-band refund execution. The refund block is deliberately **last**: its RBAC-denial case adds a second `ADMIN_PERMISSION_DENIED` row, which would break `TC-ADM-005`'s absolute count if it ran earlier. |
+| `run-refund-gateway.sh` | The gateway-executed refund branch, under its own boot flag. Needs a fresh seed; makes its own `REFUND_PENDING` order. |
 | `run-routing-and-sweeps.sh` | Routing eligibility (`TC-BE-020`, `021`, `023`), reconciliation values (`028`), and the sweep-dependent `TC-BE-007` / `TC-BE-031`. |
 
 ## What these do NOT cover
@@ -84,3 +90,8 @@ the harness — there is nothing to drive:
   with no app restart and no partial rows.
 - The real `AyolinxPaymentGateway`: `cb.sh` uses the stub's HMAC scheme, not Ayolinx's RSA one.
   Exercising that needs sandbox credentials.
+- A **real** gateway-executed refund. `run-refund-gateway.sh` drives the branch against the stub,
+  which is the only gateway that can be made to claim the capability — Ayolinx's public API has no
+  refund endpoint at all (Section 73.3's open question 5), so there is nothing to drive it against
+  until that contract question is answered. What the script proves is that our side of the branch
+  works; it cannot prove Ayolinx's.

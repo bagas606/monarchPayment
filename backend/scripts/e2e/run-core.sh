@@ -196,6 +196,58 @@ chk "TC-ADM-012 retry without reason -> 400" "$(curl -s -o /dev/null -w '%{http_
 chk "TC-ADM-012 retry with reason -> 200" "$(curl -s -o /dev/null -w '%{http_code}' -u superadmin:admin123 -X POST -H 'Content-Type: application/json' -d '{"reason":"ticket OPS-1"}' http://localhost:8080/admin/child-orders/$CID/retry)" 200
 chk "TC-ADM-012 reason in audit_log" "$(scalar "select count(*) from audit_log where action='CHILD_ORDER_RETRY' and after_state::text like '%ticket OPS-1%'")" 1
 
+# Deliberately LAST in this script. The VIEWER-denial case below adds a second
+# ADMIN_PERMISSION_DENIED row, which would break TC-ADM-005's absolute count assertion above if
+# this block ran any earlier. Nothing after here asserts an absolute audit_log count.
+echo "== Refund execution (Section 33.2 REFUND_PENDING -> REFUNDED), out-of-band mode =="
+# 10000 has no pattern, so this reaches REFUND_PENDING with the money collected -- the state the
+# 2026-10-03 pass found nothing could ever move an order out of (go-live blocker 8).
+O=$(mkorder 10000 FRF "frf-$RANDOM"); OID=$(scalar "select id from parent_order where order_no='$O'")
+PID=$(scalar "select id from payment where parent_order_id=$OID")
+ORIGREF="R-$O" $CB "$(pgref "$O")" 10000 00 >/dev/null; sleep 5
+chk "refund precondition: order REFUND_PENDING" "$(state "$O")" REFUND_PENDING
+chk "refund precondition: payment SUCCESS"      "$(scalar "select status from payment where id=$PID")" SUCCESS
+RF="http://localhost:8080/admin/parent-orders/$OID/refund"
+chk "refund without reason -> 400" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -u superadmin:admin123 -X POST -H 'Content-Type: application/json' -d '{"external_reference":"BANK-1"}' $RF)" 400
+# The gateway cannot refund (Section 73.3 open question 5), so evidence the money moved is required.
+chk "refund without external_reference -> 400" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -u superadmin:admin123 -X POST -H 'Content-Type: application/json' -d '{"reason":"no pattern"}' $RF)" 400
+chk "refund: VIEWER lacks refund:initiate -> 403" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -u viewer1:admin123 -X POST -H 'Content-Type: application/json' -d '{"reason":"x","external_reference":"BANK-1"}' $RF)" 403
+chk "refund: nothing recorded by any rejected attempt" "$(scalar "select status from payment where id=$PID")" SUCCESS
+chk "refund with reason + reference -> 200" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -u superadmin:admin123 -X POST -H 'Content-Type: application/json' -d '{"reason":"BR-DEC exhaustion, ticket OPS-7","external_reference":"BANK-TRANSFER-4421"}' $RF)" 200
+sleep 2
+chk "refund: order REFUNDED"      "$(state "$O")" REFUNDED
+chk "refund: payment REFUNDED"    "$(scalar "select status from payment where id=$PID")" REFUNDED
+chk "refund: refunded_at set"     "$(scalar "select refunded_at is not null from payment where id=$PID")" t
+# The reversal is the whole point: a DEBIT of the same amount, so the payment ledger nets to zero.
+chk "refund: reversing DEBIT posted" "$(scalar "select coalesce(sum(amount),0) from ledger_entry where ledger_type='PAYMENT' and reference_id=$PID and entry_type='DEBIT'")" 10000
+chk "refund: payment ledger nets to 0" \
+    "$(scalar "select coalesce(sum(case when entry_type='CREDIT' then amount else -amount end),0) from ledger_entry where ledger_type='PAYMENT' and reference_id=$PID")" 0
+chk "refund: REFUND payment_event recorded" "$(scalar "select count(*) from payment_event where payment_id=$PID and event_type='REFUND'")" 1
+chk "refund: dedup_key is deterministic"    "$(scalar "select dedup_key from payment_event where payment_id=$PID and event_type='REFUND'")" "refund:$PID"
+# Read the jsonb fields rather than LIKE-ing their serialized text: both raw_payload and
+# audit_log.after_state are jsonb, so Postgres normalises whitespace and reorders keys on storage.
+# A '%"mode":"OUT_OF_BAND"%' pattern would fail against a correct row.
+chk "refund: recorded as OUT_OF_BAND"       "$(scalar "select raw_payload->>'mode' from payment_event where payment_id=$PID and event_type='REFUND'")" OUT_OF_BAND
+chk "refund: operator reference recorded"   "$(scalar "select raw_payload->>'refundReference' from payment_event where payment_id=$PID and event_type='REFUND'")" BANK-TRANSFER-4421
+# Compared in SQL: scalar() strips every space, so a multi-word reason cannot round-trip through it.
+chk "refund: reason audited verbatim" \
+    "$(scalar "select after_state->>'reason' = 'BR-DEC exhaustion, ticket OPS-7' from audit_log where action='PARENT_ORDER_REFUND' and target_id=$OID")" t
+chk "refund: reference audited" \
+    "$(scalar "select after_state->>'refundReference' from audit_log where action='PARENT_ORDER_REFUND' and target_id=$OID")" BANK-TRANSFER-4421
+# Idempotency: three independent guards (order state, Payment.markRefunded, payment_event_dedup_uk).
+chk "refund: second attempt -> 409" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -u superadmin:admin123 -X POST -H 'Content-Type: application/json' -d '{"reason":"again","external_reference":"BANK-9"}' $RF)" 409
+chk "refund: still exactly 1 DEBIT after replay" "$(scalar "select count(*) from ledger_entry where ledger_type='PAYMENT' and reference_id=$PID and entry_type='DEBIT'")" 1
+chk "refund: still exactly 1 REFUND event"       "$(scalar "select count(*) from payment_event where payment_id=$PID and event_type='REFUND'")" 1
+# A SUCCESS order was never queued for refund, so it must be refused outright.
+SOK=$(scalar "select id from parent_order where state='SUCCESS' limit 1")
+chk "refund: SUCCESS order -> 409" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -u superadmin:admin123 -X POST -H 'Content-Type: application/json' -d '{"reason":"x","external_reference":"BANK-1"}' http://localhost:8080/admin/parent-orders/$SOK/refund)" 409
+
 echo ""
 echo "================================"
 echo "  PASS: $pass    FAIL: $fail"

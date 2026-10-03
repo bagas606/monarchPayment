@@ -56,4 +56,19 @@ public class PaymentEvent {
     public Long getId() {
         return id;
     }
+
+    public String getEventType() {
+        return eventType;
+    }
+
+    /** The exactly-once key behind {@code payment_event_dedup_uk} — worth reading back, since for
+     * self-originated events (e.g. {@code REFUND}) it is this application that must choose a key
+     * that makes a duplicate impossible, rather than deriving one from the PG's payload. */
+    public String getDedupKey() {
+        return dedupKey;
+    }
+
+    public String getRawPayload() {
+        return rawPayload;
+    }
 }
