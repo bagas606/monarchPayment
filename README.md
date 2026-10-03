@@ -63,15 +63,19 @@ payment callback, and the dev-only failure-injection knobs.
 ```bash
 cd backend
 ./gradlew build                          # 27 unit / slice test classes + ArchUnit
-scripts/e2e/run-core.sh                  # 62 assertions against a running app + real Postgres
+scripts/e2e/run-core.sh                  # 68 assertions against a running app + real Postgres
 scripts/e2e/run-routing-and-sweeps.sh    # 13 assertions (waits on the 60s expiry-sweep tick)
 ```
 
 **A green `./gradlew build` is not evidence that the money paths work.** Three of the defects found
 on 2026-09-27 were invisible to the unit suite: the bounded-retry loop had never run against real
 HTTP, a `FAILED`-after-`SUCCESS` payment callback was silently swallowed, and a paid-but-cancelled
-order recorded nothing anywhere. The e2e scripts exist for exactly that class of bug — they drive
-signed HTTP against a real app and then assert on the resulting database rows.
+order recorded nothing anywhere. The 2026-10-03 pass found a fourth of the same kind: a paid order
+with **no eligible decomposition pattern** collected the money, delivered nothing, and opened no
+reconciliation record either — the identical hole as the paid-but-cancelled one, by a different
+route, in a case whose prior evidence covered only its state transition. The e2e scripts exist for
+exactly that class of bug — they drive signed HTTP against a real app and then assert on the
+resulting database rows.
 
 ## Go-live blockers
 
@@ -101,7 +105,15 @@ something a test pass can close.
    (filtered to `VALID`); nothing writes it, so Section 30.3 invalidation never fires. Runtime
    routing does exclude patterns with disabled SKUs, so the effect is covered while the mechanism
    is not.
-8. **The inbound callback amount format is unverified.** A genuine Ayolinx sandbox callback was
+8. **Nothing ever executes a refund.** `REFUND_PENDING → REFUNDED` is in the state machine and
+   nothing writes `REFUNDED` — there is no refund job, no admin endpoint, and no disbursement
+   integration. An order reaches `REFUND_PENDING` whenever a *paid* order finds no eligible pattern
+   (BR-DEC exhaustion, `TC-BE-018`), so this is a live path, not a theoretical one: the money is
+   collected and the obligation to return it is recorded but never discharged by this system. As of
+   2026-10-03 such an order does at least open an `ORDER_VS_FULFILLMENT` reconciliation record, so
+   it lands on an operator's queue to be refunded out-of-band — before that it was silent, which is
+   the defect that pass found. Section 7 scopes payout/disbursement as its own unspecified feature.
+9. **The inbound callback amount format is unverified.** A genuine Ayolinx sandbox callback was
    received, but its `amount` field was never recorded against an order with a known billed amount.
    Capture one and pin it in `AyolinxCallbackPayloadTest` before go-live; until then the payment
    path treats an unparseable amount as "apply the payment, flag it for a human" rather than

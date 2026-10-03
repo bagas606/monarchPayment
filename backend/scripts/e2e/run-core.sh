@@ -56,6 +56,22 @@ chk "TC-BE-013 parent FAILED"                "$(state "$O")" FAILED
 chk "TC-BE-013 exactly 1 provider_transaction" "$(scalar "select count(*) from provider_transaction where child_order_id in (select id from child_order where parent_order_id=$OID)")" 1
 chk "TC-BE-013 no provider debit"            "$(scalar "select count(*) from ledger_entry where ledger_type='PROVIDER' and reference_id in (select id from child_order where parent_order_id=$OID)")" 0
 
+echo "== TC-BE-018 no valid pattern for parent_amount -> REFUND_PENDING =="
+# 10000 is a supported amount with no seeded decomposition_pattern, so this is BR-DEC exhaustion
+# reached with the money already collected. The state change alone was never the finding: until
+# 2026-10-03 this order sat in REFUND_PENDING with a payment-ledger CREDIT, zero children and no
+# reconciliation row anywhere -- the same funds-collected-nothing-delivered hole TC-BE-031's
+# CANCELLED variant had, by a different route. The discrepancy assertion is the one that matters.
+O=$(mkorder 10000 F18 "f18-$RANDOM"); OID=$(scalar "select id from parent_order where order_no='$O'")
+PID=$(scalar "select id from payment where parent_order_id=$OID")
+ORIGREF="R-$O" $CB "$(pgref "$O")" 10000 00 >/dev/null; sleep 5
+chk "TC-BE-018 order REFUND_PENDING"        "$(state "$O")" REFUND_PENDING
+chk "TC-BE-018 no pattern selected"         "$(scalar "select coalesce(pattern_id::text,'none') from parent_order where id=$OID")" none
+chk "TC-BE-018 no children"                 "$(scalar "select count(*) from child_order where parent_order_id=$OID")" 0
+chk "TC-BE-018 funds WERE collected"        "$(scalar "select coalesce(sum(amount),0) from ledger_entry where ledger_type='PAYMENT' and reference_id=$PID")" 10000
+chk "TC-BE-018 ORDER_VS_FULFILLMENT opened" "$(scalar "select count(*) from reconciliation where recon_type='ORDER_VS_FULFILLMENT' and reference_id=$OID")" 1
+chk "TC-BE-018 discrepancy = -10000"        "$(scalar "select discrepancy from reconciliation where recon_type='ORDER_VS_FULFILLMENT' and reference_id=$OID")" -10000
+
 echo "== TC-BE-029 / 030 cancel =="
 O=$(mkorder 10000 F29 "f29-$RANDOM")
 chk "TC-BE-029 cancel PAYMENT_PENDING -> 200" "$(code "$($CALL POST /api/v1/orders/$O/cancel)")" 200
@@ -170,7 +186,7 @@ echo "== Admin: TC-ADM-002 / 005 / 012 =="
 AB=$(scalar "select count(*) from audit_log")
 curl -s -o /dev/null -u superadmin:WRONGPW -X POST http://localhost:8080/admin/reconciliations/1/investigate; sleep 2
 chk "TC-ADM-002 login failure audited" "$(scalar "select count(*) from audit_log where action='ADMIN_LOGIN_FAILED'")" 1
-docker exec backend-postgres-1 psql -U ppob2 -d ppob2 -q -c "insert into admin_user (username,password_hash) values ('viewer1','\$2a\$10\$sumJVTdd5Bhn4p0xeaYwxu5thzoF7Ok5S2NUE19rm5gB2iwE6KgtS') on conflict do nothing" >/dev/null 2>&1
+$Q "insert into admin_user (username,password_hash) values ('viewer1','\$2a\$10\$sumJVTdd5Bhn4p0xeaYwxu5thzoF7Ok5S2NUE19rm5gB2iwE6KgtS') on conflict do nothing" -q >/dev/null 2>&1
 $Q "insert into admin_user_role (admin_user_id, role_id) select u.id, r.id from admin_user u, role r where u.username='viewer1' and r.code='VIEWER' on conflict do nothing" >/dev/null 2>&1
 chk "TC-ADM-005 VIEWER retry -> 403" "$(curl -s -o /dev/null -w '%{http_code}' -u viewer1:admin123 -X POST -H 'Content-Type: application/json' -d '{"reason":"x"}' http://localhost:8080/admin/child-orders/1/retry)" 403
 sleep 2

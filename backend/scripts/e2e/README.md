@@ -23,9 +23,17 @@ Bring up Postgres, the app and the seed fixture as described in the
 injection knobs below rather than a bare `bootRun`. Then, from `backend/`:
 
 ```bash
-scripts/e2e/run-core.sh                  # 62 assertions
+scripts/e2e/run-core.sh                  # 68 assertions
 scripts/e2e/run-routing-and-sweeps.sh    # 13 assertions, ~2 min (waits on the 60s sweep tick)
 ```
+
+Postgres does not have to be the docker-compose one. `q.sh` resolves it in three steps — an
+explicit `PPOB2_PSQL` command, then the compose container if it is actually running, then a native
+`psql` on `PGHOST`/`PGPORT` — so the matrices also run on a box with no Docker daemon (the
+2026-10-03 pass ran entirely against a host Postgres 16 this way). The container is *probed*, not
+assumed: `docker exec` against a missing daemon writes to stderr and exits non-zero, which the
+callers' `2>/dev/null` would quietly turn into empty scalars and a sweep of unexplained failures
+instead of one clear error — the same failure shape as the `q.sh -t` incident below.
 
 Both expect a **freshly seeded** database. `run-core.sh` asserts on absolute `audit_log` counts, and
 `run-routing-and-sweeps.sh` mutates `provider_sku` / `pattern_economics` (restoring each afterwards),
@@ -55,8 +63,8 @@ PPOB2_FULFILLMENT_STUBPROVIDER_TIMEOUTPROVIDERSKUIDS=4 \
 |---|---|
 | `call.sh` | Signs a partner Open API request per Section 23.2 and calls it. Signs the path **without** the query string, because `HmacAuthenticationFilter` signs `getRequestURI()` — matching the PRD, and worth knowing before debugging a 401. |
 | `cb.sh` | Posts an inbound Ayolinx QRIS callback in the real nested/camelCase shape, signed with the stub gateway's `X-Ayolinx-Signature` HMAC scheme. `ORIGREF` controls `originalReferenceNo`, which is half of `payment_event.dedup_key` — vary it to send a genuinely new callback, repeat it to test replay. `RAWAMT` puts a string into `amount.value` verbatim instead of the default "integer + `.00`"; the amount-format cases need it, and without it they pass for the wrong reason (`"20,000.00"` silently became `"20,000.00.00"`). |
-| `q.sh` | `psql` passthrough. Pass `-t` for a bare scalar. |
-| `run-core.sh` | Error-status mapping, order creation (`TC-BE-002..005`), fulfilment (`013`, `016`, `017`), cancel (`029`, `030`), the three callback anomalies, replay/signature (`010`, `012`), and the admin audit cases (`TC-ADM-002`, `005`, `012`). |
+| `q.sh` | `psql` passthrough, and the one place that knows how to reach Postgres (see the resolution order above). Pass `-t` for a bare scalar. |
+| `run-core.sh` | Error-status mapping, order creation (`TC-BE-002..005`), fulfilment (`013`, `016`, `017`), BR-DEC exhaustion (`018` — including that the funds were collected, which is what makes the missing-record half detectable), cancel (`029`, `030`), the three callback anomalies, replay/signature (`010`, `012`), and the admin audit cases (`TC-ADM-002`, `005`, `012`). |
 | `run-routing-and-sweeps.sh` | Routing eligibility (`TC-BE-020`, `021`, `023`), reconciliation values (`028`), and the sweep-dependent `TC-BE-007` / `TC-BE-031`. |
 
 ## What these do NOT cover

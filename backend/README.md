@@ -1802,6 +1802,59 @@ Known gaps to close before this is production-real:
     payout/disbursement capability as its own not-yet-specified feature, with its own
     authorization, timing, and ledger-posting design.
 
+- **Full test cycle, 2026-10-03 — `TC-BE-018`'s money-visibility half was a real, open defect**
+  (`DecompositionExhaustedEvent`, `OrderFulfillmentReconciliationOrchestrator#onDecompositionExhausted`).
+  The whole suite was re-run from zero: 27 unit/slice test classes green, then both e2e scripts
+  against a wiped volume (all 20 Flyway migrations re-applied) with the app on the default profile
+  and the three injection knobs. Everything previously tagged **R** re-passed unchanged — 62/62 and
+  13/13 — which is the context for the one thing that did not hold up.
+  - **The defect.** `TC-BE-018` was tagged **P** on the strength of "order → `REFUND_PENDING`
+    (BR-DEC exhaustion)", and that half was true. Driving it for real against a 10,000 order (a
+    supported amount with no seeded pattern) showed the other half: `payment` reached `SUCCESS`, a
+    full 10,000 CREDIT was posted to the payment ledger — *the funds were collected* — the order
+    carried zero child orders, and **`reconciliation` was empty**. Confirmed by surveying every
+    order in the database by state: `PARTIAL_FAILED`, `FAILED` and the paid-`CANCELLED` case each
+    had their `ORDER_VS_FULFILLMENT` row; `REFUND_PENDING` alone had none.
+  - **Why it survived the 2026-09-27 pass.** This is the *same* funds-collected-nothing-delivered
+    hole that pass found and closed for `CANCELLED` (see `LatePaymentOnUntransitionableOrderEvent`),
+    reached by a different route — so the fix went in where that route was, and this one was never
+    driven. `TC-BE-018` carried prior evidence for the state transition and nobody re-read what
+    that evidence actually covered. The tag was accurate and still hid the bug; that is the
+    argument for the **R** tag meaning *asserted by a script*, not *someone checked once*.
+  - **Why the code looked correct.** `OrderFulfillmentReconciliationOrchestrator.reconcile`'s state
+    guard named `REFUND_PENDING` explicitly and called it "unreachable here in practice since
+    `ChildOrdersReadyEvent` never fires on that path". That reasoning was *right* — and it is the
+    whole problem: the state was correctly excluded from the dispatch-driven path and then covered
+    by nothing else, so a deliberate, documented exclusion read as deliberate, documented handling.
+    The guard is unchanged; its comment now says why the state needs its own trigger instead of
+    implying none is owed.
+  - **The fix** mirrors the already-proven sibling route exactly rather than inventing a shape:
+    `order` publishes `DecompositionExhaustedEvent` on the exhaustion branch (it has no Section 20.2
+    edge to `reconciliation`), and `app`'s orchestrator opens `ORDER_VS_FULFILLMENT` keyed on
+    `parent_order.id` with `expected = parent_amount` / `actual = 0`, behind the same
+    `hasOpenDiscrepancy` guard. Plain `@EventListener` + `REQUIRES_NEW`, for the reason
+    `onLatePaymentOnUntransitionableOrder` documents: the publisher is itself `REQUIRES_NEW` off an
+    `AFTER_COMMIT` callback, so a live transaction exists to join, and this row is worth keeping in
+    its own. `REFUND_PENDING` is not itself the operator queue — nothing scans for it, there is no
+    refund job (Section 73.3), and the queue Admin Web surfaces is `reconciliation`.
+  - **Reproduced after the fix, not just asserted**: the identical 10,000 order now leaves
+    `payment SUCCESS` + 10,000 CREDIT + `REFUND_PENDING` **and** an `OPEN ORDER_VS_FULFILLMENT` row
+    reading `expected 10000 / actual 0 / discrepancy -10000`, with a WARN naming the refund as
+    owed. The row was then driven `OPEN → INVESTIGATING → RESOLVED` through the real admin
+    endpoints (`resolved_by` recorded), so it is actionable and not merely present — which also
+    re-verified `TC-ADM-015` live in this pass.
+  - **Now script-asserted, so the tag means something**: six new assertions in `run-core.sh`
+    (`TC-BE-018`, taking it 62 → 68) cover the state, the absent pattern, zero children, *that the
+    funds were collected*, and the discrepancy value. Two new unit tests cover the listener's open
+    and its duplicate guard (123 → 125 tests). The "funds WERE collected" assertion is deliberate:
+    without it the case passes for the wrong reason the day the payment path changes.
+  - **Still open, deliberately**: no `ORDER_STATUS_CHANGED` webhook fires for `REFUND_PENDING`.
+    That is the pre-existing partial-trigger-coverage gap `OutboundWebhookOrchestrator`'s Javadoc
+    already names (`CANCELLED`/`EXPIRED`/`REFUNDED` don't fire either), not something this fix
+    introduced, and widening it is a separate change. There is also still no reconciliation
+    *listing* endpoint for an operator to browse (`TC-ADM-006..011`, root README blocker 5), so the
+    row is correct and queryable but not yet visible in a UI.
+
 ## Running locally
 
 The short version is in the [root README's quickstart](../README.md#quickstart); this section adds
@@ -2049,11 +2102,12 @@ UPDATE partner SET webhook_secret = 'dev-outbound-secret' WHERE code = 'PPOB1';
 A green build is **not** evidence that the money paths work. Three of the bugs found on 2026-09-27
 were invisible to this suite and would have stayed invisible: the Section 27.2 retry loop had never
 run against real HTTP, a `FAILED`-after-`SUCCESS` callback was silently swallowed, and a
-paid-but-`CANCELLED` order recorded nothing anywhere. The end-to-end matrices run against a real
-app and a real Postgres, and assert on the resulting rows:
+paid-but-`CANCELLED` order recorded nothing anywhere. The 2026-10-03 pass added a fourth of the
+same kind — a paid order with no eligible pattern recorded nothing anywhere either. The end-to-end
+matrices run against a real app and a real Postgres, and assert on the resulting rows:
 
 ```bash
-scripts/e2e/run-core.sh                  # 62 assertions
+scripts/e2e/run-core.sh                  # 68 assertions
 scripts/e2e/run-routing-and-sweeps.sh    # 13 assertions (waits on the 60s expiry-sweep tick)
 ```
 
