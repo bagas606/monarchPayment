@@ -174,6 +174,35 @@ public class ParentOrderTransitionService {
     }
 
     /**
+     * PRD Section 33.2's {@code REFUND_PENDING -> REFUNDED} edge ("Refund executed via
+     * PaymentGateway"). Called from an `app`-layer orchestrator handling an authorized Admin Web
+     * request on a request thread, so plain {@code @Transactional} (REQUIRED) — and here that
+     * propagation is load-bearing in the other direction from {@link #markPaid}: this MUST join
+     * the caller's transaction, because the order's move to {@code REFUNDED}, the payment's move
+     * to {@code REFUNDED} and the reversing ledger entry have to commit as one unit. Under
+     * {@code REQUIRES_NEW} the order could reach {@code REFUNDED} while the ledger reversal rolled
+     * back, leaving a refunded order with no reversing entry — the Section 36 invariant that
+     * {@code LedgerService}'s own {@code MANDATORY} propagation exists to protect.
+     *
+     * <p>Returns false rather than throwing when the order is not in {@code REFUND_PENDING}: a
+     * double-submitted refund (the order is already {@code REFUNDED}) is an ordinary race, not a
+     * programmer error, and the caller turns it into a {@code 409}.
+     */
+    @Transactional
+    public boolean markRefunded(Long parentOrderId) {
+        ParentOrder order = repository.findById(parentOrderId)
+                .orElseThrow(() -> new IllegalStateException("parent_order " + parentOrderId + " vanished before refund"));
+
+        if (!OrderStateMachine.canTransition(order.getState(), OrderState.REFUNDED)) {
+            log.warn("Refusing to mark parent_order {} REFUNDED: state is {}, not REFUND_PENDING",
+                    parentOrderId, order.getState());
+            return false;
+        }
+        order.transitionTo(OrderState.REFUNDED);
+        return true;
+    }
+
+    /**
      * PRD Section 33.2's {@code PARTIAL_FAILED -> SUCCESS} edge ("Manual/automated retry completes
      * remaining child orders", Section 34.1) — called by the `app`-layer Admin Web retry
      * orchestrator after it has already reset a {@code FAILED} child order to {@code PENDING} and

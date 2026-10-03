@@ -110,8 +110,10 @@ public class AdminFulfillmentController {
 
     private String snapshot(RetryOutcome outcome, String reason) {
         try {
-            // LinkedHashMap, not Map.of: the reason is the field a reviewer reads first, so it is
-            // worth keeping the key order stable and predictable in the stored JSON.
+            // LinkedHashMap, not Map.of: makes the JSON this method produces deterministic. It does
+            // NOT make the stored key order stable, as this comment previously claimed —
+            // audit_log.after_state is jsonb, which reorders keys and normalises whitespace on
+            // storage. Read a field back with after_state->>'reason', never a LIKE on its text.
             Map<String, String> after = new LinkedHashMap<>();
             after.put("childState", outcome.childState().name());
             after.put("parentState", outcome.parentState().name());

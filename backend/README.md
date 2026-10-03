@@ -1855,6 +1855,88 @@ Known gaps to close before this is production-real:
     *listing* endpoint for an operator to browse (`TC-ADM-006..011`, root README blocker 5), so the
     row is correct and queryable but not yet visible in a UI.
 
+- **Refund execution** (Section 33.2's `REFUND_PENDING → REFUNDED`, FR-PAY-007, Section 42.2's
+  `refund:initiate`) — `POST /admin/parent-orders/{id}/refund`, `AdminRefundOrchestrator`,
+  `RefundRecorder`, `PaymentRefundService`, `V21__refund_execution.sql`. Discharges the obligation
+  the 2026-10-03 pass made visible: `REFUND_PENDING` was a reachable state (BR-DEC exhaustion,
+  `TC-BE-018`) that nothing could ever move an order out of — no job, no endpoint, no permission.
+  - **Two modes, chosen by capability rather than assumption.** `PaymentGateway` gained
+    `supportsRefund()`, making FR-PAY-007's "subject to ... PG capability" and Section 25.2's
+    "subject to Ayolinx's refund capability/window" something callers branch on instead of
+    discovering by catching `UnsupportedOperationException`:
+    - **Gateway-executed** — we call `PaymentGateway.refund()` and record the PG's own refund
+      reference. `external_reference` is *refused* in this mode, because the PG's reference is the
+      authoritative one and accepting both would leave it ambiguous which was recorded.
+    - **Recorded out-of-band** — the only mode reachable in any bootable production configuration,
+      because `AyolinxPaymentGateway.supportsRefund()` returns false: Ayolinx's public API has no
+      refund endpoint, and `qr-mpm-cancel` voids an *unpaid* QR rather than refunding a settled
+      payment (Section 73.3's open question 5, still open). A human already moved the money and
+      supplies the reference proving it; `external_reference` is mandatory, enforced server-side.
+      A refund recorded with no evidence it happened is the one outcome worse than no refund.
+  - **Not a silent fallback.** A gateway that claims the capability and then declines produces
+    `502 REFUND_FAILED_AT_GATEWAY` and writes nothing — the order stays `REFUND_PENDING` and
+    remains refundable. Degrading to "record it as out-of-band" would book a reversal for money
+    still sitting at the PG. A reported success carrying no refund reference is also treated as a
+    failure: there would be nothing to reconcile the refund against afterwards.
+  - **The reversal, per Section 33.2's "Ledger: reversing entry posted"** — a `PAYMENT` ledger
+    `DEBIT` of the full amount, so the payment ledger for that payment nets to zero. A DEBIT of a
+    positive amount, not a negative CREDIT: Section 22.21 carries direction in `entry_type` and
+    `LedgerService` rejects a non-positive amount outright.
+  - **Three independent idempotency guards**, because this is the only irreversible money movement
+    in the system: the order's `REFUND_PENDING` check, `Payment.markRefunded`'s `SUCCESS`-only
+    guard (whose direction is the opposite of `markSuccess`/`markFailed`/`markExpired` on purpose —
+    a refund is only meaningful for a payment that actually collected money), and
+    `payment_event_dedup_uk` on a deterministic `refund:{paymentId}` key. A replayed refund answers
+    `409` and the e2e run asserts there is still exactly one DEBIT and one `REFUND` event after it.
+  - **A transaction bug caught before it shipped, worth recording because it would have been
+    invisible.** The commit step was first written as a `@Transactional protected` method on
+    `AdminRefundOrchestrator`, called as `this.commit(...)`. Spring's transaction advice lives on a
+    proxy, so a self-invocation bypasses it entirely: the code compiled, the mocked test passed, and
+    at runtime each write would have committed in its own transaction — exactly the partial refund
+    record the ordering exists to prevent, with nothing anywhere to show it. Extracted to
+    `RefundRecorder`, a separate bean, because crossing a bean boundary is what makes
+    `@Transactional` apply at all. Same family as `markPaid`'s documented propagation bug: the
+    transaction configuration in this codebase is load-bearing and has been gotten wrong before.
+  - **Deliberately narrow.** Only an order already in `REFUND_PENDING` can be refunded. Moving a
+    `PARTIAL_FAILED`/`FAILED` order into `REFUND_PENDING` is Section 33.2's separate "Ops decision
+    per SOP" edge and this endpoint does not make it; a `SUCCESS` order is refused outright (`409`).
+  - **RBAC — `refund:initiate` granted to SUPER_ADMIN, FINANCE and RECONCILIATION**, on an explicit
+    product decision. The RECONCILIATION grant is a **recorded deviation** from this repo's own
+    reading of Section 42.1, not an oversight: V19 withheld `settlement:ingest` from that role
+    because its scope says "settlement read", and by the same reasoning it would not hold a refund
+    permission either. The counter-argument that carried is that `REFUND_PENDING` orders surface as
+    `ORDER_VS_FULFILLMENT` rows in the reconciliation queue, so that role is the one actually
+    working the queue, and splitting "can see the refund is owed" from "can discharge it" would put
+    two roles in every refund. The reasoning and the revisit condition are in `V21`'s own comments.
+  - **Audit, per Section 25.2's "only permitted through Admin Web with authorization + audit"** —
+    `PARENT_ORDER_REFUND` with actor, IP, before/after state, a **mandatory non-blank `reason`**
+    (BR-ADM-001; same control as `TC-ADM-012`'s retry reason, and blank is rejected rather than
+    accepted) and the refund reference. Rejections are not audited, matching the
+    `CHILD_ORDER_NOT_RETRYABLE` / `ORDER_NOT_CANCELLABLE` precedent; a *denied* attempt is already
+    recorded as `ADMIN_PERMISSION_DENIED`.
+  - **Both modes driven end-to-end**, not just unit-tested — 20 new `run-core.sh` assertions for the
+    out-of-band mode (68 → 90, including that the ledger nets to zero and that a replay changes
+    nothing) and a new `scripts/e2e/run-refund-gateway.sh` (15) for the gateway path. The gateway
+    branch needs `PPOB2_PAYMENT_STUBGATEWAY_SUPPORTSREFUND=true`, a dev-only knob in the same family
+    as `StubGameProviderAdapter`'s injection knobs and added for the same reason: no real gateway
+    answers `true`, so without it that branch would be unreachable in every environment this
+    codebase can boot, and "compiles, has a mocked test, has never run" is the profile of every
+    money defect this harness has found. That script *asserts* the knob is active before testing
+    anything, because against a normally-booted app every case would pass for the wrong reason.
+  - **Found while writing those assertions: `jsonb` does not preserve key order.** Both
+    `payment_event.raw_payload` and `audit_log.after_state` are `jsonb`, so Postgres normalises
+    whitespace and reorders keys on storage — a `LIKE '%"mode":"GATEWAY"%'` pattern failed against a
+    perfectly correct row. Assertions now read fields with `->>`. This also makes a comment
+    `AdminFulfillmentController` has carried since the retry slice false (it claimed `LinkedHashMap`
+    kept "the key order stable and predictable in the stored JSON"); corrected in both controllers
+    rather than copied into the new one.
+  - **Gap, not built**: no actual disbursement. The out-of-band mode is a *record* of a human's bank
+    transfer or PG-dashboard action, which is why it demands their reference — Section 7 scopes
+    payout/disbursement as its own unspecified feature, and Section 71's Refund SOP (authorization
+    chain, ledger-reversal verification) is a go-live prerequisite. Also no partner notification:
+    `ORDER_STATUS_CHANGED` still does not fire for `REFUNDED`, the same partial-trigger-coverage gap
+    `OutboundWebhookOrchestrator` already flags for `CANCELLED`/`EXPIRED`.
+
 ## Running locally
 
 The short version is in the [root README's quickstart](../README.md#quickstart); this section adds
@@ -1992,6 +2074,38 @@ direct purchase. Check `provider_transaction.provider_reference` for that child 
 `STUBPROV-INQUIRY-...` value (not a plain `STUBPROV-...` one) confirms the inquiry path actually
 ran.
 
+The fourth knob is on the *payment* gateway rather than the provider, and it exists to make the
+gateway-executed refund branch reachable at all — no real gateway answers `supportsRefund() == true`
+(see the refund slice above):
+
+```bash
+PPOB2_PAYMENT_STUBGATEWAY_SUPPORTSREFUND=true ./gradlew :app:bootRun
+```
+
+With it set, `POST /admin/parent-orders/{id}/refund` calls the stub gateway and records its
+`STUB-REFUND-...` reference, and supplying an `external_reference` is *refused* as ambiguous.
+Without it (every normal boot, and every production configuration), the same endpoint *requires*
+an `external_reference` and records the refund as performed out-of-band. `scripts/e2e/run-refund-gateway.sh`
+asserts which mode is active before it tests anything, because against the wrong boot every one of
+its cases would pass for the wrong reason.
+
+Refunding by hand needs an order in `REFUND_PENDING`, which a paid order for an amount with no
+seeded pattern reaches on its own (`10000` in `dev-seed.sql`):
+
+```bash
+curl -X POST http://localhost:8080/admin/parent-orders/24/refund \
+  -u superadmin:admin123 -H "Content-Type: application/json" \
+  -d '{"reason":"BR-DEC exhaustion, ticket OPS-7","external_reference":"BANK-TRANSFER-4421"}'
+```
+
+Then check that the payment ledger for that payment nets to zero — the reversing entry is a
+positive-amount `DEBIT`, not a negative `CREDIT`:
+
+```sql
+SELECT entry_type, amount FROM ledger_entry
+WHERE ledger_type = 'PAYMENT' AND reference_id = <payment_id> ORDER BY id;
+```
+
 The moment any order reaches `PAID` (regardless of what happens after), check the Payment Ledger
 entry it should have produced:
 
@@ -2103,12 +2217,15 @@ A green build is **not** evidence that the money paths work. Three of the bugs f
 were invisible to this suite and would have stayed invisible: the Section 27.2 retry loop had never
 run against real HTTP, a `FAILED`-after-`SUCCESS` callback was silently swallowed, and a
 paid-but-`CANCELLED` order recorded nothing anywhere. The 2026-10-03 pass added a fourth of the
-same kind — a paid order with no eligible pattern recorded nothing anywhere either. The end-to-end
-matrices run against a real app and a real Postgres, and assert on the resulting rows:
+same kind — a paid order with no eligible pattern recorded nothing anywhere either — and the refund
+slice added a fifth that a mocked test *would* have passed: a `@Transactional` self-invocation that
+silently gave each write its own transaction. The end-to-end matrices run against a real app and a
+real Postgres, and assert on the resulting rows:
 
 ```bash
-scripts/e2e/run-core.sh                  # 68 assertions
+scripts/e2e/run-core.sh                  # 90 assertions
 scripts/e2e/run-routing-and-sweeps.sh    # 13 assertions (waits on the 60s expiry-sweep tick)
+scripts/e2e/run-refund-gateway.sh        # 15 assertions; needs PPOB2_PAYMENT_STUBGATEWAY_SUPPORTSREFUND=true
 ```
 
 See [`scripts/e2e/README.md`](scripts/e2e/README.md) for the prerequisites (fresh seed, the three

@@ -219,7 +219,24 @@ public class AyolinxPaymentGateway implements PaymentGateway {
                 parseTimestamp(response.finishedTime()));
     }
 
-    /** No refund endpoint exists in the public docs — see class Javadoc. */
+    /**
+     * {@code false}, and this is a researched answer rather than a placeholder: Ayolinx's public
+     * API exposes no refund endpoint, and {@code qr-mpm-cancel} voids an <em>unpaid</em> QR rather
+     * than refunding a settled payment. PRD Section 73.3's open question 5 ("Ayolinx's actual
+     * refund capability, window, and process — API-driven vs manual request") is still open and
+     * Section 25.2 marks it "must be verified against contract".
+     *
+     * <p>Consequence: every refund in production today is recorded as out-of-band, with the
+     * operator's external reference. When the contract confirms an API-driven refund, implement
+     * {@link #refund(RefundRequest)} and flip this to {@code true} — nothing above this class
+     * needs to change, which is the point of the capability probe.
+     */
+    @Override
+    public boolean supportsRefund() {
+        return false;
+    }
+
+    /** No refund endpoint exists in the public docs — see {@link #supportsRefund()}. */
     @Override
     public RefundResult refund(RefundRequest request) {
         throw new UnsupportedOperationException(
