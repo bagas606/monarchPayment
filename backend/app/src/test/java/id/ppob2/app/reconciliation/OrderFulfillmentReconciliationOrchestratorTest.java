@@ -8,6 +8,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
 import id.ppob2.order.ChildOrderService;
+import id.ppob2.order.DecompositionExhaustedEvent;
 import id.ppob2.order.domain.ChildOrder;
 import id.ppob2.order.domain.OrderState;
 import id.ppob2.order.domain.ParentOrder;
@@ -78,13 +79,36 @@ class OrderFulfillmentReconciliationOrchestratorTest {
     }
 
     @Test
-    void aRefundPendingOrderOpensNothingEither() {
-        // REFUND_PENDING (BR-DEC exhaustion, no pattern ever selected) is not a fulfillment
-        // discrepancy — FULFILLING is never entered on that path, so there is nothing to compare.
+    void aRefundPendingOrderOpensNothingOnTheDispatchDrivenPath() {
+        // Nothing to compare on THIS path: FULFILLING is never entered on the BR-DEC exhaustion
+        // route, so there are no child orders to measure a shortfall against. That order still gets
+        // a record — via onDecompositionExhausted, covered below — so this asserts "not here",
+        // not "not at all".
         ParentOrder order = orderInState(OrderState.REFUND_PENDING);
         given(parentOrderRepository.findById(1L)).willReturn(Optional.of(order));
 
         orchestrator.reconcile(1L);
+
+        verify(reconciliationService, never()).open(any(), any(), anyLong(), any(), any());
+    }
+
+    @Test
+    void decompositionExhaustionOpensAFullShortfallRecord() {
+        // Funds collected, nothing fulfilled: the whole parent_amount is the discrepancy. Same
+        // values and type as the late-payment-on-cancelled route, so both read alike in Admin Web.
+        given(reconciliationService.hasOpenDiscrepancy(ReconciliationType.ORDER_VS_FULFILLMENT, 1L)).willReturn(false);
+
+        orchestrator.onDecompositionExhausted(new DecompositionExhaustedEvent(1L, Money.of(10000L)));
+
+        verify(reconciliationService).open(ReconciliationType.ORDER_VS_FULFILLMENT, java.time.LocalDate.now(), 1L,
+                Money.of(10000L), Money.ZERO);
+    }
+
+    @Test
+    void decompositionExhaustionDoesNotOpenASecondRecordWhileOneIsAlreadyOpen() {
+        given(reconciliationService.hasOpenDiscrepancy(ReconciliationType.ORDER_VS_FULFILLMENT, 1L)).willReturn(true);
+
+        orchestrator.onDecompositionExhausted(new DecompositionExhaustedEvent(1L, Money.of(10000L)));
 
         verify(reconciliationService, never()).open(any(), any(), anyLong(), any(), any());
     }

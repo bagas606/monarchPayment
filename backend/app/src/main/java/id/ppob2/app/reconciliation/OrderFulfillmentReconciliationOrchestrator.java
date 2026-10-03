@@ -1,6 +1,7 @@
 package id.ppob2.app.reconciliation;
 
 import id.ppob2.order.ChildOrderService;
+import id.ppob2.order.DecompositionExhaustedEvent;
 import id.ppob2.order.domain.ChildOrder;
 import id.ppob2.order.domain.ChildOrderState;
 import id.ppob2.order.domain.OrderState;
@@ -13,6 +14,7 @@ import java.time.LocalDate;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -24,6 +26,13 @@ import org.springframework.transaction.annotation.Transactional;
  * shape as {@code SettlementIngestionOrchestrator}, except this one must run {@code REQUIRES_NEW}
  * rather than in one synchronous transaction: it's called from {@code FulfillmentDispatchListener}
  * (an {@code AFTER_COMMIT} listener's call tree), not from a request thread.
+ *
+ * <p><b>Two triggers, not one.</b> {@link #reconcile} is called from {@code
+ * FulfillmentDispatchListener} and measures a shortfall against the child orders that ran.
+ * {@link #onDecompositionExhausted} covers the paid order that never produced a child order at all
+ * (BR-DEC exhaustion → {@code REFUND_PENDING}), which the dispatch path structurally cannot see.
+ * Both write the same type with the same {@code reference_id} convention and share its
+ * {@code hasOpenDiscrepancy} guard.
  *
  * <p><b>Value definition</b>: {@code expectedValue} is {@code parent_order.parent_amount} — the
  * BR-DEC invariant (Section 28.2) guarantees this equals the sum of every child order's
@@ -78,8 +87,10 @@ public class OrderFulfillmentReconciliationOrchestrator {
 
         if (order.getState() != OrderState.PARTIAL_FAILED && order.getState() != OrderState.FAILED) {
             // Covers SUCCESS (nothing to reconcile) and any other terminal/non-terminal state
-            // this listener shouldn't act on (e.g. REFUND_PENDING, unreachable here in practice
-            // since ChildOrdersReadyEvent never fires on that path).
+            // this dispatch-driven path shouldn't act on. REFUND_PENDING is genuinely unreachable
+            // *here* — ChildOrdersReadyEvent never fires on the no-pattern path — which is exactly
+            // why it needs its own trigger rather than being covered by silence; see
+            // #onDecompositionExhausted below.
             return;
         }
 
@@ -96,5 +107,40 @@ public class OrderFulfillmentReconciliationOrchestrator {
 
         reconciliationService.open(ReconciliationType.ORDER_VS_FULFILLMENT, LocalDate.now(), parentOrderId,
                 order.getParentAmount(), actualValue);
+    }
+
+    /**
+     * BR-DEC exhaustion: a paid order found no eligible pattern, so it went straight to
+     * {@code REFUND_PENDING} without ever producing a child order. {@link #reconcile} cannot cover
+     * this — it hangs off {@code ChildOrdersReadyEvent}, which never fires on that path — so this
+     * is the trigger for it.
+     *
+     * <p>{@code expected} is {@code parent_amount} (what the customer paid for) and {@code actual}
+     * is {@link Money#ZERO} (nothing was fulfilled), giving a {@code -parent_amount} discrepancy:
+     * the same values, type and {@code reference_id} convention {@code
+     * PaymentCallbackAnomalyOrchestrator#onLatePaymentOnUntransitionableOrder} uses for the other
+     * funds-collected-nothing-delivered route, so both read identically in Admin Web.
+     *
+     * <p>Plain {@code @EventListener} + {@code REQUIRES_NEW}, matching that sibling listener
+     * exactly: the publisher ({@code ParentOrderTransitionService#selectPatternOrRefund}) is itself
+     * {@code REQUIRES_NEW} off an {@code AFTER_COMMIT} callback, so a live transaction exists to
+     * join, and this record stays in its own so it survives independently of whatever else that
+     * transaction does. An open record against an order still showing {@code PAID} (if the outer
+     * transaction were to roll back) is the safe direction to fail: the money was collected either
+     * way, and the whole point of this row is that a human sees that.
+     */
+    @EventListener
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void onDecompositionExhausted(DecompositionExhaustedEvent event) {
+        if (reconciliationService.hasOpenDiscrepancy(ReconciliationType.ORDER_VS_FULFILLMENT, event.parentOrderId())) {
+            log.info("parent_order {} already has an OPEN/INVESTIGATING ORDER_VS_FULFILLMENT record — skipping "
+                    + "the BR-DEC exhaustion record", event.parentOrderId());
+            return;
+        }
+        reconciliationService.open(ReconciliationType.ORDER_VS_FULFILLMENT, LocalDate.now(), event.parentOrderId(),
+                event.parentAmount(), Money.ZERO);
+        log.warn("Opened ORDER_VS_FULFILLMENT discrepancy for parent_order {}: paid {} but no eligible "
+                        + "decomposition pattern — funds collected, nothing fulfilled, refund owed, needs manual review",
+                event.parentOrderId(), event.parentAmount());
     }
 }

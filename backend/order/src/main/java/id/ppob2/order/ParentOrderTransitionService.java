@@ -237,6 +237,12 @@ public class ParentOrderTransitionService {
      * but dispatch setup failed". See {@link #createChildOrdersAndBeginFulfillment} for the
      * second half.
      *
+     * <p>The exhaustion branch also publishes {@link DecompositionExhaustedEvent} so the
+     * composition root opens an {@code ORDER_VS_FULFILLMENT} record — the same both-halves
+     * treatment {@link #markPaid} gives Section 25.2's late callback. Until 2026-10-03 only the
+     * state change existed, which left funds collected against an order nothing would ever
+     * surface; see that event's Javadoc.
+     *
      * @return true if a pattern was selected (state is now {@code DECOMPOSITION_SELECTED}), false
      * if it wasn't (state is now {@code REFUND_PENDING}) or the order wasn't eligible to begin with.
      */
@@ -260,6 +266,10 @@ public class ParentOrderTransitionService {
             log.warn("No eligible decomposition pattern for parent_order {} (product={}, amount={}) — BR-DEC exhaustion, routing to REFUND_PENDING",
                     parentOrderId, order.getProductId(), order.getParentAmount());
             order.transitionTo(OrderState.REFUND_PENDING);
+            // The funds are already collected by the time this branch is reachable (this runs off
+            // the payment-confirmed path), so REFUND_PENDING on its own is money in with nothing
+            // delivered and nothing on any operator's queue. See DecompositionExhaustedEvent.
+            eventPublisher.publishEvent(new DecompositionExhaustedEvent(parentOrderId, order.getParentAmount()));
             return false;
         }
     }
