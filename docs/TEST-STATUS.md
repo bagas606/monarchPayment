@@ -5,13 +5,14 @@ One table per matrix, covering every ID in [`PRD-PPOB2.md`](PRD-PPOB2.md) Sectio
 The *evidence* — the HTTP statuses, the row states, the reasoning behind each deliberate deviation —
 lives in [`../backend/README.md`](../backend/README.md); searching it for an ID finds the entry.
 
-Last full pass: **2026-10-10**, against a wiped schema (all 22 Flyway migrations re-applied from
+Last full pass: **2026-10-10**, against a wiped schema (all 24 Flyway migrations re-applied from
 zero) with the app booted on the default profile. Everything tagged **R** re-passed unchanged —
-148/148 core, 13/13 routing-and-sweeps, and 15/15 gateway-mode on its own clean boot. That pass
+177/177 core, 13/13 routing-and-sweeps, and 15/15 gateway-mode on its own clean boot. That pass
 moved two rows, both **R\*** → **R**, and for the same underlying reason — the reconciliation read
 side made the queue enumerable, so what previously needed a psql prompt or a hand-seeded fixture is
 now scriptable: `TC-ADM-015`'s full `OPEN → INVESTIGATING → RESOLVED` lifecycle, and `TC-ADM-004`'s
-FINANCE grant-and-boundary pair.
+FINANCE grant-and-boundary pair. The `V23` slice later the same day sharpened `TC-BE-004`/`TC-BE-005`
+without moving a tag, and left `TC-ADM-006` at **X** on purpose — see those rows.
 
 The 2026-10-03 pass is the reason this file warns you to be suspicious of anything not tagged
 **R**: it moved `TC-BE-018`, which had been tagged **P** for a claim whose *other* half turned out
@@ -43,8 +44,8 @@ the real gateway's RSA path. The 2026-10-03 pass cleared the other three (`TC-BE
 | TC-BE-001 | Create order, supported amount | **R** | `201`, `PAYMENT_PENDING` |
 | TC-BE-002 | Create order, unsupported amount | **R** | `422 UNSUPPORTED_AMOUNT` |
 | TC-BE-003 | Amount above the QRIS ceiling | **R** | `422`, "exceeds the QRIS transaction ceiling" |
-| TC-BE-004 | Duplicate request, same key + same body | **R** | Same `order_id` both times |
-| TC-BE-005 | Idempotency conflict, same key + different body | **R** | `409 IDEMPOTENCY_KEY_CONFLICT` |
+| TC-BE-004 | Duplicate request, same key + same body | **R** | Same `order_id` both times. Sharpened 2026-10-10: "same body" is now asserted to mean the same *order* — a replay carrying different `metadata` is a replay, returns the same `order_id`, creates no second row, and does not rewrite the stored metadata |
+| TC-BE-005 | Idempotency conflict, same key + different body | **R** | `409 IDEMPOTENCY_KEY_CONFLICT`. Sharpened 2026-10-10 with the boundary that makes the row mean something: `metadata` and `callback_url` are deliberately outside `ParentOrder.matchesRequest` (a `409` is unrecoverable without changing the client's own key, so it is reserved for genuinely different orders), while a different `parent_amount` under the same key still produces the `409` |
 | TC-BE-006 | Payment created | **R** | `payment` row, QR payload returned, `PAYMENT_PENDING` |
 | TC-BE-007 | QR expiry sweep | **R** | `parent_order` **and** `payment` both → `EXPIRED` on the 60s tick |
 | TC-BE-008 | Payment success callback | **R** | Order → `PAID`, exactly one payment-ledger `CREDIT` |
@@ -103,8 +104,8 @@ the `/admin/**` REST endpoints and Section 42's RBAC.
 | TC-ADM-003 | RBAC: VIEWER attempts a mutating action | **R** | `403 PERMISSION_DENIED` — asserted by `run-core.sh`, which drives a seeded VIEWER against a `retry:execute`-gated endpoint |
 | TC-ADM-004 | RBAC: FINANCE reaches reconciliation | **R** | **Moved R\* → R on 2026-10-10**: `run-core.sh` now seeds `finance1` inline (exactly as it already did `viewer1` — the fixture seeding no FINANCE user was the only reason this was hand-driven) and asserts the grant over real HTTP: `200` on `GET /admin/reconciliations`, `200` on a detail read, `200` on `investigate` with the record verified as actually moved to `INVESTIGATING` — **and** `403` on the `retry:execute`-gated endpoint. The boundary matters as much as the grant: a role that reached everything would answer `200` there too, and then the three `200`s would prove nothing about RBAC. This is also what exercises `V22`'s FINANCE `reconciliation:view` grant over HTTP rather than only reading it back out of SQL |
 | TC-ADM-005 | Permission: no `retry:execute`, attempts retry | **R** | `403` **and** an `ADMIN_PERMISSION_DENIED` row carrying the real `actor_id`. Previously unrecorded |
-| TC-ADM-006 | Transaction search | **X** | No implementation |
-| TC-ADM-007 | Parent/child drilldown | **X** | No implementation |
+| TC-ADM-006 | Transaction search | **X** | No implementation — and it stays **X** despite `GET /admin/orders` landing on 2026-10-10, which is deliberately *not* this test case: one filter, required, no paging, no result grid. It takes that path because extending it later beats replacing it. Search is many filters over the fields Section 41.2 names; what exists is a reverse lookup by `metadata.reseller_txn_id` (`order:view`, `V24`) built to close a specific cross-company investigation gap |
+| TC-ADM-007 | Parent/child drilldown | **X** | No implementation. Note for whoever builds it: `FINANCE` and `RECONCILIATION` are deliberately withheld `order:view` (`V24`), and a reconciliation row points at an order through `reference_id` with nothing to open it — so this is the point at which those two roles need that grant |
 | TC-ADM-008 | Pricing update | **X** | No implementation |
 | TC-ADM-009 | Configuration update | **X** | No implementation |
 | TC-ADM-010 | Pattern viewing | **X** | No implementation |

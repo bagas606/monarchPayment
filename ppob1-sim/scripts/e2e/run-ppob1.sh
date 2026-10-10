@@ -63,17 +63,18 @@ chk "learned from the create response"  "$(field "$R" last_source)" CREATE_RESPO
 chk "QR payload returned to the reseller" "$(count "$R" '"qr_payload":"00020101')" 1
 chk "PPOB2 stored PPOB1's callback_url" \
     "$(scalar "select callback_url is not null from parent_order where order_no='$OID'")" t
-# KNOWN PPOB2 GAP, asserted so it flips the day someone closes it. Section 23.4's documented
-# request body carries metadata.reseller_txn_id, and CreateOrderController binds it into its
-# request record and then never passes it anywhere -- parent_order has no metadata column at all.
-# Exactly the shape of the callback_url gap V16 fixed ("already accepted and silently dropped").
-# The consequence is concrete: PPOB2 support cannot tie an order back to the reseller's own
-# reference, so every cross-company investigation has to start by asking PPOB1.
-chk "PPOB2 still has nowhere to put metadata.reseller_txn_id (known gap)" \
-    "$(scalar "select count(*) from information_schema.columns where table_name='parent_order' and column_name='metadata'")" 0
-# ...and sending it is nonetheless accepted rather than rejected, which is why PPOB1 keeps sending
-# it: the day the column exists, the orders start carrying it with no change here.
-chk "...but sending it is accepted, not refused" "$(field "$R" local_state)" AWAITING_PAYMENT
+# This WAS the gap, and these two assertions used to state it: parent_order had no metadata column,
+# so Section 23.4's documented metadata.reseller_txn_id was bound by CreateOrderController and then
+# dropped -- the same shape as the callback_url gap V16 fixed ("already accepted and silently
+# dropped"). Closed by PPOB2's V23; the assertion is flipped rather than deleted, because what is
+# worth checking from here is the end-to-end claim: PPOB1 sent its own id and PPOB2 can now be
+# asked about it. Not one line of PPOB1 changed -- Ppob2Client has always sent the field.
+chk "PPOB2 now stores PPOB1's own transaction id" \
+    "$(scalar "select metadata->>'reseller_txn_id' from parent_order where order_no='$OID'")" E2E-OK-1
+# The reseller's id and PPOB2's order number are now tied together on PPOB2's side, which is the
+# whole point: a cross-company investigation can start from either end.
+chk "...tied to the order PPOB1 was given" \
+    "$(scalar "select count(*) from parent_order where order_no='$OID' and metadata->>'reseller_txn_id'='E2E-OK-1'")" 1
 
 ORIGREF="R-$OID" $CB "$(pgref "$OID")" 20000 00 >/dev/null; sleep 7
 chk "PPOB2 fulfilled it"                "$(scalar "select state from parent_order where order_no='$OID'")" SUCCESS
@@ -91,10 +92,13 @@ echo "== Idempotency: a reseller retrying its own submit =="
 R2=$(submit '{"reseller_txn_id":"E2E-OK-1","product_code":"MOBILE_LEGENDS","amount":20000,"customer_reference":"GAMEID-OK"}')
 chk "re-submit returns the same transaction"  "$(field "$R2" id)" "$ID"
 chk "re-submit does not re-send a settled sale" "$(field "$R2" local_state)" COMPLETED
-# Counted by customer_reference rather than the reseller's id, because PPOB2 does not keep the
-# latter (see the known gap above) -- which is itself a small illustration of what that gap costs.
 chk "exactly one order exists upstream" \
     "$(scalar "select count(*) from parent_order where customer_reference='GAMEID-OK'")" 1
+# Countable by the reseller's OWN id now, which it was not before V23 -- this assertion previously
+# had to go through customer_reference and carried a comment saying so, which was itself a small
+# illustration of what the gap cost. Same count, asked PPOB1's way.
+chk "...and one by PPOB1's own id" \
+    "$(scalar "select count(*) from parent_order where metadata->>'reseller_txn_id'='E2E-OK-1'")" 1
 
 echo "== Section 23.4 refusal: an amount PPOB2 does not support =="
 R=$(submit '{"reseller_txn_id":"E2E-REJ-1","product_code":"MOBILE_LEGENDS","amount":15000,"customer_reference":"GAMEID-REJ"}')

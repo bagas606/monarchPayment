@@ -1,6 +1,8 @@
 package id.ppob2.app.web;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.PropertyNamingStrategies;
+import com.fasterxml.jackson.databind.PropertyNamingStrategy;
 import id.ppob2.admin.security.AdminPrincipal;
 import id.ppob2.audit.AuditService;
 import id.ppob2.sharedkernel.error.ApiException;
@@ -13,7 +15,10 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.Authentication;
@@ -24,6 +29,8 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.validation.FieldError;
+import org.springframework.validation.ObjectError;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.NoHandlerFoundException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
@@ -150,10 +157,12 @@ public class GlobalExceptionHandler {
     }
 
     /**
-     * Malformed/unreadable body, a missing required header or query parameter, a bean-validation
-     * failure, or an unparseable path variable — all client mistakes, all {@code 400}, reported
-     * with the same {@code VALIDATION_ERROR} code Section 23.9 already documents for this class
-     * rather than inventing new codes partners don't know how to branch on.
+     * Malformed/unreadable body, a missing required header or query parameter, or an unparseable
+     * path variable — all client mistakes, all {@code 400}, reported with the same
+     * {@code VALIDATION_ERROR} code Section 23.9 already documents for this class rather than
+     * inventing new codes partners don't know how to branch on. A bean-validation failure is the
+     * same status and code but has its own handler, {@link #handleBodyValidation}, for the reason
+     * recorded there.
      *
      * <p>The message is deliberately generic per exception class instead of echoing {@code
      * ex.getMessage()} for the body case: Jackson's parse messages quote the offending source
@@ -167,10 +176,69 @@ public class GlobalExceptionHandler {
     }
 
     @ExceptionHandler({MissingRequestHeaderException.class, MissingServletRequestParameterException.class,
-            MethodArgumentNotValidException.class, MethodArgumentTypeMismatchException.class})
+            MethodArgumentTypeMismatchException.class})
     public ResponseEntity<ErrorResponse> handleBadRequest(Exception ex, HttpServletRequest request) {
         log.debug("Rejected {} {}: {}", request.getMethod(), request.getRequestURI(), ex.getMessage());
         return envelope(ErrorCode.VALIDATION_ERROR, ex.getMessage(), request);
+    }
+
+    /**
+     * Bean validation on a request body. Split out of {@link #handleBadRequest} — which it used to
+     * share — because that handler echoes {@code ex.getMessage()}, and this exception's message is
+     * not fit to send a partner.
+     *
+     * <p>Not a theory. This branch was unreachable until {@code CreateOrderController} gained the
+     * {@code @Valid} it had always been missing, and the first request to reach it answered:
+     *
+     * <pre>
+     * Validation failed for argument [0] in public org.springframework.http.ResponseEntity&lt;
+     * id.ppob2.app.web.CreateOrderController$CreateOrderResponse&gt; id.ppob2.app.web
+     * .CreateOrderController.createOrder(...): [Field error in object 'createOrderRequest' on
+     * field 'productCode': rejected value [  ]; codes [NotBlank...]; default message [...]]
+     * </pre>
+     *
+     * That publishes this service's package layout, generic signatures and method parameters to
+     * whoever sent the bad request, and echoes the rejected value — the exact thing
+     * {@link #handleUnreadableBody} deliberately refuses to do, for the exact same reason.
+     *
+     * <p>Replaced by the envelope's own {@code details} list, which is Section 50.1's
+     * {@code field}/{@code issue} pair and had never been populated by anything. Field names are
+     * translated through the app's configured Jackson naming strategy, so a partner is told about
+     * {@code parent_amount} — the name it sent — rather than {@code parentAmount}, the name of a
+     * Java field it has no way to know about.
+     */
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ResponseEntity<ErrorResponse> handleBodyValidation(MethodArgumentNotValidException ex,
+                                                              HttpServletRequest request) {
+        List<ApiException.ErrorDetail> details = new ArrayList<>();
+        for (FieldError error : ex.getBindingResult().getFieldErrors()) {
+            details.add(new ApiException.ErrorDetail(apiFieldName(error.getField()), error.getDefaultMessage()));
+        }
+        // Class-level constraints have no field to name. None exist in this codebase today, so this
+        // loop adds nothing — it is here so that adding one later reports it instead of producing an
+        // empty `details` and a message saying only that something failed.
+        for (ObjectError error : ex.getBindingResult().getGlobalErrors()) {
+            details.add(new ApiException.ErrorDetail(null, error.getDefaultMessage()));
+        }
+        log.debug("Rejected {} {}: {} validation error(s)",
+                request.getMethod(), request.getRequestURI(), details.size());
+        return ResponseEntity.status(ErrorCode.VALIDATION_ERROR.httpStatus())
+                .body(new ErrorResponse(ErrorCode.VALIDATION_ERROR.name(), "Request body failed validation.",
+                        List.copyOf(details), correlationId(request), Instant.now()));
+    }
+
+    /**
+     * The field name as the caller spelled it. Read off the configured {@link ObjectMapper} rather
+     * than reimplemented, so it cannot drift from the strategy that actually parsed the request —
+     * {@code spring.jackson.property-naming-strategy: SNAKE_CASE} in {@code application.yml} today,
+     * whatever it is tomorrow. Falls back to the Java name if the strategy is not one that can
+     * translate, which is a worse message but never a wrong one.
+     */
+    private String apiFieldName(String javaFieldName) {
+        PropertyNamingStrategy strategy = objectMapper.getPropertyNamingStrategy();
+        return strategy instanceof PropertyNamingStrategies.NamingBase base
+                ? base.translate(javaFieldName)
+                : javaFieldName;
     }
 
     /**

@@ -2097,7 +2097,9 @@ Known gaps to close before this is production-real:
     back to the reseller's own reference, so every cross-company investigation has to start by
     asking PPOB1 to map its id to ours. Not fixed here — it is a schema change on the PPOB2 side and
     was outside the requested scope — but `run-ppob1.sh` asserts the column's absence, so the
-    assertion flips the day someone adds it.
+    assertion flips the day someone adds it. **Fixed by the 2026-10-10 `V23` entry below**, and the
+    assertion did flip: `run-ppob1.sh` now checks that the column holds PPOB1's own id for the order
+    PPOB1 was given.
 
 - **One business-day boundary for the platform, 2026-10-10** (`BusinessTimeConfig`,
   `ppob2.business-zone`). Closes the timezone finding recorded in the entry above. Before this,
@@ -2179,6 +2181,104 @@ Known gaps to close before this is production-real:
     `ppob2.business-zone`, PPOB1's `ppob1.business-zone`). They must be set to the same value and
     nothing enforces the pairing across the wire — it cannot be, since these are two companies in
     this architecture. Both default to UTC so they agree out of the box.
+
+- **`metadata.reseller_txn_id` is stored, indexed and looked up, 2026-10-10** (`V23`, `V24`,
+  `AdminOrderController`). Closes the `metadata` finding recorded in the PPOB1 entry above. The
+  field had been bound by `CreateOrderController`'s request record since the first slice and passed
+  nowhere; `parent_order` had no column for it.
+  - **A generic `metadata jsonb` column, not a `reseller_txn_id` column.** Section 23.4 sends an
+    object, and the narrow version would have to grow a column per key — until it did, every other
+    key would still be accepted and dropped, which is the same gap in a smaller shape. It would also
+    freeze one partner's naming convention into PPOB2's schema. The speed the dedicated column would
+    have bought back comes from a functional index, `parent_order_reseller_txn_idx ON parent_order
+    ((metadata ->> 'reseller_txn_id'))`, and `run-core.sh` asserts the planner actually uses it —
+    a functional index only serves the expression it was declared with, so a drift between the
+    migration and the repository query would degrade to a sequential scan of every order ever
+    placed, silently.
+  - **Deliberately not a unique index.** `reseller_txn_id` is the reseller's own counter: unique
+    within one reseller at best, guaranteed by nothing PPOB2 can see. A unique index would let one
+    partner's choice of string make PPOB2 **reject another partner's legitimate order** — refusing
+    money over a third party's annotation, as an opaque constraint violation inside the create-order
+    path. PPOB2's duplicate protection for this already exists and is the right one:
+    `parent_order_idem_uk UNIQUE (client_id, idempotency_key)`, scoped per client, and PPOB1 sends
+    `reseller_txn_id` as its `Idempotency-Key` precisely so that key does the deduplication. The
+    consequence is handled rather than ignored: the lookup is one-to-many, so it returns a list and
+    names each match's partner, and a unit test covers the collision because the realistic fixture
+    has one partner and would never reach it.
+  - **Storing is not the same as accepting.** Before `V23` the field went nowhere, so its size cost
+    nothing; now it is durable storage whose size the partner chooses, on a table every settlement
+    and reconciliation query reads. Bounded at 2000 characters — fifty times Section 23.4's own
+    example — and checked explicitly in the controller rather than with a `@Size`, for the reason in
+    the next bullet.
+  - **A second defect, found by fixing the first: `@Valid` was missing on `POST /api/v1/orders`.**
+    `CreateOrderRequest` has carried `@NotBlank`/`@NotNull` since the first slice and Spring had
+    never run either — the annotations were decorative. A body omitting `parent_amount` reached
+    `Money.of(null)` and came back **`500 INTERNAL_ERROR`**, a status Section 23.1 tells partners to
+    retry, for a request no retry can fix. Fixed rather than filed because this slice adds a
+    hand-checked bound to the same record, and a hand-checked bound above three unenforced
+    annotations is worse than either one alone.
+
+    The `500` is observed, not deduced from reading `Money.of`. Reproducible in a minute: delete the
+    `@Valid`, run `CreateOrderControllerTest.aMissingParentAmountIsRejectedAsValidationNotAsAServerError`,
+    and it fails with `Status expected:<400> but was:<500>`. Restore it and the same test passes.
+  - **And a third, caused by fixing the second.** Turning on `@Valid` made a
+    `GlobalExceptionHandler` branch reachable for the first time — `MethodArgumentNotValidException`
+    was handled by the group handler that echoes `ex.getMessage()`. The first request to reach it
+    answered with the controller class name, its generic return type, its full parameter list, and
+    the rejected value quoted back:
+
+    ```
+    Validation failed for argument [0] in public org.springframework.http.ResponseEntity<
+    id.ppob2.app.web.CreateOrderController$CreateOrderResponse> id.ppob2.app.web
+    .CreateOrderController.createOrder(...): [Field error in object 'createOrderRequest' on
+    field 'productCode': rejected value [  ]; codes [NotBlank...]]
+    ```
+
+    That publishes this service's package layout to whoever sent a bad request, and echoes partner
+    payload content — the exact thing `handleUnreadableBody` already refuses to do, for the same
+    stated reason. Split into its own handler, which reports through the envelope's `details` list
+    (Section 50.1's `field`/`issue` pair, until now populated by nothing in this codebase) with
+    field names translated through the app's own configured Jackson naming strategy, so a partner is
+    told about `parent_amount` and not `parentAmount`:
+
+    ```json
+    {"error_code":"VALIDATION_ERROR","message":"Request body failed validation.",
+     "details":[{"field":"parent_amount","issue":"must not be null"}], ...}
+    ```
+
+    Asserted as an *absence* in both the unit test and `run-core.sh` — the envelope looking right
+    does not prove the leak is gone.
+  - **Idempotency: `metadata` takes no part in the conflict check, following the precedent
+    `callback_url` set.** `V16` added that column and left `ParentOrder.matchesRequest` alone; this
+    does the same. The line both sit on the far side of is what the order *is* — product, amount, who
+    it is for — versus how the caller annotated it. A `409` is the one answer a client cannot recover
+    from without changing its own key, so it is reserved for requests that are genuinely different
+    orders. The corollary, which was first-write-wins by omission and is now written down and
+    asserted: a replay carrying different metadata is a replay, and the stored value stays whatever
+    the first accepted request set.
+  - **`order:view`, and VIEWER gets it** — the opposite of what `V22` decided for
+    `reconciliation:view` two migrations earlier, so the divergence is argued in `V24` rather than
+    left looking like an inconsistency. `V22`'s deciding sentence was "this endpoint is not a
+    transaction lookup … 'can see every open financial exposure' is a Finance-shaped grant that
+    happens to be implemented as a read." That sentence argues the other way here: this endpoint *is*
+    a transaction lookup — the literal phrase Section 42.1 uses for `CUSTOMER_SERVICE`, the most
+    junior role with any read scope — and it resolves one id the partner already holds into the order
+    it already placed. Withheld from `FINANCE`, `RECONCILIATION` and `TECH_SUPPORT`, whose Section
+    42.1 scopes name modules rather than transactions; revisit when `TC-ADM-007`'s drilldown is
+    built, since a reconciliation row points at an order with no way to open it.
+  - **Not `TC-ADM-006`**, which stays **X**. That test case is Admin Web transaction search: many
+    filters, paging, a result grid. `GET /admin/orders` here has exactly one filter and *requires*
+    it. It takes that path because extending it later beats replacing it, and the required parameter
+    is what keeps today's version honest — without it the endpoint would mean "every order on the
+    platform, newest first", with no partner scope, which is a far larger decision than this one.
+  - **Not one line of PPOB1 changed.** `Ppob2Client` has sent `metadata.reseller_txn_id` since it
+    was written; the gap was entirely on this side of the wire. `run-ppob1.sh`'s two assertions were
+    flipped from stating the gap to stating the round trip, and its idempotency case can now count by
+    the reseller's own id instead of routing around the missing column through `customer_reference`.
+  - **Verified**: 189 unit tests, `run-core.sh` 177/177 (was 148), `run-routing-and-sweeps.sh`
+    13/13, `run-ppob1.sh` 99/99, `run-refund-gateway.sh` 15/15 — the last one re-run this time
+    rather than reasoned about, because every e2e script drives the order-creation path this slice
+    changes.
 
 ## Running locally
 

@@ -68,6 +68,35 @@ public interface ParentOrderRepository extends JpaRepository<ParentOrder, Long> 
     List<PartnerAmountProjection> sumSuccessfulPaymentAmountByPartnerPaidBetween(
             @Param("start") Instant start, @Param("end") Instant end);
 
+    /**
+     * The reverse lookup V23's {@code metadata} column exists to serve: given a reseller's own
+     * transaction id, which of PPOB2's orders is it. Newest first, because a support ticket about
+     * an id that was retried is almost always about the latest attempt.
+     *
+     * <p>Native, and the expression is written exactly as {@code parent_order_reseller_txn_idx}
+     * declares it. A functional index is only used for the expression it was built on, so
+     * {@code metadata ->> 'reseller_txn_id'} must stay character-for-character identical in both
+     * places or this silently becomes a sequential scan of every order ever placed. JPQL cannot
+     * express {@code ->>} at all, which is why it is native rather than derived.
+     *
+     * <p><b>Returns a list, never an {@code Optional}.</b> {@code reseller_txn_id} is the reseller's
+     * own counter — unique within one reseller at best, enforced by nothing PPOB2 can see (V23
+     * explains why the index is deliberately not unique). An {@code Optional} finder would throw
+     * {@code IncorrectResultSizeDataAccessException} the first time two partners picked the same
+     * string, turning a support lookup into a 500 at the one moment it is needed, for a cause the
+     * operator could neither see nor act on.
+     *
+     * <p>{@code LIMIT 101} rather than unbounded: an exact match on an indexed expression normally
+     * returns one row, but nothing stops a partner sending the same id on every order it ever
+     * places, and this is an admin endpoint with no partner scope to bound it. The extra row above
+     * the hundred the caller is given is how {@code AdminOrderController} knows to say the result
+     * was truncated instead of presenting a hundred of an unknown number as all of them.
+     */
+    @Query(value = "SELECT * FROM parent_order WHERE metadata ->> 'reseller_txn_id' = :resellerTxnId "
+            + "ORDER BY id DESC LIMIT 101",
+            nativeQuery = true)
+    List<ParentOrder> findByResellerTxnId(@Param("resellerTxnId") String resellerTxnId);
+
     interface PartnerAmountProjection {
         Long getPartnerId();
 

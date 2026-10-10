@@ -22,8 +22,12 @@ import org.springframework.web.bind.annotation.RestController;
 /**
  * PRD Sections 23.5-23.7: {@code GET /api/v1/orders/{order_id}}, {@code
  * .../orders/{order_id}/payment}, {@code POST .../orders/{order_id}/cancel}. Resolves the
- * caller's numeric {@code partner_id} the same way {@link CreateOrderController} does — `order`
- * has no edge to `partner` (Section 20.2), so that join lives here, at the composition root.
+ * caller's numeric {@code partner_id} the same way {@link CreateOrderController} does, at the
+ * composition root. An earlier revision of this comment justified that by saying `order` has no
+ * edge to `partner` in Section 20.2, which is simply wrong — the graph has {@code order --> partner}
+ * and the Gradle build declares it. The real reason is that this resolves the <em>authenticated
+ * caller's</em> partner, not the order's: it starts from {@code ChannelContextHolder}, which is a
+ * channel-adapter concern that `order` has no business reaching into.
  *
  * <p>Every lookup is scoped to the resolved {@code partner_id}: a mismatch (order exists but
  * belongs to a different partner) is reported identically to a genuinely unknown {@code

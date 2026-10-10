@@ -210,7 +210,7 @@ figure you quoted last week. `GET .../latest` returns the newest; the older rows
 ```bash
 cd ppob1-sim
 ./gradlew test                      # 56 unit tests, 6 classes
-scripts/e2e/run-ppob1.sh            # 98 assertions, both systems running
+scripts/e2e/run-ppob1.sh            # 99 assertions, both systems running
 ```
 
 `run-ppob1.sh` is a genuinely two-sided run: PPOB1 sells through PPOB2's signed API, PPOB2 fulfils,
@@ -228,13 +228,24 @@ Everything below came out of running it, not reading the code.
    with an independently verified signature — but nothing had ever established that, and the fixture
    guaranteed nobody would.
 
-2. **`metadata.reseller_txn_id` is accepted and silently discarded.** Section 23.4's documented
-   request body carries it, `CreateOrderController` binds it into its request record, and
-   `parent_order` has no `metadata` column at all. Precisely the shape of the `callback_url` gap
+2. **`metadata.reseller_txn_id` was accepted and silently discarded — since fixed.** Section 23.4's
+   documented request body carries it, `CreateOrderController` bound it into its request record, and
+   `parent_order` had no `metadata` column at all. Precisely the shape of the `callback_url` gap
    `V16__outbound_webhook.sql` fixed, whose own comment describes the pattern: *"already accepted
-   and silently dropped"*. The cost is concrete — PPOB2 support cannot tie an order back to the
-   reseller's own reference, so every cross-company investigation starts by asking PPOB1. PPOB1
-   keeps sending it, and the harness asserts the gap so it flips the day someone closes it.
+   and silently dropped"*. The cost was concrete — PPOB2 support could not tie an order back to the
+   reseller's own reference, so every cross-company investigation started by asking PPOB1, in the
+   one direction that cannot be answered without their cooperation.
+
+   Closed on PPOB2's side by `V23`/`V24` plus `GET /admin/orders?reseller_txn_id=…`, and **not one
+   line of this simulator changed**: `Ppob2Client` had always sent the field. The harness assertions
+   were flipped rather than deleted — they used to state the gap (`parent_order` has no `metadata`
+   column) and now state the round trip (the column holds PPOB1's own id, for the order PPOB1 was
+   given). That is the pair worth keeping: a reseller sends an id, and PPOB2 can be asked about it
+   afterwards.
+
+   One small illustration of what the gap cost, visible in the diff: the idempotency case had to
+   count upstream orders through `customer_reference`, with a comment saying why. It can now count by
+   `metadata->>'reseller_txn_id'` — the question it actually wanted to ask.
 
 3. **Section 23.2 has two ambiguities that cost a real integrator a day each.** Both are now
    resolved in `Ppob2RequestSigner`'s Javadoc and pinned by tests. The spec says the signature may
