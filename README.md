@@ -15,7 +15,7 @@ slice.
 
 ## Where to find things
 
-Five documents, each with one job. Read them in this order.
+Six documents, each with one job. Read them in this order.
 
 | Document | What it is | When you want it |
 |---|---|---|
@@ -24,6 +24,7 @@ Five documents, each with one job. Read them in this order.
 | [`docs/TEST-STATUS.md`](docs/TEST-STATUS.md) | One table covering all 54 PRD test-case IDs: verified, verified-earlier, unit-only, or not implemented — and where the evidence lives | asking "is X actually tested?" |
 | [`backend/README.md`](backend/README.md) | The engineering record: module-by-module notes on what is real vs. scaffolded, every deliberate design trade-off, and the dated evidence behind each verified behaviour. Long and chronological by design. | deciding what the code *does*, and why |
 | [`backend/scripts/e2e/README.md`](backend/scripts/e2e/README.md) | Mechanics of the end-to-end harness | running the matrices yourself |
+| [`ppob1-sim/README.md`](ppob1-sim/README.md) | **PPOB1** — the reseller on the other side of the Section 23 contract, as a running system with its own database and its own books. What it found about PPOB2's partner-facing surface is listed there. | integrating against the Open API, or testing it from the outside |
 
 Conventions those documents share:
 
@@ -32,6 +33,16 @@ Conventions those documents share:
   for an ID finds the evidence for it.
 - A **gap** means "the PRD asks for this and the code does not do it", stated deliberately rather
   than left implicit. Gaps are named in `backend/README.md` next to the thing they affect.
+
+## The two systems in this repository
+
+`backend/` is **PPOB2**, the platform. `ppob1-sim/` is **PPOB1**, the channel partner that buys from
+it — a separate Spring Boot application with its own Gradle build and its own Postgres database,
+which can reach PPOB2 only over signed HTTP exactly as a real reseller does. That isolation is
+deliberate and is what makes it a conformance test of PRD Section 23 rather than a second front door
+onto PPOB2's internals; `ppob1-sim/README.md` explains why, and what running it revealed (starting
+with: PPOB2's outbound webhook had never been delivered to anything, because the dev seed leaves
+`partner.webhook_secret` NULL).
 
 ## Quickstart
 
@@ -66,6 +77,10 @@ cd backend
 scripts/e2e/run-core.sh                  # 148 assertions against a running app + real Postgres
 scripts/e2e/run-routing-and-sweeps.sh    # 13 assertions (waits on the 60s expiry-sweep tick)
 scripts/e2e/run-refund-gateway.sh        # 15 assertions; needs its own boot flag, see its header
+
+cd ../ppob1-sim
+./gradlew test                           # 39 unit tests for the PPOB1 side
+scripts/e2e/run-ppob1.sh                 # 65 assertions, both systems live; see ppob1-sim/README.md
 ```
 
 **A green `./gradlew build` is not evidence that the money paths work.** Three of the defects found
