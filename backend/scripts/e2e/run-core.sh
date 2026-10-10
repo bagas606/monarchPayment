@@ -446,6 +446,102 @@ chk "list: VIEWER lacks reconciliation:view -> 403" \
 chk "detail: VIEWER -> 403 too" \
     "$(curl -s -o /dev/null -w '%{http_code}' -u viewer1:admin123 "$RL/$RECID")" 403
 
+# ---------------------------------------------------------------------------------------------
+# V23/V24: metadata.reseller_txn_id. Section 23.4 documents the field, CreateOrderController bound
+# it into its request record, and parent_order had no column -- accepted, never rejected, never
+# stored. Found by building ppob1-sim; the gap used to be asserted from the OTHER side, by
+# run-ppob1.sh checking the column's absence.
+#
+# Last in this script, for the same reason the two blocks above it are: the FINANCE and VIEWER
+# calls here add further ADMIN_PERMISSION_DENIED rows, and nothing after this point asserts an
+# absolute audit_log count.
+echo "== V23 metadata.reseller_txn_id: stored, indexed, looked up =="
+AL="http://localhost:8080/admin/orders"
+MD1="E2E-RESELLER-TX-1"; MD2="E2E-RESELLER-TX-2"
+R=$(IDEMPOTENCY_KEY="$MD1" $CALL POST /api/v1/orders "{\"product_code\":\"MOBILE_LEGENDS\",\"parent_amount\":20000,\"customer_reference\":\"FMD1\",\"metadata\":{\"reseller_txn_id\":\"$MD1\",\"unknown_key\":\"kept\"}}")
+OMD1=$(echo "$R" | grep -o '"order_id":"[^"]*"' | cut -d'"' -f4)
+R2=$(IDEMPOTENCY_KEY="$MD2" $CALL POST /api/v1/orders "{\"product_code\":\"MOBILE_LEGENDS\",\"parent_amount\":20000,\"customer_reference\":\"FMD2\",\"metadata\":{\"reseller_txn_id\":\"$MD2\"}}")
+OMD2=$(echo "$R2" | grep -o '"order_id":"[^"]*"' | cut -d'"' -f4)
+ONOMD=$(mkorder 20000 FMD3 "fmd3-$RANDOM")
+chk "metadata reaches the column"               "$(scalar "select metadata->>'reseller_txn_id' from parent_order where order_no='$OMD1'")" "$MD1"
+# A generic jsonb column, not a reseller_txn_id column (see V23): a key PPOB2 has no reader for is
+# kept rather than silently dropped, which is the whole failure mode being fixed.
+chk "a key PPOB2 has no reader for is kept too" "$(scalar "select metadata->>'unknown_key' from parent_order where order_no='$OMD1'")" kept
+# SQL NULL, NOT the JSON text "null": writeValueAsString(null) returns the three characters null,
+# which jsonb accepts and stores as a JSON null -- a non-NULL column value that then fails
+# `metadata IS NULL` and matches nothing in the ->> lookup. Every order placed without metadata
+# would have carried it.
+chk "an order with no metadata is SQL NULL"     "$(scalar "select metadata is null from parent_order where order_no='$ONOMD'")" t
+# A functional index is only used for the expression it was declared with, so a drift between the
+# migration and ParentOrderRepository.findByResellerTxnId degrades silently to a sequential scan of
+# every order ever placed. enable_seqscan=off makes the planner say which index it CAN use here.
+chk "the lookup expression matches the index" \
+    "$($Q "set enable_seqscan=off; explain (costs off) select * from parent_order where metadata->>'reseller_txn_id'='$MD1'" -t 2>/dev/null | grep -c 'parent_order_reseller_txn_idx')" 1
+
+L=$(curl -s -u superadmin:admin123 "$AL?reseller_txn_id=$MD1")
+chk "lookup resolves the reseller's id to ours" "$(echo "$L" | grep -o '"order_id":"[^"]*"' | cut -d'"' -f4)" "$OMD1"
+# Whose order it is, because a reseller id is unique per reseller at best (V23 keeps the index
+# non-unique on purpose) -- two matches with no partner named would not answer the question asked.
+chk "lookup names the partner"                  "$(echo "$L" | grep -o '"partner_code":"[^"]*"' | cut -d'"' -f4)" PPOB1
+chk "lookup count is 1"                         "$(echo "$L" | grep -o '"count":[0-9]*' | cut -d: -f2)" 1
+chk "lookup is not truncated"                   "$(echo "$L" | grep -o '"truncated":[a-z]*' | cut -d: -f2)" false
+# Discriminating, not vacuous: a second order exists with its own reseller id, and an endpoint
+# ignoring the filter would return both. Asserted as an exclusion.
+chk "lookup excludes the other order"           "$(echo "$L" | grep -c "$OMD2")" 0
+chk "the other id resolves to the other order"  "$(curl -s -u superadmin:admin123 "$AL?reseller_txn_id=$MD2" | grep -o '"order_id":"[^"]*"' | cut -d'"' -f4)" "$OMD2"
+# An id PPOB2 never received is a valid question whose answer is "none" -- and "none" is itself the
+# finding, since it means the reseller believes it sent something PPOB2 has no record of.
+chk "an unknown id is an empty 200, not a 404"  "$(curl -s -o /dev/null -w '%{http_code}' -u superadmin:admin123 "$AL?reseller_txn_id=NOT-A-REAL-ID")" 200
+chk "...with count 0"                           "$(curl -s -u superadmin:admin123 "$AL?reseller_txn_id=NOT-A-REAL-ID" | grep -o '"count":[0-9]*' | cut -d: -f2)" 0
+chk "missing reseller_txn_id -> 400"            "$(curl -s -o /dev/null -w '%{http_code}' -u superadmin:admin123 "$AL")" 400
+# ?reseller_txn_id= binds to the empty string, so `required` does not catch it, and an empty-string
+# match is a legal jsonb comparison an operator would read as the answer.
+chk "blank reseller_txn_id -> 400"              "$(curl -s -o /dev/null -w '%{http_code}' -u superadmin:admin123 "$AL?reseller_txn_id=")" 400
+# Load-bearing for TC-ADM-013's absolute audit counts, same as the reconciliation GETs.
+ABM=$(scalar "select count(*) from audit_log")
+curl -s -o /dev/null -u superadmin:admin123 "$AL?reseller_txn_id=$MD1"; sleep 1
+chk "the lookup is a read: nothing audited"     "$(scalar "select count(*) from audit_log")" "$ABM"
+
+# metadata takes no part in ParentOrder.matchesRequest, following the precedent callback_url set
+# (V16 added that column and left the check alone). So a replay carrying different metadata is a
+# REPLAY, not an IDEMPOTENCY_KEY_CONFLICT -- and first write wins, by omission: nothing writes to
+# the existing row.
+RP=$(IDEMPOTENCY_KEY="$MD1" $CALL POST /api/v1/orders "{\"product_code\":\"MOBILE_LEGENDS\",\"parent_amount\":20000,\"customer_reference\":\"FMD1\",\"metadata\":{\"reseller_txn_id\":\"REWRITTEN\"}}")
+chk "replay with different metadata is no 409"  "$(code "$RP")" 201
+chk "replay returns the same order"             "$(echo "$RP" | grep -o '"order_id":"[^"]*"' | cut -d'"' -f4)" "$OMD1"
+chk "replay does not rewrite the metadata"      "$(scalar "select metadata->>'reseller_txn_id' from parent_order where order_no='$OMD1'")" "$MD1"
+chk "replay creates no second order"            "$(scalar "select count(*) from parent_order where idempotency_key='$MD1'")" 1
+# The complement, so the three above cannot be read as "metadata made idempotency lax": the fields
+# that decide what gets fulfilled and billed still produce a 409.
+chk "replay with a different amount is a 409"   "$(code "$(IDEMPOTENCY_KEY=$MD1 $CALL POST /api/v1/orders "{\"product_code\":\"MOBILE_LEGENDS\",\"parent_amount\":40000,\"customer_reference\":\"FMD1\"}")")" 409
+
+# Storing is not the same as accepting: before V23 this field went nowhere, so its size cost
+# nothing; now it is durable storage whose size the partner chooses.
+BIG=$(printf 'x%.0s' $(seq 1 2000))
+chk "oversized metadata -> 400"                 "$(code "$(IDEMPOTENCY_KEY=fmdbig-$RANDOM $CALL POST /api/v1/orders "{\"product_code\":\"MOBILE_LEGENDS\",\"parent_amount\":20000,\"metadata\":{\"reseller_txn_id\":\"$BIG\"}}")")" 400
+chk "...and it created no order"                "$(scalar "select count(*) from parent_order where idempotency_key like 'fmdbig-%'")" 0
+
+# @Valid on the request body, which had never been applied: @NotNull on parentAmount was
+# decorative, so a body omitting it reached Money.of(null) and came back 500 INTERNAL_ERROR -- a
+# status Section 23.1 tells partners to retry, for a request no retry can fix.
+VR=$(IDEMPOTENCY_KEY="fval-$RANDOM" $CALL POST /api/v1/orders '{"product_code":"MOBILE_LEGENDS","customer_reference":"FVAL"}')
+chk "missing parent_amount -> 400, not 500"     "$(code "$VR")" 400
+chk "...named in the envelope's details"        "$(echo "$VR" | grep -o '"field":"[^"]*"' | cut -d'"' -f4)" parent_amount
+chk "...under the name the partner sent"        "$(echo "$VR" | grep -c 'parentAmount')" 0
+# The raw MethodArgumentNotValidException message names the controller class, its generic return
+# type and its parameters, and quotes the rejected value. Asserted as an absence, because the
+# envelope looking right does not prove the leak is gone -- and it was not a theory: that message
+# is what this endpoint answered the first time @Valid made the branch reachable.
+chk "...and leaks no internal signature"        "$(echo "$VR" | grep -c 'CreateOrderController\|org\.springframework')" 0
+
+chk "lookup: unauthenticated -> 401"            "$(curl -s -o /dev/null -w '%{http_code}' "$AL?reseller_txn_id=$MD1")" 401
+# VIEWER is GRANTED order:view -- the opposite of V22's reconciliation:view call, argued in V24:
+# this endpoint IS a transaction lookup, the phrase Section 42.1 uses for CUSTOMER_SERVICE, and it
+# resolves one id the partner already holds into the order it already placed.
+chk "lookup: VIEWER holds order:view -> 200"    "$(curl -s -o /dev/null -w '%{http_code}' -u viewer1:admin123 "$AL?reseller_txn_id=$MD1")" 200
+# And withheld from FINANCE, which is the boundary that makes the grant above mean anything.
+chk "lookup: FINANCE lacks order:view -> 403"   "$(curl -s -o /dev/null -w '%{http_code}' -u finance1:admin123 "$AL?reseller_txn_id=$MD1")" 403
+
 echo ""
 echo "================================"
 echo "  PASS: $pass    FAIL: $fail"

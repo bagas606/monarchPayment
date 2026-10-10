@@ -1,0 +1,44 @@
+-- PRD Section 23.4's documented Create Order request body carries
+--   "metadata": { "reseller_txn_id": "PPOB1-TX-98213" }
+-- and Section 22.15's parent_order schema has no column for it. `CreateOrderController` has bound
+-- it into its request record since the first slice and then passed it nowhere: accepted, never
+-- rejected, never stored. Exactly the shape of the callback_url gap V16 closed, whose own comment
+-- named the pattern ("already accepted and silently dropped") -- and found the same way it was,
+-- from the outside: by building a reseller (ppob1-sim) that sends the field and watching where it
+-- went.
+--
+-- The cost is operational, not cosmetic. PPOB2 support holding one of its own order numbers cannot
+-- tell which of the reseller's transactions it is, so every cross-company investigation has to
+-- start by asking the reseller to map its id to ours -- in precisely the direction (theirs -> ours)
+-- that cannot be answered without their cooperation. Our own order_no is already on their side of
+-- the wire; their id was not on ours.
+ALTER TABLE parent_order ADD COLUMN metadata JSONB;
+
+-- A generic `metadata` column, NOT a dedicated reseller_txn_id column, and the choice is worth
+-- recording because the narrower one looks simpler:
+--   * Section 23.4 sends an object. A column per key would have to be added per key, and until it
+--     was, every other key would still be accepted and silently dropped -- the same gap, narrower.
+--   * reseller_txn_id is one partner's naming convention. Hardcoding it into parent_order makes
+--     PPOB2's schema an artifact of who happened to integrate first.
+-- The expression index below buys back the lookup speed that was the dedicated column's only real
+-- advantage.
+--
+-- A functional index is only used for the expression it was declared with, so this expression and
+-- the one in ParentOrderRepository.findByResellerTxnId must stay character-for-character the same
+-- operator and key. ->> (text) rather than -> (jsonb) deliberately: the comparison the lookup makes
+-- is against a text id, and the two operators do not share an index.
+CREATE INDEX parent_order_reseller_txn_idx ON parent_order ((metadata ->> 'reseller_txn_id'));
+
+-- Deliberately NOT unique, and this is the one decision here that a later reader is most likely to
+-- want to "fix". reseller_txn_id is the reseller's own counter: unique within that reseller at best,
+-- and guaranteed by nothing PPOB2 can see or enforce. A unique index would let one partner's choice
+-- of string make PPOB2 reject another partner's legitimate order -- refusing money over a third
+-- party's annotation -- and would do it at INSERT time, inside the create-order path, as an opaque
+-- constraint violation.
+--
+-- PPOB2's own duplicate protection for this is already in place and is the right one:
+-- parent_order_idem_uk UNIQUE (client_id, idempotency_key), which is scoped per client. PPOB1 sends
+-- reseller_txn_id as its Idempotency-Key precisely so that key does the deduplication.
+--
+-- The consequence, handled rather than ignored: a lookup by reseller_txn_id can legitimately match
+-- more than one row, so the admin endpoint returns a list and names each match's partner.

@@ -29,7 +29,7 @@ class WebhookDeliveryTargetResolverTest {
 
     private static ParentOrder orderWithCallback(OrderState state, String callbackUrl, Long partnerId) {
         ParentOrder order = new ParentOrder("ORD-1", 1L, partnerId, "client-1", 1L, Money.of(60000L),
-                "API", "idem-1", "cust-ref", Instant.now(), callbackUrl);
+                "API", "idem-1", "cust-ref", Instant.now(), callbackUrl, null);
         order.transitionTo(OrderState.PAYMENT_PENDING);
         order.transitionTo(OrderState.PAID);
         if (state == OrderState.REFUND_PENDING) {
