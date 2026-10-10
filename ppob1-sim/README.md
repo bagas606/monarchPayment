@@ -177,23 +177,25 @@ worse than no figure. PPOB2 computes `expected_amount` as
    callback does not carry it and PPOB1 stores no such field. A sale at 23:50 paid at 00:10 lands
    on different days in the two systems. Closing it would mean a Section 23.6 call per transaction
    — a real option, a different design.
-2. **PPOB2's own day boundary is not pinned.** `paid_at::date` casts in the *Postgres session*
-   timezone, which the JDBC driver takes from the JVM default — not from
-   `hibernate.jdbc.time_zone`, which only governs parameter binding. Verified directly:
-   `2026-10-10T23:30:00Z` casts to `2026-10-11` under `Asia/Jakarta` and `2026-10-10` under `UTC`.
-   So the same payment data yields different settlement days depending on the deploying host's
-   timezone, which decides `expected_amount`, which decides MATCHED vs DISCREPANCY. A PPOB2
-   finding, reported rather than worked around.
+2. **Both sides must be configured to the same zone — and both default to UTC.** PPOB2's boundary
+   used to be whatever the deploying host's timezone was (`paid_at::date` casts in the *Postgres
+   session* timezone, which the JDBC driver takes from the JVM default, not from
+   `hibernate.jdbc.time_zone`), which is why PPOB1 originally matched an *observed* accident rather
+   than a decision. **That has since been fixed on PPOB2's side**: it now resolves its settlement
+   window from an explicit `ppob2.business-zone`, defaulting to UTC. So this is no longer a
+   divergence but a configuration pairing — set `ppob2.business-zone` and `ppob1.business-zone` to
+   the same value and the day boundaries agree by construction. They are deliberately two settings,
+   because these are two companies here and nothing enforces the pairing across the wire.
 3. **Settlement windows are not calendar days anyway.** Section 37.1 flags the real T+N schedule as
    "must be verified against latest Ayolinx contract", and PPOB2's own repository comment calls its
    single-calendar-day grouping "a placeholder window, not a modeled one". Both sides approximate
    the same unknown.
 
-Because of (2), `ppob1.business-zone` defaults to **UTC**, not `Asia/Jakarta`: matching the basis
-observed in the one environment that exists removes a divergence PPOB1 can control, and a
-nicer-looking local business day would add a second one on top of the unavoidable (1). The zone is
-stored **on each snapshot**, because the same date label under a different zone covers a different
-set of sales and the numbers alone cannot say which.
+`ppob1.business-zone` defaults to **UTC**, matching PPOB2's own default so the two agree out of the
+box. Change one and the other must change too: a Jakarta business day on one side only reintroduces
+a seven-hour offset on top of the unavoidable (1). The zone is stored **on each snapshot**, because
+the same date label under a different zone covers a different set of sales and the numbers alone
+cannot say which.
 
 ### Snapshots are append-only, several per day
 
@@ -264,12 +266,14 @@ Everything below came out of running it, not reading the code.
    contradiction of this class's own stated invariant that a failed signature check applies nothing
    at all. Rejected rows now store a NULL nonce.
 
-7. **PPOB2's settlement day boundary depends on the deploying host's timezone.** Divergence (2)
-   above. `paid_at::date` casts in the Postgres session timezone, which the JDBC driver takes from
-   the JVM default, so `expected_amount` — and therefore whether a settlement is MATCHED or
-   DISCREPANCY, and whether a `PAYMENT_VS_SETTLEMENT` reconciliation record opens — differs between
-   a UTC host and an `Asia/Jakarta` one. Nothing in PPOB2's configuration pins it. Verified with a
-   direct cast under both zones.
+7. **PPOB2's settlement day boundary depended on the deploying host's timezone — since fixed.**
+   `paid_at::date` casts in the Postgres session timezone, which the JDBC driver takes from the JVM
+   default, so `expected_amount` — and therefore MATCHED vs DISCREPANCY, and whether a
+   `PAYMENT_VS_SETTLEMENT` record opens — differed between a UTC host and an `Asia/Jakarta` one,
+   with nothing in PPOB2's configuration pinning it. Reported from here, then fixed in PPOB2:
+   `BusinessTimeConfig` now defines one explicit business zone for the whole platform and the
+   settlement queries take an explicit instant range. See `backend/README.md`'s entry for the
+   before/after reproduction.
 
 8. **Two defects in my own snapshot code that only running it revealed.** `computed_at` was
    `insertable = false` with a column default, so it was still null on the instance returned

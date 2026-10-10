@@ -14,6 +14,9 @@ import id.ppob2.reconciliation.domain.ReconciliationType;
 import id.ppob2.sharedkernel.money.Money;
 import java.time.LocalDate;
 import org.junit.jupiter.api.Test;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 
 /**
  * Pins the recorded {@code expected}/{@code actual} values, which are the entire operator-facing
@@ -31,9 +34,16 @@ class PaymentCallbackAnomalyOrchestratorTest {
 
     private static final Money BILLED = Money.of(20000L);
 
+    /** A fixed clock, not the system one: asserting against {@code LocalDate.now()} is a test that
+     * cannot fail for the very bug the injected clock exists to prevent, because both sides move
+     * together. 23:30 UTC is chosen so the date differs from the Jakarta date of the same instant
+     * ({@code 2026-10-11}) -- a regression to a host-zone lookup shows up as a wrong date here. */
+    private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-10-10T23:30:00Z"), ZoneOffset.UTC);
+    private static final LocalDate TODAY = LocalDate.of(2026, 10, 10);
+
     private final ReconciliationService reconciliationService = mock(ReconciliationService.class);
     private final PaymentCallbackAnomalyOrchestrator orchestrator =
-            new PaymentCallbackAnomalyOrchestrator(reconciliationService);
+            new PaymentCallbackAnomalyOrchestrator(CLOCK, reconciliationService);
 
     private static PaymentCallbackAnomalyEvent event(PaymentCallbackAnomalyEvent.Kind kind,
                                                       String pgStatus,

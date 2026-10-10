@@ -2087,10 +2087,8 @@ Known gaps to close before this is production-real:
     whether a `PAYMENT_VS_SETTLEMENT` reconciliation record opens, and how
     `settlement_partner_allocation` apportions. An Indonesian deployment running `Asia/Jakarta` is
     entirely plausible, and it would silently group settlements seven hours off from this
-    environment. Not fixed here (it is a PPOB2 configuration/decision question — pin the session
-    timezone explicitly, or key the window on an explicit zone the way
-    `CollectionSnapshotService` does on the PPOB1 side), and it compounds Section 37.1's already
-    flagged "T+N schedule and cutoff rules must be verified against latest Ayolinx contract".
+    environment. **Fixed by the 2026-10-10 entry below**; it was left open at the time of this one
+    because it is a PPOB2 configuration decision rather than part of the PPOB1 slice.
   - **`metadata.reseller_txn_id` is accepted and silently discarded.** Section 23.4's documented
     Create Order body carries it, `CreateOrderController`'s request record binds it, and
     `parent_order` has no `metadata` column at all — so it goes nowhere. This is the same shape as
@@ -2100,6 +2098,87 @@ Known gaps to close before this is production-real:
     asking PPOB1 to map its id to ours. Not fixed here — it is a schema change on the PPOB2 side and
     was outside the requested scope — but `run-ppob1.sh` asserts the column's absence, so the
     assertion flips the day someone adds it.
+
+- **One business-day boundary for the platform, 2026-10-10** (`BusinessTimeConfig`,
+  `ppob2.business-zone`). Closes the timezone finding recorded in the entry above. Before this,
+  PPOB2 had no business-day definition at all — it had the JVM's default timezone, used implicitly
+  in two different ways, and nothing anywhere said so.
+  - **The two shapes of the bug.** Seven `LocalDate.now()` call sites (daily usage counters, quota
+    enforcement, `reconciliation.recon_date`) took the host's zone. And two settlement queries
+    grouped with `paid_at::date`, whose cast runs in the **Postgres session** timezone — which the
+    PG JDBC driver sets from the JVM default, *not* from
+    `spring.jpa.properties.hibernate.jdbc.time_zone`. That last point is the trap: the setting a
+    reader would reasonably assume covered this governs only how Hibernate binds parameters.
+  - **Reproduced at the layer it lived in, not argued about.** A bare JDBC connection, same
+    database, same query, two JVM timezones:
+
+    | `TZ` | PG session `TimeZone` | `'2026-10-10T23:30:00Z'::timestamptz::date` |
+    |---|---|---|
+    | `UTC` | `UTC` | `2026-10-10` |
+    | `Asia/Jakarta` | `Asia/Jakarta` | `2026-10-11` |
+
+    So the driver really does propagate the JVM zone to the session, and the cast really does follow
+    it. One payment, two settlement days, decided by an environment variable nobody set deliberately.
+  - **Why it matters beyond tidiness.** `expected_amount` decides `MATCHED` vs `DISCREPANCY`, which
+    decides whether a `PAYMENT_VS_SETTLEMENT` reconciliation record opens, which feeds
+    `settlement_partner_allocation`. An Indonesian deployment running `Asia/Jakarta` is not a
+    hypothetical, and it would have grouped settlements seven hours off from this environment with
+    nothing to show that anything had changed. Separately, `UsageTrackingService` writes daily usage
+    and `RoutingService` reads it to enforce `provider_sku.quota_daily`: they happened to agree
+    (both took the JVM default), but nothing held them together, and a quota checked against a
+    counter nobody increments is enforcement that has silently stopped enforcing.
+  - **The fix: one `java.time.Clock` bean, injected.** `LocalDate.now(clock)` is the idiomatic way
+    to make "today" a dependency rather than a global, it needs no change to `shared-kernel` (which
+    is deliberately free of framework dependencies), and it makes the affected unit tests able to
+    pin a date with `Clock.fixed(...)`. That last part is not incidental: the previous tests
+    asserted against `LocalDate.now()`, which is a test that *cannot fail* for this bug, because
+    both sides of the comparison move together. The new ones fix the clock at **23:30 UTC**, an
+    instant whose Jakarta date is the next day, so a regression to a host-zone lookup changes the
+    date they see.
+  - **The settlement queries lost their `LocalDate` overloads entirely**, rather than being
+    deprecated, so no caller can reintroduce the host dependence. They now take an explicit
+    half-open `[start, end)` instant range. `SettlementIngestionOrchestrator` computes that window
+    **once** and passes the identical bounds to both the total and the per-partner query — a
+    correctness requirement, not tidiness: those two are the denominator and the numerators of one
+    apportionment, and BR-REC-002 requires the allocations to sum to `actual_amount` exactly. Two
+    windows would break that invariant at allocation write time, far from the cause. Asserted
+    directly in `SettlementIngestionOrchestratorTest`.
+  - **Two sites that were already explicit UTC moved too** — `OrderNumberGenerator`'s date part and
+    `MarginReconciliationOrchestrator`'s `orderDate`. Neither was a bug (both were host-independent
+    already), but leaving them hardcoded while everything else became configurable would have
+    created a *new* inconsistency: set `Asia/Jakarta` and an order booked on the Jakarta 11th would
+    have carried a `10` in its order number. Safe to move because the order-number sequence is
+    global and never reset per day, so changing the date label cannot collide with an earlier order.
+  - **Default `UTC`, deliberately not `Asia/Jakarta`.** UTC reproduces the behaviour this codebase
+    already had, so making the boundary explicit does not silently move anyone's settlement figures.
+    `Asia/Jakarta` is very likely the correct business value — but Section 37.1 flags the settlement
+    schedule and cutoff rules as "must be verified against latest Ayolinx contract", and picking the
+    plausible answer here would dress an unverified assumption up as a decision. Set
+    `PPOB2_BUSINESS_ZONE=Asia/Jakarta` once that cutoff is confirmed. Not to be confused with
+    `ppob2.payment.ayolinx.timezone`, which only formats timestamps in Ayolinx API payloads.
+  - **Verified end-to-end with the JVM pinned at `Asia/Jakarta` throughout**, which is the
+    configuration the old code got wrong — confirmed from the boot log's own `+07:00` timestamps,
+    not assumed:
+
+    | `ppob2.business-zone` | payment `paid_at` | settlement date ingested | `expected_amount` | status |
+    |---|---|---|---|---|
+    | `UTC` | `2026-10-10T23:30Z` | `2026-10-10` | **20000** | `MATCHED` |
+    | `Asia/Jakarta` | `2026-10-12T23:30Z` | `2026-10-12` | **0** | `DISCREPANCY` + `OPEN` recon record |
+    | `Asia/Jakarta` | `2026-10-12T23:30Z` | `2026-10-13` | **20000** | `MATCHED` |
+
+    The first row is the old defect's exact scenario: with `TZ=Asia/Jakarta` the previous code cast
+    that `paid_at` to the 11th and would have reported `expected_amount = 0` → `DISCREPANCY` on a
+    settlement that in fact matched. The second and third rows show the boundary now moving purely
+    with the property while the host stays fixed — and the second also shows the operational harm
+    the old host-dependence could cause in silence.
+  - **Incidental confirmation**: an attempt to delete a `SETTLEMENT` ledger row while resetting the
+    reproduction was refused by the database — `ledger_entry is append-only (Section 22.21) — DELETE
+    is not permitted`. The trigger from `V10` doing its job, and the whole statement rolled back
+    with it.
+  - **Gap, not built**: the two zones are independent settings on the two systems (PPOB2's
+    `ppob2.business-zone`, PPOB1's `ppob1.business-zone`). They must be set to the same value and
+    nothing enforces the pairing across the wire — it cannot be, since these are two companies in
+    this architecture. Both default to UTC so they agree out of the box.
 
 ## Running locally
 

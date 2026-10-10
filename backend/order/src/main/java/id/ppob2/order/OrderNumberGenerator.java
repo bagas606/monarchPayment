@@ -1,8 +1,8 @@
 package id.ppob2.order;
 
 import id.ppob2.order.repository.ParentOrderRepository;
+import java.time.Clock;
 import java.time.LocalDate;
-import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import org.springframework.stereotype.Component;
 
@@ -18,14 +18,21 @@ public class OrderNumberGenerator {
 
     private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd");
 
+    private final Clock businessClock;
     private final ParentOrderRepository repository;
 
-    public OrderNumberGenerator(ParentOrderRepository repository) {
+    public OrderNumberGenerator(Clock businessClock, ParentOrderRepository repository) {
+        this.businessClock = businessClock;
         this.repository = repository;
     }
 
     public String next() {
-        String datePart = LocalDate.now(ZoneOffset.UTC).format(DATE_FORMAT);
+        // Was a hardcoded ZoneOffset.UTC -- explicit, so never host-dependent, but it would have
+        // disagreed with every other business date once the zone became configurable: an order
+        // booked on the Jakarta 11th would have carried a 10th in its number. Safe to move because
+        // the backing sequence is global and never reset per day, so changing the date label cannot
+        // collide with an earlier order (see the class note on why there is no modulo).
+        String datePart = LocalDate.now(businessClock).format(DATE_FORMAT);
         long sequence = repository.nextOrderNoSequence();
         return "ORD-" + datePart + "-" + String.format("%06d", sequence);
     }

@@ -20,6 +20,9 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
+import java.time.Clock;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 
 /**
  * Mocked-repository test covering the branches the real end-to-end run (documented in
@@ -31,11 +34,18 @@ import org.junit.jupiter.api.Test;
  */
 class OrderFulfillmentReconciliationOrchestratorTest {
 
+    /** A fixed clock, not the system one: asserting against {@code LocalDate.now()} is a test that
+     * cannot fail for the very bug the injected clock exists to prevent, because both sides move
+     * together. 23:30 UTC is chosen so the date differs from the Jakarta date of the same instant
+     * ({@code 2026-10-11}) -- a regression to a host-zone lookup shows up as a wrong date here. */
+    private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-10-10T23:30:00Z"), ZoneOffset.UTC);
+    private static final LocalDate TODAY = LocalDate.of(2026, 10, 10);
+
     private final ParentOrderRepository parentOrderRepository = mock(ParentOrderRepository.class);
     private final ChildOrderService childOrderService = mock(ChildOrderService.class);
     private final ReconciliationService reconciliationService = mock(ReconciliationService.class);
     private final OrderFulfillmentReconciliationOrchestrator orchestrator = new OrderFulfillmentReconciliationOrchestrator(
-            parentOrderRepository, childOrderService, reconciliationService);
+            CLOCK, parentOrderRepository, childOrderService, reconciliationService);
 
     private static ParentOrder orderInState(OrderState state) {
         ParentOrder order = new ParentOrder("ORD-1", 1L, 1L, "client-1", 1L, Money.of(60000L),
@@ -100,7 +110,7 @@ class OrderFulfillmentReconciliationOrchestratorTest {
 
         orchestrator.onDecompositionExhausted(new DecompositionExhaustedEvent(1L, Money.of(10000L)));
 
-        verify(reconciliationService).open(ReconciliationType.ORDER_VS_FULFILLMENT, java.time.LocalDate.now(), 1L,
+        verify(reconciliationService).open(ReconciliationType.ORDER_VS_FULFILLMENT, TODAY, 1L,
                 Money.of(10000L), Money.ZERO);
     }
 
@@ -139,7 +149,7 @@ class OrderFulfillmentReconciliationOrchestratorTest {
 
         orchestrator.reconcile(1L);
 
-        verify(reconciliationService).open(ReconciliationType.ORDER_VS_FULFILLMENT, java.time.LocalDate.now(), 1L,
+        verify(reconciliationService).open(ReconciliationType.ORDER_VS_FULFILLMENT, TODAY, 1L,
                 Money.of(60000L), Money.of(40000L));
     }
 }

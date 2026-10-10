@@ -4,7 +4,6 @@ import id.ppob2.order.domain.OrderState;
 import id.ppob2.order.domain.ParentOrder;
 import java.math.BigDecimal;
 import java.time.Instant;
-import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
 import org.springframework.data.domain.Limit;
@@ -45,13 +44,29 @@ public interface ParentOrderRepository extends JpaRepository<ParentOrder, Long> 
      * consumer channels, e.g. {@code PPOB2_WEB}) -- there is no partner to attribute those to.
      * Every order today is {@code RESELLER_API} with a non-null {@code partner_id} (BR-ORD-003), so
      * this exclusion is a no-op in the current MVP, not an active filter.
+     *
+     * <p><b>Takes the same explicit {@code [start, end)} range as
+     * {@code PaymentRepository.sumSuccessfulAmountPaidBetween}, and must be called with the
+     * identical bounds.</b> These two queries are the numerator and denominator of the same
+     * apportionment: the per-partner sums here are weighted against the total there, and
+     * BR-REC-002 requires the resulting allocations to sum to {@code settlement.actual_amount}
+     * <em>exactly</em>. Two different windows would break that invariant — and break it as a
+     * rejected allocation at write time, far from the cause. {@code SettlementIngestionOrchestrator}
+     * therefore computes the window once and passes it to both.
+     *
+     * <p>The former {@code LocalDate} overload filtered {@code p.paid_at::date = :date}, whose cast
+     * runs in the Postgres session timezone (taken from the JVM default) — see
+     * {@code BusinessTimeConfig} for the verified demonstration and why the overload is removed
+     * rather than deprecated.
      */
     @Query(value = "SELECT po.partner_id AS partnerId, COALESCE(SUM(p.amount), 0) AS amount "
             + "FROM parent_order po JOIN payment p ON p.parent_order_id = po.id "
-            + "WHERE p.status = 'SUCCESS' AND p.paid_at::date = :date AND po.partner_id IS NOT NULL "
+            + "WHERE p.status = 'SUCCESS' AND p.paid_at >= :start AND p.paid_at < :end "
+            + "AND po.partner_id IS NOT NULL "
             + "GROUP BY po.partner_id",
             nativeQuery = true)
-    List<PartnerAmountProjection> sumSuccessfulPaymentAmountByPartnerForDate(@Param("date") LocalDate date);
+    List<PartnerAmountProjection> sumSuccessfulPaymentAmountByPartnerPaidBetween(
+            @Param("start") Instant start, @Param("end") Instant end);
 
     interface PartnerAmountProjection {
         Long getPartnerId();

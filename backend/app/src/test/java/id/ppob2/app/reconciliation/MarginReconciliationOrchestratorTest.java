@@ -25,6 +25,8 @@ import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
+import java.time.Clock;
+import java.time.ZoneOffset;
 
 /**
  * Mocked-repository test covering branches the real end-to-end run (documented in
@@ -40,8 +42,15 @@ class MarginReconciliationOrchestratorTest {
     private final PatternEconomicsRepository patternEconomicsRepository = mock(PatternEconomicsRepository.class);
     private final LedgerEntryRepository ledgerEntryRepository = mock(LedgerEntryRepository.class);
     private final ReconciliationService reconciliationService = mock(ReconciliationService.class);
+    /** A fixed clock, not the system one: asserting against {@code LocalDate.now()} is a test that
+     * cannot fail for the very bug the injected clock exists to prevent, because both sides move
+     * together. 23:30 UTC is chosen so the date differs from the Jakarta date of the same instant
+     * ({@code 2026-10-11}) -- a regression to a host-zone lookup shows up as a wrong date here. */
+    private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-10-10T23:30:00Z"), ZoneOffset.UTC);
+    private static final LocalDate TODAY = LocalDate.of(2026, 10, 10);
+
     private final MarginReconciliationOrchestrator orchestrator = new MarginReconciliationOrchestrator(
-            parentOrderRepository, childOrderService, patternEconomicsRepository, ledgerEntryRepository, reconciliationService);
+            CLOCK, parentOrderRepository, childOrderService, patternEconomicsRepository, ledgerEntryRepository, reconciliationService);
 
     private static ParentOrder orderInState(OrderState state, Long patternId) {
         ParentOrder order = new ParentOrder("ORD-1", 1L, 1L, "client-1", 1L, Money.of(60000L),

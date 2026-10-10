@@ -5,6 +5,7 @@ import id.ppob2.payment.PaymentCallbackAnomalyEvent;
 import id.ppob2.reconciliation.ReconciliationService;
 import id.ppob2.reconciliation.domain.ReconciliationType;
 import id.ppob2.sharedkernel.money.Money;
+import java.time.Clock;
 import java.time.LocalDate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -78,9 +79,11 @@ public class PaymentCallbackAnomalyOrchestrator {
 
     private static final Logger log = LoggerFactory.getLogger(PaymentCallbackAnomalyOrchestrator.class);
 
+    private final Clock businessClock;
     private final ReconciliationService reconciliationService;
 
-    public PaymentCallbackAnomalyOrchestrator(ReconciliationService reconciliationService) {
+    public PaymentCallbackAnomalyOrchestrator(Clock businessClock, ReconciliationService reconciliationService) {
+        this.businessClock = businessClock;
         this.reconciliationService = reconciliationService;
     }
 
@@ -103,7 +106,7 @@ public class PaymentCallbackAnomalyOrchestrator {
         // findings; the whole point of this class is that none of them stays silent.
         Money expected = reconciliationExpected(event);
         Money actual = reconciliationActual(event);
-        reconciliationService.open(ReconciliationType.PAYMENT_VS_PG, LocalDate.now(), event.paymentId(),
+        reconciliationService.open(ReconciliationType.PAYMENT_VS_PG, LocalDate.now(businessClock), event.paymentId(),
                 expected, actual);
         log.warn("Opened PAYMENT_VS_PG discrepancy for payment {} (parent_order {}): {} pg_status={} "
                         + "payment_status={} billed={} reported={} -> recorded expected={} actual={}",
@@ -159,7 +162,7 @@ public class PaymentCallbackAnomalyOrchestrator {
                     + "the late-payment record", event.parentOrderId());
             return;
         }
-        reconciliationService.open(ReconciliationType.ORDER_VS_FULFILLMENT, LocalDate.now(), event.parentOrderId(),
+        reconciliationService.open(ReconciliationType.ORDER_VS_FULFILLMENT, LocalDate.now(businessClock), event.parentOrderId(),
                 event.parentAmount(), Money.ZERO);
         log.warn("Opened ORDER_VS_FULFILLMENT discrepancy for parent_order {}: payment confirmed while order was {} "
                         + "— funds collected, nothing fulfilled, needs manual review",

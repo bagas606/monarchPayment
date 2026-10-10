@@ -10,6 +10,7 @@ import id.ppob2.order.repository.ParentOrderRepository;
 import id.ppob2.reconciliation.ReconciliationService;
 import id.ppob2.reconciliation.domain.ReconciliationType;
 import id.ppob2.sharedkernel.money.Money;
+import java.time.Clock;
 import java.time.LocalDate;
 import java.util.List;
 import org.slf4j.Logger;
@@ -61,13 +62,16 @@ public class OrderFulfillmentReconciliationOrchestrator {
 
     private static final Logger log = LoggerFactory.getLogger(OrderFulfillmentReconciliationOrchestrator.class);
 
+    private final Clock businessClock;
     private final ParentOrderRepository parentOrderRepository;
     private final ChildOrderService childOrderService;
     private final ReconciliationService reconciliationService;
 
-    public OrderFulfillmentReconciliationOrchestrator(ParentOrderRepository parentOrderRepository,
+    public OrderFulfillmentReconciliationOrchestrator(Clock businessClock,
+                                                       ParentOrderRepository parentOrderRepository,
                                                         ChildOrderService childOrderService,
                                                         ReconciliationService reconciliationService) {
+        this.businessClock = businessClock;
         this.parentOrderRepository = parentOrderRepository;
         this.childOrderService = childOrderService;
         this.reconciliationService = reconciliationService;
@@ -105,7 +109,7 @@ public class OrderFulfillmentReconciliationOrchestrator {
                 .map(ChildOrder::getFaceValue)
                 .reduce(Money.ZERO, Money::add);
 
-        reconciliationService.open(ReconciliationType.ORDER_VS_FULFILLMENT, LocalDate.now(), parentOrderId,
+        reconciliationService.open(ReconciliationType.ORDER_VS_FULFILLMENT, LocalDate.now(businessClock), parentOrderId,
                 order.getParentAmount(), actualValue);
     }
 
@@ -137,7 +141,7 @@ public class OrderFulfillmentReconciliationOrchestrator {
                     + "the BR-DEC exhaustion record", event.parentOrderId());
             return;
         }
-        reconciliationService.open(ReconciliationType.ORDER_VS_FULFILLMENT, LocalDate.now(), event.parentOrderId(),
+        reconciliationService.open(ReconciliationType.ORDER_VS_FULFILLMENT, LocalDate.now(businessClock), event.parentOrderId(),
                 event.parentAmount(), Money.ZERO);
         log.warn("Opened ORDER_VS_FULFILLMENT discrepancy for parent_order {}: paid {} but no eligible "
                         + "decomposition pattern — funds collected, nothing fulfilled, refund owed, needs manual review",

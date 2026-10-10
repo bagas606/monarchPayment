@@ -21,6 +21,9 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 
 /**
  * Pure logic test with mocked repositories — safe here because {@link RoutingService} only
@@ -33,8 +36,14 @@ class RoutingServiceTest {
     private final ProviderRepository providerRepository = mock(ProviderRepository.class);
     private final PatternEconomicsRepository patternEconomicsRepository = mock(PatternEconomicsRepository.class);
     private final SkuUsageRepository skuUsageRepository = mock(SkuUsageRepository.class);
+    /** Fixed, and at 23:30 UTC on purpose: the quota lookup keys on the business day, and the
+     * Jakarta date of this same instant is the 11th. A regression to a host-zone lookup therefore
+     * reads a different day's sku_usage row than the one these tests stub. */
+    private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-10-10T23:30:00Z"), ZoneOffset.UTC);
+    private static final LocalDate TODAY = LocalDate.of(2026, 10, 10);
+
     private final RoutingService routingService = new RoutingService(
-            providerSkuRepository, providerRepository, patternEconomicsRepository, skuUsageRepository);
+            CLOCK, providerSkuRepository, providerRepository, patternEconomicsRepository, skuUsageRepository);
 
     @Test
     void picksHighestScoringEligiblePattern() throws Exception {
@@ -133,7 +142,7 @@ class RoutingServiceTest {
     }
 
     private static PatternEconomics economics(long patternId, boolean eligible, String score) {
-        return new PatternEconomics(patternId, LocalDate.now(), Money.of(0L), Money.of(0L), BigDecimal.ZERO,
+        return new PatternEconomics(patternId, TODAY, Money.of(0L), Money.of(0L), BigDecimal.ZERO,
                 Money.of(0L), Money.of(0L), BigDecimal.ZERO, new BigDecimal(score), eligible);
     }
 
