@@ -14,8 +14,8 @@ import id.ppob2.pricing.repository.PatternEconomicsRepository;
 import id.ppob2.reconciliation.ReconciliationService;
 import id.ppob2.reconciliation.domain.ReconciliationType;
 import id.ppob2.sharedkernel.money.Money;
+import java.time.Clock;
 import java.time.LocalDate;
-import java.time.ZoneOffset;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -69,17 +69,20 @@ public class MarginReconciliationOrchestrator {
 
     private static final Logger log = LoggerFactory.getLogger(MarginReconciliationOrchestrator.class);
 
+    private final Clock businessClock;
     private final ParentOrderRepository parentOrderRepository;
     private final ChildOrderService childOrderService;
     private final PatternEconomicsRepository patternEconomicsRepository;
     private final LedgerEntryRepository ledgerEntryRepository;
     private final ReconciliationService reconciliationService;
 
-    public MarginReconciliationOrchestrator(ParentOrderRepository parentOrderRepository,
+    public MarginReconciliationOrchestrator(Clock businessClock,
+                                             ParentOrderRepository parentOrderRepository,
                                              ChildOrderService childOrderService,
                                              PatternEconomicsRepository patternEconomicsRepository,
                                              LedgerEntryRepository ledgerEntryRepository,
                                              ReconciliationService reconciliationService) {
+        this.businessClock = businessClock;
         this.parentOrderRepository = parentOrderRepository;
         this.childOrderService = childOrderService;
         this.patternEconomicsRepository = patternEconomicsRepository;
@@ -96,7 +99,10 @@ public class MarginReconciliationOrchestrator {
             return;
         }
 
-        LocalDate orderDate = LocalDate.ofInstant(order.getCreatedAt(), ZoneOffset.UTC);
+        // pattern_economics.snapshot_date is a business date, so the order's instant has to be
+        // reduced to one in the business zone -- previously a hardcoded ZoneOffset.UTC, which was
+        // explicit but would have disagreed with the configured zone.
+        LocalDate orderDate = LocalDate.ofInstant(order.getCreatedAt(), businessClock.getZone());
         PatternEconomics economics = patternEconomicsRepository
                 .findTopByPatternIdAndSnapshotDateLessThanEqualOrderBySnapshotDateDesc(order.getPatternId(), orderDate)
                 .orElse(null);
@@ -130,7 +136,7 @@ public class MarginReconciliationOrchestrator {
             return;
         }
 
-        reconciliationService.open(ReconciliationType.MARGIN_EXPECTED_VS_ACTUAL, LocalDate.now(), parentOrderId,
+        reconciliationService.open(ReconciliationType.MARGIN_EXPECTED_VS_ACTUAL, LocalDate.now(businessClock), parentOrderId,
                 expectedGrossProfit, actualGrossProfit);
     }
 }

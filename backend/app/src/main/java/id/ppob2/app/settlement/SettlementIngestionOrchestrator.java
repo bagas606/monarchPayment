@@ -8,6 +8,8 @@ import id.ppob2.settlement.SettlementAllocationService;
 import id.ppob2.settlement.SettlementIngestionService;
 import id.ppob2.settlement.domain.Settlement;
 import id.ppob2.sharedkernel.money.Money;
+import java.time.Clock;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -37,21 +39,34 @@ import org.springframework.transaction.annotation.Transactional;
  * and hands it to {@link SettlementAllocationService} for pro-rata attribution, in the same
  * transaction as the settlement/reconciliation writes above -- allocation is meant to be computed
  * for every settlement, not a best-effort side effect that can silently fail to run.
+ *
+ * <p><b>This class owns the settlement window.</b> It resolves {@code settlementDate} to a
+ * half-open {@code [start, end)} instant range once, in {@code BusinessTimeConfig}'s business zone,
+ * and passes the <em>same</em> bounds to both the total and the per-partner query. That is a
+ * correctness requirement, not tidiness: those two are the denominator and numerators of one
+ * apportionment, and BR-REC-002 requires the allocations to sum to {@code actual_amount} exactly.
+ * Computing the window twice would invite them to drift, and the drift would surface as a rejected
+ * allocation at write time -- far from its cause. Previously both queries took a {@code LocalDate}
+ * and cast {@code paid_at::date} in the Postgres session timezone, so the window was whatever the
+ * host's {@code TZ} happened to be; see {@code BusinessTimeConfig}.
  */
 @Service
 public class SettlementIngestionOrchestrator {
 
+    private final Clock businessClock;
     private final PaymentRepository paymentRepository;
     private final ParentOrderRepository parentOrderRepository;
     private final SettlementIngestionService settlementIngestionService;
     private final SettlementAllocationService settlementAllocationService;
     private final ReconciliationService reconciliationService;
 
-    public SettlementIngestionOrchestrator(PaymentRepository paymentRepository,
+    public SettlementIngestionOrchestrator(Clock businessClock,
+                                            PaymentRepository paymentRepository,
                                             ParentOrderRepository parentOrderRepository,
                                             SettlementIngestionService settlementIngestionService,
                                             SettlementAllocationService settlementAllocationService,
                                             ReconciliationService reconciliationService) {
+        this.businessClock = businessClock;
         this.paymentRepository = paymentRepository;
         this.parentOrderRepository = parentOrderRepository;
         this.settlementIngestionService = settlementIngestionService;
@@ -61,7 +76,14 @@ public class SettlementIngestionOrchestrator {
 
     @Transactional
     public Settlement ingest(LocalDate settlementDate, String pgReference, Money actualAmount, Money feeAmount) {
-        Money expectedAmount = Money.of(paymentRepository.sumSuccessfulAmountForDate(settlementDate).toBigInteger());
+        // Computed ONCE and shared by both queries below -- see the class Javadoc: they are the
+        // denominator and numerators of one apportionment, and BR-REC-002 requires the allocations
+        // to sum to actual_amount exactly.
+        Instant windowStart = settlementDate.atStartOfDay(businessClock.getZone()).toInstant();
+        Instant windowEnd = settlementDate.plusDays(1).atStartOfDay(businessClock.getZone()).toInstant();
+
+        Money expectedAmount = Money.of(
+                paymentRepository.sumSuccessfulAmountPaidBetween(windowStart, windowEnd).toBigInteger());
 
         Settlement settlement = settlementIngestionService.ingest(settlementDate, pgReference, expectedAmount, actualAmount, feeAmount);
 
@@ -71,7 +93,7 @@ public class SettlementIngestionOrchestrator {
         }
 
         Map<Long, Money> partnerExpectedAmounts = new LinkedHashMap<>();
-        parentOrderRepository.sumSuccessfulPaymentAmountByPartnerForDate(settlementDate)
+        parentOrderRepository.sumSuccessfulPaymentAmountByPartnerPaidBetween(windowStart, windowEnd)
                 .forEach(row -> partnerExpectedAmounts.put(row.getPartnerId(), Money.of(row.getAmount().toBigInteger())));
         settlementAllocationService.allocateProRata(settlement, partnerExpectedAmounts);
 

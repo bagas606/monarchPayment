@@ -46,6 +46,21 @@ management:
         include: health,info
 
 ppob2:
+  # The business-day boundary for the WHOLE platform: settlement windows, daily usage quotas,
+  # reconciliation dates and order-number date parts. Before this existed there was no definition
+  # at all -- seven LocalDate.now() call sites took the JVM default zone, and two settlement
+  # queries grouped with `paid_at::date`, whose cast runs in the Postgres SESSION timezone (set by
+  # the JDBC driver from that same JVM default, NOT from hibernate.jdbc.time_zone below). The same
+  # payment data therefore produced a different expected_amount depending on the deploying host's
+  # TZ. See BusinessTimeConfig for the verified demonstration.
+  #
+  # Defaults to UTC because that reproduces the behaviour this codebase already had, so making the
+  # boundary explicit does not silently move anyone's settlement figures. Asia/Jakarta is very
+  # likely correct for an Indonesian platform -- but Section 37.1 flags the settlement schedule and
+  # cutoff rules as "must be verified against latest Ayolinx contract", so set it once that is
+  # confirmed rather than inheriting a guess. NOT the same thing as
+  # ppob2.payment.ayolinx.timezone, which only formats timestamps in Ayolinx API payloads.
+  business-zone: ${PPOB2_BUSINESS_ZONE:UTC}
   security:
     signature-window-ms: 300000 # 5 minutes, PRD Section 23.2
   channel:

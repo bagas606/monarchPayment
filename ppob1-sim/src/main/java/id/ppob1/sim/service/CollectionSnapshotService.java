@@ -44,24 +44,26 @@ import org.springframework.transaction.annotation.Transactional;
  *       such field. An order sold at 23:50 and paid at 00:10 therefore lands on different days in
  *       the two systems. Closing this would mean a Section 23.6 call per transaction, which is a
  *       real option but a different design.</li>
- *   <li><b>PPOB2's own day boundary is not pinned.</b> {@code paid_at::date} casts in the
- *       <em>Postgres session</em> timezone, which the JDBC driver takes from the JVM default —
- *       not from {@code spring.jpa.properties.hibernate.jdbc.time_zone}, which only governs how
- *       Hibernate binds parameters. Verified directly: the instant
- *       {@code 2026-10-10T23:30:00Z} casts to {@code 2026-10-11} under {@code Asia/Jakarta} and
- *       {@code 2026-10-10} under {@code UTC}. So the same payment data yields different settlement
- *       days depending on the deploying host's timezone, which decides {@code expected_amount},
- *       which decides MATCHED vs DISCREPANCY. Reported rather than worked around.</li>
+ *   <li><b>Both sides must now be configured to the same zone — and both default to UTC.</b>
+ *       PPOB2's boundary used to be whatever the deploying host's timezone was
+ *       ({@code paid_at::date} casts in the Postgres session timezone, which the JDBC driver takes
+ *       from the JVM default, not from {@code hibernate.jdbc.time_zone}), which is why PPOB1
+ *       originally matched an <em>observed</em> accident rather than a decision. That has since
+ *       been fixed on PPOB2's side — it now resolves its settlement window from an explicit
+ *       {@code ppob2.business-zone}, defaulting to UTC. So this is no longer a divergence but a
+ *       configuration pairing: set {@code ppob2.business-zone} and {@code ppob1.business-zone} to
+ *       the same value and the day boundaries agree by construction. They are deliberately two
+ *       settings, because these are two companies here and nothing enforces the pairing across the
+ *       wire — which is itself worth knowing before changing either.</li>
  *   <li><b>Settlement windows are not calendar days anyway.</b> Section 37.1 flags the real T+N
  *       schedule and cutoff rules as "must be verified against latest Ayolinx contract", and
  *       PPOB2's own repository comment calls its single-calendar-day grouping "a placeholder
  *       window, not a modeled one". Both sides are approximating the same unknown.</li>
  * </ol>
- * Because of (2), {@code ppob1.business-zone} defaults to {@code UTC} rather than to
- * {@code Asia/Jakarta}: matching the basis observed in the one environment that exists removes a
- * divergence this service can control, and introducing a second one for the sake of a
- * nicer-looking local business day would make the figures harder to compare, not easier. An
- * operator who wants a Jakarta business day can set it and accept the known offset.
+ * {@code ppob1.business-zone} therefore defaults to {@code UTC}, matching PPOB2's own default so
+ * the two agree out of the box. Change one and the other must change too: a Jakarta business day on
+ * one side only reintroduces a seven-hour offset, on top of the unavoidable
+ * {@code created_at}-vs-{@code paid_at} difference in (1).
  */
 @Service
 public class CollectionSnapshotService {

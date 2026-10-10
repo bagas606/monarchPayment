@@ -8,6 +8,7 @@ import id.ppob2.pricing.domain.PatternEconomics;
 import id.ppob2.pricing.domain.SkuUsage;
 import id.ppob2.pricing.repository.PatternEconomicsRepository;
 import id.ppob2.pricing.repository.SkuUsageRepository;
+import java.time.Clock;
 import java.time.LocalDate;
 import java.util.Comparator;
 import java.util.List;
@@ -41,15 +42,18 @@ import org.springframework.stereotype.Service;
 @Service
 public class RoutingService {
 
+    private final Clock businessClock;
     private final ProviderSkuRepository providerSkuRepository;
     private final ProviderRepository providerRepository;
     private final PatternEconomicsRepository patternEconomicsRepository;
     private final SkuUsageRepository skuUsageRepository;
 
-    public RoutingService(ProviderSkuRepository providerSkuRepository,
+    public RoutingService(Clock businessClock,
+                           ProviderSkuRepository providerSkuRepository,
                            ProviderRepository providerRepository,
                            PatternEconomicsRepository patternEconomicsRepository,
                            SkuUsageRepository skuUsageRepository) {
+        this.businessClock = businessClock;
         this.providerSkuRepository = providerSkuRepository;
         this.providerRepository = providerRepository;
         this.patternEconomicsRepository = patternEconomicsRepository;
@@ -61,7 +65,10 @@ public class RoutingService {
             return Optional.empty();
         }
 
-        LocalDate today = LocalDate.now();
+        // Must be the same business day UsageTrackingService increments; both take
+        // BusinessTimeConfig's clock, so a host timezone can no longer put the quota check and the
+        // counter it reads on different days.
+        LocalDate today = LocalDate.now(businessClock);
 
         List<Long> skuIds = candidates.stream()
                 .flatMap(c -> c.componentSkuQuantities().stream())

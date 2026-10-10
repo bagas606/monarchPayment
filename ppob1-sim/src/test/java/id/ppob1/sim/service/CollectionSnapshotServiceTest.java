@@ -240,11 +240,11 @@ class CollectionSnapshotServiceTest {
     }
 
     @Test
-    void theDefaultZoneIsUtcToMatchPpob2sObservedBasis() {
-        // Not Asia/Jakarta, deliberately. PPOB2 groups with paid_at::date, which casts in the
-        // Postgres session timezone -- UTC in the one environment that exists. Matching it removes
-        // a divergence this service can control; picking a nicer-looking local business day would
-        // add a second one on top of the unavoidable created_at-vs-paid_at difference.
+    void theDefaultZoneIsUtcToMatchPpob2sConfiguredDefault() {
+        // Not Asia/Jakarta, deliberately: it matches PPOB2's own ppob2.business-zone default, so
+        // the two systems agree out of the box. Change one and the other must change too -- a
+        // Jakarta business day on one side only reintroduces a seven-hour offset on top of the
+        // unavoidable created_at-vs-paid_at difference.
         CollectionSnapshotService service =
                 new CollectionSnapshotService(transactionRepository, snapshotRepository, "UTC");
 
