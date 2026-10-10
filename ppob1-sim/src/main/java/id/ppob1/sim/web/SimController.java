@@ -2,18 +2,23 @@ package id.ppob1.sim.web;
 
 import id.ppob1.sim.client.Ppob2Client;
 import id.ppob1.sim.client.Ppob2Response;
+import id.ppob1.sim.domain.CollectionBucketLine;
+import id.ppob1.sim.domain.CollectionSnapshot;
 import id.ppob1.sim.domain.InboundWebhook;
 import id.ppob1.sim.domain.Ppob1Transaction;
 import id.ppob1.sim.domain.ReconEntry;
 import id.ppob1.sim.domain.ReconVerdict;
 import id.ppob1.sim.repository.InboundWebhookRepository;
+import id.ppob1.sim.service.CollectionSnapshotService;
 import id.ppob1.sim.service.ReconciliationService;
 import id.ppob1.sim.service.TransactionService;
 import java.math.BigInteger;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -39,15 +44,18 @@ public class SimController {
     private final ReconciliationService reconciliationService;
     private final InboundWebhookRepository webhookRepository;
     private final Ppob2Client ppob2Client;
+    private final CollectionSnapshotService collectionSnapshotService;
 
     public SimController(TransactionService transactionService,
                           ReconciliationService reconciliationService,
                           InboundWebhookRepository webhookRepository,
-                          Ppob2Client ppob2Client) {
+                          Ppob2Client ppob2Client,
+                          CollectionSnapshotService collectionSnapshotService) {
         this.transactionService = transactionService;
         this.reconciliationService = reconciliationService;
         this.webhookRepository = webhookRepository;
         this.ppob2Client = ppob2Client;
+        this.collectionSnapshotService = collectionSnapshotService;
     }
 
     /** Section 23.3, passed through so an operator can see what PPOB2 will accept before
@@ -148,7 +156,80 @@ public class SimController {
         return ResponseEntity.ok(webhookRepository.findAllByOrderByIdDesc().stream().map(WebhookView::of).toList());
     }
 
+    /**
+     * Compute and freeze one business day's gross-collected census from PPOB1's own books.
+     *
+     * <p>{@code business_date} defaults to today in the configured business zone rather than the
+     * server's zone — asking for "today" has to mean the same day the figure is cut in, or the
+     * default would silently return a different day's data than the explicit form of the same
+     * request.
+     */
+    @PostMapping("/sim/collections/snapshots")
+    public ResponseEntity<CollectionSnapshotView> takeSnapshot(
+            @RequestParam(name = "business_date", required = false)
+            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate businessDate) {
+        LocalDate date = businessDate != null
+                ? businessDate
+                : LocalDate.now(collectionSnapshotService.businessZone());
+        return ResponseEntity.ok(CollectionSnapshotView.of(collectionSnapshotService.snapshot(date)));
+    }
+
+    /** Every snapshot ever taken, newest first. Multiple per date is expected — each one records
+     * what PPOB1 believed at that moment, and the book moves when reconciliation repairs it. */
+    @GetMapping("/sim/collections/snapshots")
+    public ResponseEntity<List<CollectionSnapshotView>> snapshotHistory() {
+        return ResponseEntity.ok(
+                collectionSnapshotService.history().stream().map(CollectionSnapshotView::of).toList());
+    }
+
+    /** The current figure for a date: its most recent snapshot. 404 when the day has never been
+     * snapshotted, rather than an empty census — "nobody has computed this" and "this day had no
+     * sales" are different answers and a zeroed body would conflate them. */
+    @GetMapping("/sim/collections/snapshots/latest")
+    public ResponseEntity<CollectionSnapshotView> latestSnapshot(
+            @RequestParam(name = "business_date")
+            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate businessDate) {
+        return collectionSnapshotService.latestFor(businessDate)
+                .map(snapshot -> ResponseEntity.ok(CollectionSnapshotView.of(snapshot)))
+                .orElseGet(() -> ResponseEntity.notFound().build());
+    }
+
     public record SubmitRequest(String resellerTxnId, String productCode, long amount, String customerReference) {
+    }
+
+    /**
+     * A day's census. There is deliberately no single "amount owed" field: which buckets count
+     * toward what PPOB1 is owed is a commercial term the PRD never states (no partner commission
+     * model, FR-REC-004's allocation "does NOT constitute or trigger a payout", BR-REC-002's MDR
+     * bearer "must be verified against each partner's contract"). A total would be inventing one.
+     *
+     * <p>{@code zone_id} and {@code provisional} travel with the figure: the zone is what decided
+     * which day a late-evening sale fell into, and {@code provisional} says whether the day could
+     * still move when this was taken. Both are unanswerable from the numbers alone a month later.
+     */
+    public record CollectionSnapshotView(
+            Long id,
+            LocalDate businessDate,
+            String zoneId,
+            int totalCount,
+            BigInteger totalGross,
+            boolean provisional,
+            Instant computedAt,
+            List<BucketView> buckets
+    ) {
+        static CollectionSnapshotView of(CollectionSnapshot s) {
+            return new CollectionSnapshotView(s.getId(), s.getBusinessDate(), s.getZoneId(),
+                    s.getTotalCount(), s.getTotalGross(), s.isProvisional(), s.getComputedAt(),
+                    s.getLines().stream().map(BucketView::of).toList());
+        }
+    }
+
+    /** Every bucket is present, including the empty ones — an omitted zero would make "no
+     * indeterminate transactions" indistinguishable from "this version did not look". */
+    public record BucketView(String bucket, int txnCount, BigInteger gross) {
+        static BucketView of(CollectionBucketLine line) {
+            return new BucketView(line.getBucket().name(), line.getTxnCount(), line.getGross());
+        }
     }
 
     public record TransactionView(

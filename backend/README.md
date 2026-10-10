@@ -2075,6 +2075,22 @@ Known gaps to close before this is production-real:
     assumed, and re-verified at 148/148 core and 13/13 routing. The path is now driven for real: a
     full round trip whose signature `ppob1-sim` verifies with its own independent implementation of
     Section 23.2.
+  - **The settlement day boundary depends on the deploying host's timezone, and nothing pins it.**
+    `PaymentRepository.sumSuccessfulAmountForDate` and
+    `ParentOrderRepository.sumSuccessfulPaymentAmountByPartnerForDate` both group with
+    `paid_at::date`. That cast runs in the **Postgres session** timezone, which the PG JDBC driver
+    takes from the JVM default — *not* from `spring.jpa.properties.hibernate.jdbc.time_zone`, which
+    only governs how Hibernate binds parameters. Verified directly against this container's
+    Postgres: the instant `2026-10-10T23:30:00Z` casts to `2026-10-11` under `Asia/Jakarta` and
+    `2026-10-10` under `UTC`. So the same payment data yields a different `expected_amount` per
+    settlement date depending on the host's `TZ` — which decides `MATCHED` vs `DISCREPANCY`,
+    whether a `PAYMENT_VS_SETTLEMENT` reconciliation record opens, and how
+    `settlement_partner_allocation` apportions. An Indonesian deployment running `Asia/Jakarta` is
+    entirely plausible, and it would silently group settlements seven hours off from this
+    environment. Not fixed here (it is a PPOB2 configuration/decision question — pin the session
+    timezone explicitly, or key the window on an explicit zone the way
+    `CollectionSnapshotService` does on the PPOB1 side), and it compounds Section 37.1's already
+    flagged "T+N schedule and cutoff rules must be verified against latest Ayolinx contract".
   - **`metadata.reseller_txn_id` is accepted and silently discarded.** Section 23.4's documented
     Create Order body carries it, `CreateOrderController`'s request record binds it, and
     `parent_order` has no `metadata` column at all — so it goes nowhere. This is the same shape as

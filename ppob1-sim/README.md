@@ -39,8 +39,10 @@ Both are load-bearing, not tidiness.
 | **Section 23.8** | Hosts the `callback_url` and verifies PPOB2's signature independently, recording every callback including the refused ones |
 | **Its own books** | `ppob1_transaction` holds PPOB1's *belief* about each sale, alongside PPOB2's last word, stored verbatim |
 | **Reconciliation** | Compares its books against PPOB2's answers, transaction by transaction, repairs stale beliefs and reports what needs a human |
+| **Gross-collected book** | Per business day, a census of what PPOB1 believes PPOB2 collected on the orders PPOB1 originated — frozen as a dated snapshot. One-sided by design; see below |
 
-What it does **not** do yet: settlement. See [Not built](#not-built-yet).
+What it does **not** do yet: compare that book against PPOB2's own settlement figure. See
+[Not built](#not-built-yet) — that half is blocked on a contract decision, not on code.
 
 ## Running it
 
@@ -114,12 +116,99 @@ curl -X POST localhost:8081/sim/recon/run  # reconcile
 credential scheme would only obscure the one that matters. It would be a serious defect in anything
 shipped.
 
+## PPOB1's own gross-collected book
+
+Per business day: what PPOB1 believes PPOB2 collected on the orders PPOB1 originated. Computed
+entirely from PPOB1's books, with **no call to PPOB2** — this is the half of settlement
+reconciliation that needs no agreement between the two companies.
+
+```bash
+curl -X POST 'localhost:8081/sim/collections/snapshots?business_date=2026-10-10'
+curl 'localhost:8081/sim/collections/snapshots/latest?business_date=2026-10-10'
+curl localhost:8081/sim/collections/snapshots     # every snapshot ever taken
+```
+
+### It is not called a receivable, on purpose
+
+That PPOB1 is *owed* this money is a commercial term the PRD never states. There is no partner
+commission or margin model anywhere in it; FR-REC-004 says the per-partner allocation "does NOT
+constitute or trigger a payout to the partner"; BR-REC-002 says which party bears the MDR "must be
+verified against each partner's contract"; and PPOB2 pays its upstream providers out of the same
+collected funds. So the quantity here is **gross collected on PPOB1-originated orders** — the thing
+comparable to `settlement_partner_allocation.gross_amount`, and nothing more.
+
+### A census, not a total
+
+There is deliberately **no single "amount owed" field**. Which buckets count toward what PPOB1 is
+owed is exactly the commercial term above, so a total would be inventing one. Every transaction for
+the day lands in exactly one bucket instead, and whoever negotiates the contract decides which to
+add up. The buckets sum to the totals — asserted in both the unit tests and the e2e run, the same
+discipline as BR-REC-002's "allocations MUST sum exactly".
+
+Classification follows **whether the customer's money was collected**, not whether it was delivered.
+That is what makes the figure comparable: PPOB2's `sumSuccessfulAmountForDate` filters on
+`payment.status = 'SUCCESS'` alone, independent of order state, so upstream a *failed* order's
+payment still counts toward the settlement's `expected_amount`. Bucketing by delivery would
+understate PPOB1 against the very number it is meant to be compared with.
+
+| Bucket | Local states | Why it is separate |
+|---|---|---|
+| `DELIVERED` | `COMPLETED` | Nobody will argue about it |
+| `PARTIAL` | `PARTIALLY_FAILED` | Collected in full, delivered in part — PPOB1 has a claim PPOB2 has no partial-refund mechanism to settle |
+| `COLLECTED_UNDELIVERED` | `FAILED`, `REFUND_EXPECTED` | Still collected: the payment succeeded, and PPOB2's refund execution is a human moving money out-of-band |
+| `REVERSED` | `REFUNDED` | The one bucket that leaves PPOB2's figure too — `markRefunded` moves the payment off `SUCCESS` |
+| `IN_FLIGHT` | `AWAITING_RESULT` | Collected, day not finished — makes the snapshot provisional |
+| `NOT_COLLECTED` | `AWAITING_PAYMENT`, `CANCELLED`, `EXPIRED`, `REJECTED` | No money moved |
+| `INDETERMINATE` | `SUBMITTING`, `UNKNOWN` | **Not** folded into `NOT_COLLECTED`: an orphaned submit may have a live QR a customer already paid, so calling it "nothing collected" would understate the day silently |
+
+The e2e run includes a **harness-only oracle** that sums PPOB2's `SUCCESS` payments for exactly the
+orders PPOB1 knows about and asserts it equals `DELIVERED + PARTIAL + COLLECTED_UNDELIVERED +
+IN_FLIGHT`. That is the cheapest available proof the bucket definitions actually match the basis
+they will be reconciled against. The service itself never does this.
+
+### Three divergences from PPOB2's day-grouping, named rather than hidden
+
+The whole purpose of this figure is eventual comparability, so a basis that differs silently is
+worse than no figure. PPOB2 computes `expected_amount` as
+`SUM(amount) WHERE status='SUCCESS' AND paid_at::date = :date`.
+
+1. **`created_at` vs `paid_at` — unavoidable.** PPOB1 groups by when it made the sale, because it
+   never learns when the customer paid: Section 23.6 exposes `paid_at`, but the Section 23.8
+   callback does not carry it and PPOB1 stores no such field. A sale at 23:50 paid at 00:10 lands
+   on different days in the two systems. Closing it would mean a Section 23.6 call per transaction
+   — a real option, a different design.
+2. **PPOB2's own day boundary is not pinned.** `paid_at::date` casts in the *Postgres session*
+   timezone, which the JDBC driver takes from the JVM default — not from
+   `hibernate.jdbc.time_zone`, which only governs parameter binding. Verified directly:
+   `2026-10-10T23:30:00Z` casts to `2026-10-11` under `Asia/Jakarta` and `2026-10-10` under `UTC`.
+   So the same payment data yields different settlement days depending on the deploying host's
+   timezone, which decides `expected_amount`, which decides MATCHED vs DISCREPANCY. A PPOB2
+   finding, reported rather than worked around.
+3. **Settlement windows are not calendar days anyway.** Section 37.1 flags the real T+N schedule as
+   "must be verified against latest Ayolinx contract", and PPOB2's own repository comment calls its
+   single-calendar-day grouping "a placeholder window, not a modeled one". Both sides approximate
+   the same unknown.
+
+Because of (2), `ppob1.business-zone` defaults to **UTC**, not `Asia/Jakarta`: matching the basis
+observed in the one environment that exists removes a divergence PPOB1 can control, and a
+nicer-looking local business day would add a second one on top of the unavoidable (1). The zone is
+stored **on each snapshot**, because the same date label under a different zone covers a different
+set of sales and the numbers alone cannot say which.
+
+### Snapshots are append-only, several per day
+
+Not unique on `business_date`, on purpose: the transaction book moves when a reconciliation run
+repairs a stale belief, so the same day legitimately yields a different figure tomorrow. Each row
+freezes what PPOB1 believed at one instant — which is what you need when PPOB2 disagrees with a
+figure you quoted last week. `GET .../latest` returns the newest; the older rows stay on file. A
+`provisional` flag travels with the figure so "today" never reads as final.
+
 ## Testing
 
 ```bash
 cd ppob1-sim
-./gradlew test                      # 40 unit tests, 4 classes
-scripts/e2e/run-ppob1.sh            # 72 assertions, both systems running
+./gradlew test                      # 56 unit tests, 6 classes
+scripts/e2e/run-ppob1.sh            # 98 assertions, both systems running
 ```
 
 `run-ppob1.sh` is a genuinely two-sided run: PPOB1 sells through PPOB2's signed API, PPOB2 fulfils,
@@ -175,7 +264,22 @@ Everything below came out of running it, not reading the code.
    contradiction of this class's own stated invariant that a failed signature check applies nothing
    at all. Rejected rows now store a NULL nonce.
 
-7. **A harness bug that would have passed wrongly.** Nineteen assertions used `grep -c`, which counts
+7. **PPOB2's settlement day boundary depends on the deploying host's timezone.** Divergence (2)
+   above. `paid_at::date` casts in the Postgres session timezone, which the JDBC driver takes from
+   the JVM default, so `expected_amount` — and therefore whether a settlement is MATCHED or
+   DISCREPANCY, and whether a `PAYMENT_VS_SETTLEMENT` reconciliation record opens — differs between
+   a UTC host and an `Asia/Jakarta` one. Nothing in PPOB2's configuration pins it. Verified with a
+   direct cast under both zones.
+
+8. **Two defects in my own snapshot code that only running it revealed.** `computed_at` was
+   `insertable = false` with a column default, so it was still null on the instance returned
+   straight after `save()` — Hibernate does not re-read the row — and the app's
+   `default-property-inclusion: non_null` silently dropped it from the POST response while a later
+   GET of the same snapshot showed it. And `@OrderBy("bucket ASC")` sorts by the stored string, so a
+   re-read came back alphabetically while a fresh save kept insertion order: the same snapshot
+   rendering two different ways depending on how it was loaded. Both now have regression tests.
+
+9. **A harness bug that would have passed wrongly.** Nineteen assertions used `grep -c`, which counts
    matching *lines* — and every response here is one line of JSON, so it can report at most 1 and
    cannot tell one match from five. It surfaced as a visible failure on "all three agree" (got 1,
    wanted 3), but every "expect exactly 1" assertion would have passed just as happily with a
@@ -218,14 +322,22 @@ Everything below came out of running it, not reading the code.
 
 ## Not built yet
 
-- **Settlement.** The requested scope for this slice was transactions, webhook and reconciliation,
-  and settlement is the honest next step rather than something to fake. It needs a decision first:
-  PPOB2 has **no partner-facing settlement endpoint** — `GET /admin/settlements/{id}/allocations` is
-  behind admin RBAC, not the Open API, and Section 37.3 scopes PPOB2's settlement work to
-  *attribution only*, explicitly not disbursement. So PPOB1 computing "what I believe I owe PPOB2
-  per day from my own successful orders" is straightforward and useful on its own, but reconciling
-  it against PPOB2's figures requires either a new partner-facing endpoint on PPOB2 or an agreed
-  report format. That is a contract decision, not a coding one.
+- **Comparing the gross-collected book against PPOB2's own settlement figure.** PPOB1's half is
+  built (above). The other half is blocked on a contract decision, not on code: PPOB2 has **no
+  partner-facing settlement endpoint** — both its settlement endpoints are behind admin RBAC rather
+  than the Section 23 Open API, and `GET /admin/settlements/{id}/allocations` returns *every*
+  partner's figures, so exposing it as-is would leak one reseller's volume to another. The options
+  are a new partner-scoped Open API endpoint, an agreed report format, or no automated comparison
+  at all; each carries policy questions (may a partner see the MDR? the platform's `actual_amount`?)
+  that are commercial, not technical.
+
+  There is also a reason to wait even once that is decided: PPOB2's own per-partner figure is
+  currently an **estimate**. Section 37.3 names `EXACT` (a direct per-transaction join via
+  `pg_reference`) as the preferred method, but it is unimplemented — `TC-BE-033` is tagged **X**,
+  because it needs an Ayolinx settlement report carrying per-transaction lines, a format Section
+  37.1 itself marks "must be verified". Only `PRO_RATA` runs. Reconciling PPOB1's figure against an
+  apportionment estimate yields differences nobody can act on, which is worse than no comparison,
+  because people will trust it.
 - **PPOB1's own customer-facing side.** It has no downstream API, no customer records and no billing
   — it models the reseller's integration with PPOB2, not its whole business.
 - **Retry of its own submits.** A transport failure leaves the transaction `SUBMITTING` for
