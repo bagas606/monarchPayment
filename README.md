@@ -63,7 +63,7 @@ payment callback, and the dev-only failure-injection knobs.
 ```bash
 cd backend
 ./gradlew build                          # 32 unit / slice test classes + ArchUnit
-scripts/e2e/run-core.sh                  # 138 assertions against a running app + real Postgres
+scripts/e2e/run-core.sh                  # 148 assertions against a running app + real Postgres
 scripts/e2e/run-routing-and-sweeps.sh    # 13 assertions (waits on the 60s expiry-sweep tick)
 scripts/e2e/run-refund-gateway.sh        # 15 assertions; needs its own boot flag, see its header
 ```

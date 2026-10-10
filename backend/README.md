@@ -1856,7 +1856,7 @@ Known gaps to close before this is production-real:
     queryable but not visible to anyone without a psql prompt — closed by the 2026-10-10 entry
     below. (That gap was attributed here to `TC-ADM-006..011`, which was wrong: those IDs are
     transaction search, drilldown, pricing, configuration, patterns and generation. The
-    reconciliation read side has no `TC-ADM-*` ID of its own — Section 2643's traceability row ties
+    reconciliation read side has no `TC-ADM-*` ID of its own — the PRD's traceability matrix ties
     Admin Web's reconciliation views to `TC-BE-028`.)
 
 - **Refund execution** (Section 33.2's `REFUND_PENDING → REFUNDED`, FR-PAY-007, Section 42.2's
@@ -2015,11 +2015,35 @@ Known gaps to close before this is production-real:
     results on either side of the transition, and that a second `resolve` applies nothing —
     Section 38.2's sequence is a sequence, not a set. It had been **R\*** (verified by hand)
     because nothing could enumerate the queue to script it.
-  - **48 new `run-core.sh` assertions** (90 → 138) and 22 new unit tests across three classes
+  - **`TC-ADM-004` also moves R\* → R.** It was **R\*** only because "the fixture seeds no FINANCE
+    user"; `run-core.sh` already seeds `viewer1` inline, so `finance1` is seeded the same way. That
+    exercises V22's FINANCE grant over real HTTP (200 on the list, 200 on a detail, 200 on
+    `investigate`) rather than only reading the grant back out of SQL, and keeps the boundary that
+    makes those 200s mean something: 403 on the `retry:execute`-gated endpoint, since a role that
+    reached everything would answer 200 there too.
+  - **58 new `run-core.sh` assertions** (90 → 148) and 22 new unit tests across three classes
     (`ReconciliationTypeTest`, `ReconciliationQueryTest`, `AdminReconciliationControllerTest`;
     142 → 164). Full pass re-run from zero against a wiped schema (all 22 Flyway migrations
-    re-applied): 138/138 core, 13/13 routing-and-sweeps, and 15/15 gateway-mode on its own clean
+    re-applied): 148/148 core, 13/13 routing-and-sweeps, and 15/15 gateway-mode on its own clean
     boot.
+  - **A cross-script bug in my own assertions, caught by running the next script.** The FINANCE
+    case first targeted `min(id) where status='OPEN'`, which is the record for the F16 partial order
+    — the exact record `run-routing-and-sweeps.sh` asserts is still `OPEN` for `TC-BE-028`. Moving
+    it made that script fail on the next run. Now pinned to the record this script's own refund
+    block opens. Worth recording because the e2e scripts share one seeded database by design, so
+    "pick whatever record matches" is never safe across them.
+  - **A noted deviation, found and asserted rather than silently relied on**: `resolve` audits its
+    own no-op. A second `resolve` on an already-RESOLVED record answers `200` with
+    `applied=false`, changes nothing — and still writes a second `RECONCILIATION_RESOLVE` row,
+    because the controller's audit call is unconditional. `TC-ADM-013` reads "every mutating admin
+    action produces exactly one audit_log entry", and this one mutated nothing;
+    `AdminFulfillmentController`'s precedent ("a rejected attempt that changed nothing isn't an
+    admin action to record") would not audit it. The difference is that a non-retryable child order
+    is *rejected* with a `409` while this answers `200`. Left as-is deliberately — an operator
+    trying to resolve an already-resolved discrepancy is itself worth seeing in the trail, and
+    changing it is an audit-policy decision rather than a fix — but now asserted in both
+    directions, so a future change to that policy fails the suite instead of quietly altering what
+    `TC-ADM-013` counts.
   - **Three stale comments corrected** rather than left to mislead: `ReconciliationService`'s
     `investigate`/`resolve` and `ReconciliationServiceTest`'s class Javadoc both still said these
     methods were "unreachable from any real path — Admin Web, the only intended caller, isn't

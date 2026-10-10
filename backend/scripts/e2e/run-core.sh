@@ -249,8 +249,9 @@ chk "refund: SUCCESS order -> 409" \
     "$(curl -s -o /dev/null -w '%{http_code}' -u superadmin:admin123 -X POST -H 'Content-Type: application/json' -d '{"reason":"x","external_reference":"BANK-1"}' http://localhost:8080/admin/parent-orders/$SOK/refund)" 409
 
 # Runs after the refund block for the same reason that one runs last: the VIEWER-denial case below
-# adds a third ADMIN_PERMISSION_DENIED row. Nothing from the refund block onward asserts an
-# absolute audit_log count, and the one audit assertion here is a before/after delta, not a count.
+# adds further ADMIN_PERMISSION_DENIED rows. Nothing from the refund block onward asserts an
+# absolute audit_log count; the audit assertions here are either a before/after delta or scoped to
+# one action and target_id.
 echo "== Reconciliation read side (FR-REC-003 'expose', Section 38.2 'visible', Section 41.9) =="
 # $OID / $PID are still the refund order from the block above: a 10000 order with no pattern, so the
 # BR-DEC exhaustion path opened an ORDER_VS_FULFILLMENT record with the full -10000 shortfall. Using
@@ -282,6 +283,10 @@ chk "setup: a record moves OPEN -> INVESTIGATING" \
     "$(curl -s -o /dev/null -w '%{http_code}' -u superadmin:admin123 -X POST "$RL/$INVID/investigate")" 200
 sleep 2
 chk "setup: it really is INVESTIGATING" "$(scalar "select status from reconciliation where id=$INVID")" INVESTIGATING
+# TC-ADM-013's 1:1 rule applied to this mutation, which was never scripted before: exactly one row,
+# carrying the acting admin and not a client-supplied id.
+chk "TC-ADM-015 investigate audited exactly once" \
+    "$(scalar "select count(*) from audit_log where action='RECONCILIATION_INVESTIGATE' and target_id=$INVID and actor_id=(select id from admin_user where username='superadmin')")" 1
 
 TOTAL_ROWS=$(scalar "select count(*) from reconciliation")
 OPEN_ROWS=$(scalar "select count(*) from reconciliation where status='OPEN'")
@@ -379,6 +384,8 @@ chk "TC-ADM-015 status RESOLVED"   "$(field "$(adm "$RL/$INVID")" status)" RESOL
 chk "TC-ADM-015 resolved_by is the acting admin" \
     "$(scalar "select resolved_by = (select id from admin_user where username='superadmin') from reconciliation where id=$INVID")" t
 chk "TC-ADM-015 resolved_at recorded" "$(scalar "select resolved_at is not null from reconciliation where id=$INVID")" t
+chk "TC-ADM-015 resolve audited exactly once" \
+    "$(scalar "select count(*) from audit_log where action='RECONCILIATION_RESOLVE' and target_id=$INVID and actor_id=(select id from admin_user where username='superadmin')")" 1
 chk "TC-ADM-015 resolver surfaced by the API" \
     "$(field "$(adm "$RL/$INVID")" resolved_by)" "$(scalar "select id from admin_user where username='superadmin'")"
 # The same two filters as above, now on the other side of the transition.
@@ -389,8 +396,50 @@ chk "list: it has left the unresolved queue" \
 # nothing left to apply.
 chk "TC-ADM-015 re-resolve applies nothing" \
     "$(curl -s -u superadmin:admin123 -X POST "$RL/$INVID/resolve" | grep -o '"applied":[a-z]*' | cut -d: -f2)" false
+sleep 2
+chk "TC-ADM-015 re-resolve changes no state" "$(scalar "select status from reconciliation where id=$INVID")" RESOLVED
+chk "TC-ADM-015 re-resolve does not re-stamp the resolver" \
+    "$(scalar "select count(distinct resolved_at) from reconciliation where id=$INVID")" 1
+# NOTED DEVIATION, asserted so it is a recorded fact rather than an ordering accident above: this
+# endpoint audits the no-op too, so there are now TWO RECONCILIATION_RESOLVE rows for one record.
+# TC-ADM-013 reads "every mutating admin action produces exactly one audit_log entry", and a resolve
+# that applied nothing mutated nothing -- by AdminFulfillmentController's precedent ("a rejected
+# attempt that changed nothing isn't an admin action to record") it would not be audited. The
+# difference is that a non-retryable child order is REJECTED with a 409, while this answers 200 with
+# applied=false, so the controller's unconditional audit call fires. Left as-is deliberately: an
+# operator trying to resolve an already-resolved discrepancy is itself worth seeing in the trail,
+# and changing it is an audit-policy decision, not a fix. Asserted either way so a future change to
+# that policy fails here instead of silently altering what TC-ADM-013 counts.
+chk "TC-ADM-015 the no-op resolve attempt is also audited" \
+    "$(scalar "select count(*) from audit_log where action='RECONCILIATION_RESOLVE' and target_id=$INVID")" 2
 
-# Last, as above: this adds the third ADMIN_PERMISSION_DENIED row.
+# TC-ADM-004 (FINANCE reaches reconciliation). Previously verified by hand only, because the seed
+# fixture creates no FINANCE user -- seeded inline here, exactly as viewer1 is above, which is what
+# lets V22's FINANCE grant be exercised over real HTTP instead of only read back out of SQL.
+echo "== TC-ADM-004 RBAC boundary: FINANCE =="
+$Q "insert into admin_user (username,password_hash) values ('finance1','\$2a\$10\$sumJVTdd5Bhn4p0xeaYwxu5thzoF7Ok5S2NUE19rm5gB2iwE6KgtS') on conflict do nothing" -q >/dev/null 2>&1
+$Q "insert into admin_user_role (admin_user_id, role_id) select u.id, r.id from admin_user u, role r where u.username='finance1' and r.code='FINANCE' on conflict do nothing" >/dev/null 2>&1
+chk "TC-ADM-004 FINANCE can list the queue -> 200" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -u finance1:admin123 "$RL")" 200
+chk "TC-ADM-004 FINANCE can read one record -> 200" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -u finance1:admin123 "$RL/$RECID")" 200
+# $RECID specifically, NOT "min(id) where status='OPEN'" -- which is how this was first written and
+# is a cross-script bug: the lowest-id OPEN record is the one for the F16 partial order, and
+# run-routing-and-sweeps.sh asserts that exact record is still OPEN for TC-BE-028. Moving it here
+# made that script fail one assertion on the next run. $RECID is the refund order's own record,
+# opened by this script's refund block above and referenced by nothing downstream.
+chk "TC-ADM-004 FINANCE can investigate -> 200" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -u finance1:admin123 -X POST "$RL/$RECID/investigate")" 200
+chk "TC-ADM-004 FINANCE's investigate actually applied" \
+    "$(scalar "select status from reconciliation where id=$RECID")" INVESTIGATING
+
+# Last, as above: the denials below add the third, fourth and fifth ADMIN_PERMISSION_DENIED rows
+# (the two VIEWER calls are the fourth and fifth). Nothing after this point asserts an absolute
+# audit_log count.
+# The boundary matters as much as the grant: a role that reached everything would also answer 200 on
+# the retry-gated endpoint, and then the three 200s above would prove nothing about RBAC.
+chk "TC-ADM-004 FINANCE lacks retry:execute -> 403" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -u finance1:admin123 -X POST -H 'Content-Type: application/json' -d '{"reason":"x"}' http://localhost:8080/admin/child-orders/1/retry)" 403
 chk "list: unauthenticated -> 401" "$(curl -s -o /dev/null -w '%{http_code}' "$RL")" 401
 chk "list: VIEWER lacks reconciliation:view -> 403" \
     "$(curl -s -o /dev/null -w '%{http_code}' -u viewer1:admin123 "$RL")" 403

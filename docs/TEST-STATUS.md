@@ -7,10 +7,11 @@ lives in [`../backend/README.md`](../backend/README.md); searching it for an ID 
 
 Last full pass: **2026-10-10**, against a wiped schema (all 22 Flyway migrations re-applied from
 zero) with the app booted on the default profile. Everything tagged **R** re-passed unchanged —
-138/138 core, 13/13 routing-and-sweeps, and 15/15 gateway-mode on its own clean boot. That pass
-moved one row: `TC-ADM-015` **R\*** → **R**, because the reconciliation read side now makes the
-queue enumerable and the full `OPEN → INVESTIGATING → RESOLVED` lifecycle is script-asserted
-instead of driven by hand.
+148/148 core, 13/13 routing-and-sweeps, and 15/15 gateway-mode on its own clean boot. That pass
+moved two rows, both **R\*** → **R**, and for the same underlying reason — the reconciliation read
+side made the queue enumerable, so what previously needed a psql prompt or a hand-seeded fixture is
+now scriptable: `TC-ADM-015`'s full `OPEN → INVESTIGATING → RESOLVED` lifecycle, and `TC-ADM-004`'s
+FINANCE grant-and-boundary pair.
 
 The 2026-10-03 pass is the reason this file warns you to be suspicious of anything not tagged
 **R**: it moved `TC-BE-018`, which had been tagged **P** for a claim whose *other* half turned out
@@ -29,7 +30,7 @@ Be suspicious of any claim here that is not tagged **R**.
 | **U** | Covered by a unit test only. No end-to-end path exists to drive it |
 | **X** | **Not implemented.** There is nothing to test |
 
-Counts: **R 30 · R\* 6 · P 1 · U 1 · X 16** — 54 total.
+Counts: **R 31 · R\* 5 · P 1 · U 1 · X 16** — 54 total.
 
 Only `TC-BE-011` is still **P**, and it stays there for a reason no test pass can remove: it needs
 the real gateway's RSA path. The 2026-10-03 pass cleared the other three (`TC-BE-034`,
@@ -100,7 +101,7 @@ the `/admin/**` REST endpoints and Section 42's RBAC.
 | TC-ADM-001 | Login, valid credentials | **R** | Every admin assertion in the harness authenticates for real |
 | TC-ADM-002 | Login, invalid credentials | **R** | `401` **and** an `ADMIN_LOGIN_FAILED` audit row (attempted username, failure class, client IP). Previously `audit_log` was empty — the audit half did not exist |
 | TC-ADM-003 | RBAC: VIEWER attempts a mutating action | **R** | `403 PERMISSION_DENIED` — asserted by `run-core.sh`, which drives a seeded VIEWER against a `retry:execute`-gated endpoint |
-| TC-ADM-004 | RBAC: FINANCE reaches reconciliation | **R\*** | Re-driven live on 2026-10-03 against a seeded `FINANCE` user: `200` on `investigate` (record moved to `INVESTIGATING`) **and** `403` on the `retry:execute`-gated endpoint — the boundary as well as the grant, since a role that reaches everything would also return `200` here. By hand, not scripted: the fixture seeds no FINANCE user |
+| TC-ADM-004 | RBAC: FINANCE reaches reconciliation | **R** | **Moved R\* → R on 2026-10-10**: `run-core.sh` now seeds `finance1` inline (exactly as it already did `viewer1` — the fixture seeding no FINANCE user was the only reason this was hand-driven) and asserts the grant over real HTTP: `200` on `GET /admin/reconciliations`, `200` on a detail read, `200` on `investigate` with the record verified as actually moved to `INVESTIGATING` — **and** `403` on the `retry:execute`-gated endpoint. The boundary matters as much as the grant: a role that reached everything would answer `200` there too, and then the three `200`s would prove nothing about RBAC. This is also what exercises `V22`'s FINANCE `reconciliation:view` grant over HTTP rather than only reading it back out of SQL |
 | TC-ADM-005 | Permission: no `retry:execute`, attempts retry | **R** | `403` **and** an `ADMIN_PERMISSION_DENIED` row carrying the real `actor_id`. Previously unrecorded |
 | TC-ADM-006 | Transaction search | **X** | No implementation |
 | TC-ADM-007 | Parent/child drilldown | **X** | No implementation |
