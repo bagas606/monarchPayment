@@ -5,9 +5,9 @@ One table per matrix, covering every ID in [`PRD-PPOB2.md`](PRD-PPOB2.md) Sectio
 The *evidence* — the HTTP statuses, the row states, the reasoning behind each deliberate deviation —
 lives in [`../backend/README.md`](../backend/README.md); searching it for an ID finds the entry.
 
-Last full pass: **2026-10-10**, against a wiped schema (all 24 Flyway migrations re-applied from
+Last full pass: **2026-10-10**, against a wiped schema (all 25 Flyway migrations re-applied from
 zero) with the app booted on the default profile. Everything tagged **R** re-passed unchanged —
-177/177 core, 13/13 routing-and-sweeps, and 15/15 gateway-mode on its own clean boot. That pass
+177/177 core, 15/15 routing-and-sweeps, and 15/15 gateway-mode on its own clean boot. That pass
 moved two rows, both **R\*** → **R**, and for the same underlying reason — the reconciliation read
 side made the queue enumerable, so what previously needed a psql prompt or a hand-seeded fixture is
 now scriptable: `TC-ADM-015`'s full `OPEN → INVESTIGATING → RESOLVED` lifecycle, and `TC-ADM-004`'s

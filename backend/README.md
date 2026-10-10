@@ -502,11 +502,13 @@ database — see that slice's notes.
     23.8's "5 attempts over 24h" retry-with-backoff schedule was **not** built in this slice —
     **closed in a later slice, see "Webhook Retry Sweep" below** (persisted attempt count,
     scheduled re-driver; dead-letter/inquiry fallback still isn't built, since that means PPOB1
-    polling our Open API, not something we push). Trigger coverage is still partial: only the
-    post-dispatch terminal states (`SUCCESS`/`PARTIAL_FAILED`/`FAILED`, fired from
-    `FulfillmentDispatchListener` right after the reconciliation orchestrator) send a webhook;
+    polling our Open API, not something we push). Trigger coverage was partial at the time of this
+    entry: only the post-dispatch terminal states (`SUCCESS`/`PARTIAL_FAILED`/`FAILED`, fired from
+    `FulfillmentDispatchListener` right after the reconciliation orchestrator) sent a webhook;
     `CANCELLED`/`EXPIRED`/`REFUNDED` transitions and the QR expiry sweep's own state change
-    (Section 48.3's diagram) do not, and are not covered by the retry-sweep slice either.
+    (Section 48.3's diagram) did not. **`EXPIRED` was added by the 2026-10-10 entry below**, on a
+    second path (`OrderExpiredWebhookListener`, which queues rather than sends); `CANCELLED` and
+    `REFUNDED` still do not fire, the first deliberately.
   - **The body gained a sixth field later**, `reseller_txn_id`, which Section 23.8 does not
     document — see the 2026-10-10 entry on the callback carrying the reseller's own id for why, and why
     only that one key of `metadata` is echoed.
@@ -1853,8 +1855,9 @@ Known gaps to close before this is production-real:
     without it the case passes for the wrong reason the day the payment path changes.
   - **Still open, deliberately**: no `ORDER_STATUS_CHANGED` webhook fires for `REFUND_PENDING`.
     That is the pre-existing partial-trigger-coverage gap `OutboundWebhookOrchestrator`'s Javadoc
-    already names (`CANCELLED`/`EXPIRED`/`REFUNDED` don't fire either), not something this fix
-    introduced, and widening it is a separate change. There was also, at the time of this entry, no
+    already names (`CANCELLED`/`EXPIRED`/`REFUNDED` didn't fire either — `EXPIRED` does as of the
+    2026-10-10 entry below), not something this fix introduced, and widening it is a separate
+    change. There was also, at the time of this entry, no
     reconciliation *listing* endpoint for an operator to browse, so the row was correct and
     queryable but not visible to anyone without a psql prompt — closed by the 2026-10-10 entry
     below. (That gap was attributed here to `TC-ADM-006..011`, which was wrong: those IDs are
@@ -1942,7 +1945,8 @@ Known gaps to close before this is production-real:
     payout/disbursement as its own unspecified feature, and Section 71's Refund SOP (authorization
     chain, ledger-reversal verification) is a go-live prerequisite. Also no partner notification:
     `ORDER_STATUS_CHANGED` still does not fire for `REFUNDED`, the same partial-trigger-coverage gap
-    `OutboundWebhookOrchestrator` already flags for `CANCELLED`/`EXPIRED`.
+    `OutboundWebhookOrchestrator` flagged for `CANCELLED`/`EXPIRED` (of which `EXPIRED` was closed
+    on 2026-10-10, `CANCELLED` deliberately not).
 
 - **Reconciliation read side, 2026-10-10** (FR-REC-003's "record **and expose**", Section 38.2's
   "**visible** and actionable in Admin Web", Section 41.9) — `GET /admin/reconciliations`,
@@ -2301,7 +2305,9 @@ Known gaps to close before this is production-real:
     caller (`FulfillmentDispatchListener`, post-dispatch terminal states), and
     `WebhookDeliveryTargetResolver` separately refuses every state but SUCCESS / PARTIAL_FAILED /
     FAILED. **The ordinary lost-response orphan expires unpaid, produces no callback, and still needs
-    the recon-plus-re-submit remedy.**
+    the recon-plus-re-submit remedy.** (True as written on the day of this entry. The 2026-10-10
+    entry below widens the trigger to `EXPIRED` for exactly this reason, which is what finally
+    brings that orphan into reach.)
 
     What the recovery does reach is the cases where PPOB1 holds no id for an order that is
     nonetheless *live*, so a callback actually comes:
@@ -2370,15 +2376,102 @@ Known gaps to close before this is production-real:
     `NON_NULL` inclusion does not apply to map entries, and this class deliberately uses its own
     bare `ObjectMapper`, so `put(key, null)` would have serialized `"reseller_txn_id":null` — a key
     asserting the reseller has no id.
-  - **Gap, unchanged, and it is what bounds everything above**: callbacks fire only on post-dispatch
-    terminal states (SUCCESS / PARTIAL_FAILED / FAILED). `CANCELLED` and `EXPIRED` send nothing — and
+  - **Gap, and it is what bounds everything above**: callbacks fire only on post-dispatch terminal
+    states (SUCCESS / PARTIAL_FAILED / FAILED). `CANCELLED` and `EXPIRED` send nothing — and
     `EXPIRED` is not an edge case here, it is the **default outcome** of a lost create response,
     since PPOB1 holds no QR for such an order and nobody can pay it. Widening the trigger to
     `EXPIRED` would let the callback reach the ordinary orphan too; that is a Section 23.8 scope
-    decision, not part of this slice.
+    decision, not part of this slice. **Closed by the entry below**, which is the follow-up this
+    bullet asked for.
   - **Verified**: 193 PPOB2 unit tests (was 189) and 64 PPOB1 (was 56), `run-core.sh` 177/177,
     `run-routing-and-sweeps.sh` 13/13, `run-ppob1.sh` 113/113 (was 99), `run-refund-gateway.sh`
     15/15 — all five on their own clean boots against a wiped schema, since both systems change here.
+
+- **`EXPIRED` now notifies the partner, 2026-10-10** (`OrderExpiredEvent`,
+  `OrderExpiredWebhookListener`, `V25`). Section 48.3's diagram shows an `ORDER_STATUS_CHANGED`
+  webhook beside the QR-expiry state change; this codebase had shown that half as deliberately
+  not-built since the webhook slice. It is the follow-up the entry above asked for, and it is what
+  makes the reseller-id echo reach the case it was wanted for.
+  - **Why `EXPIRED` and not "all the remaining states".** An expiry is the *default outcome of a
+    lost create response*: the reseller's write of our `order_id` never lands, so it has no QR to
+    show anybody, so nobody pays, so the sweep expires the order. That reseller is holding a sale it
+    cannot name against an order it cannot see, and with no callback for `EXPIRED` there was nothing
+    that could ever tell it otherwise — its only route back was a human reading a reconciliation
+    report. `CANCELLED` is still deliberately absent, and not for symmetry: a cancellation is the
+    partner's own request (Section 23.7), so there is no state it could learn from being told.
+    `REFUNDED`/`REFUND_PENDING` stay absent too — admin-driven, no partner-facing contract yet.
+  - **It queues the delivery instead of sending it, and that is the main design decision here.**
+    `FulfillmentDispatchListener` sends synchronously and schedules a retry only on failure. Copying
+    that would have been wrong, because of the *call context* rather than the message:
+    `expirePaymentPending` runs per-order inside `QrExpirySweepJob`'s loop over up to 200 orders, so
+    an `AFTER_COMMIT` send puts up to 200 sequential HTTP calls in one sweep tick, on the scheduler
+    thread. Against a reachable partner that is milliseconds each; against an unreachable one it is
+    200 × the sender's 5s timeout — roughly **seventeen minutes during which no further orders
+    expire**. And the failure correlates with the harm: a partner being down is exactly when a
+    backlog of unpaid orders is likeliest.
+
+    That contention is not hypothetical — `application.yml` already sets
+    `spring.task.scheduling.pool.size: 2` *specifically* so a slow webhook batch in
+    `WebhookRetrySweepJob` cannot delay `QrExpirySweepJob`. Sending from inside the expiry sweep
+    would move the same problem inside the thread that mitigation protects, where a second thread
+    does not help. So the listener hands the delivery to `WebhookDeliveryTracker` and
+    `WebhookRetrySweepJob` makes every attempt including the first, on its own thread, in its own
+    bounded batch. The cost is up to one sweep interval (60s) of latency on a notification nothing
+    waits on in real time. That trade is the argument: a minute of delay on an expiry notice against
+    the expiry sweep itself stalling.
+  - **`V25` exists because of that choice.** `webhook_delivery` was built for one shape — a delivery
+    whose synchronous first attempt had already failed — so `attempt_count` started at `1` and
+    `last_attempt_at` was `NOT NULL`. A never-attempted delivery has neither. Reusing the existing
+    constructor would have claimed an attempt nothing made, costing every expiry callback one of its
+    five attempts, and put a timestamp in `last_attempt_at` that nothing attempted at. So: a second
+    constructor with `attempt_count = 0`, and `DROP NOT NULL` on that column so
+    `attempt_count = 0 AND last_attempt_at IS NULL` is expressible rather than faked. Both origins
+    still reach five total attempts (1 sync + 4 swept, or 0 + 5 swept) through the same unbranched
+    arithmetic, which is asserted at the exhaustion boundary from both starting counts.
+  - **The guard that stops this flooding the table.** Most expired orders have no `callback_url` at
+    all — `run-core.sh`'s and `run-routing-and-sweeps.sh`'s orders send none, and Section 22.15
+    permits a null `partner_id` for future consumer channels. The listener resolves the target first
+    (a read, no HTTP) and schedules only if there is one. Without that, every such order would get a
+    `webhook_delivery` row the sweep then retries five times over ~23 hours against nothing, since
+    it counts `noTarget` as a failed attempt. `run-routing-and-sweeps.sh` asserts the absence
+    directly on TC-BE-007's own expired order.
+  - **The listener never throws — and the reason I first wrote down was wrong.** The natural
+    justification is "an exception would abort the sweep's batch". Checked against spring-tx
+    6.1.13's bytecode instead of assumed, and it is false:
+    `TransactionSynchronizationUtils.invokeAfterCompletion` wraps every synchronization in
+    `catch (Throwable)`, logs `"TransactionSynchronization.afterCompletion threw exception"`, and
+    carries on — so the loop never sees it and the batch expires either way.
+
+    The catch is still worth having, for two smaller reasons: a log line that names the order and
+    says the order *is* expired and only the notification was lost (the framework's names neither),
+    and independence from a framework detail that is phase-specific — move the listener to
+    `BEFORE_COMMIT`, which looks like the safer choice, and a throw *would* propagate and roll back
+    the expiry itself. Two tests pin it (a resolver failure and a duplicate-key failure).
+  - **One gate, mirrored on both sides.** The resolver's state check became
+    `NOTIFIABLE_STATES`, and `ppob1-sim`'s `ReconciliationService.PUSHED_BY_PPOB2` is its mirror;
+    they must agree or `WEBHOOK_NEVER_ARRIVED` becomes either blind or pure noise. `EXPIRED` was
+    added to both. The discriminating test is an `EXPIRED` learned by *inquiry* — one learned by
+    webhook is `MATCH` either way, so only the inquiry case can tell the two configurations apart.
+  - **A side effect named rather than discovered later**: because the delivery is queued, there is a
+    window of up to a minute after an expiry in which a PPOB1 recon run reports
+    `WEBHOOK_NEVER_ARRIVED` that is *correct about the facts and wrong about the cause* — the
+    callback is merely still in flight. That failure class already existed for a delivery awaiting
+    retry; this widens the window. Recorded on `ReconVerdict.WEBHOOK_NEVER_ARRIVED`.
+  - **Still out of reach, so the scope claim stays honest**: an orphan whose upstream order stayed
+    `CREATED` (PPOB2 answered `PG_UNAVAILABLE`, so it never reached `PAYMENT_PENDING`, is never
+    swept and never expires), and one whose submit never arrived at all. Both still need the
+    recon-plus-re-submit remedy, and `run-ppob1.sh` asserts the second stays an orphan in the same
+    run that asserts the first case recovering.
+  - **Driven end to end**: `run-ppob1.sh` stages the real lost create response — including the
+    **null `qr_payload`**, which is the field that makes such an order unpayable and therefore the
+    one a weaker fixture would quietly keep — forces the TTL past, and waits out both sweeps. It
+    asserts PPOB2's own `webhook_event` payload (`state=EXPIRED` plus the reseller id), that the
+    delivery went through `webhook_delivery` with `attempt_count = 1` rather than inline, then
+    PPOB1's adoption, `EXPIRED` state, `WEBHOOK` source, `RECOVERED_BY_RESELLER_ID` verdict, and the
+    recon entry turning `MATCH`.
+  - **Verified**: 203 PPOB2 unit tests (was 193) and 65 PPOB1 (was 64), `run-core.sh` 177/177,
+    `run-routing-and-sweeps.sh` 15/15 (was 13), `run-ppob1.sh` 126/126 (was 113),
+    `run-refund-gateway.sh` 15/15.
 
 ## Running locally
 

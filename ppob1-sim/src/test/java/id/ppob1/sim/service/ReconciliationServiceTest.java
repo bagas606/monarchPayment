@@ -140,12 +140,34 @@ class ReconciliationServiceTest {
         assertThat(entry.getDetail()).contains("push integration is not working");
     }
 
+    /**
+     * {@code EXPIRED} joined {@code PUSHED_BY_PPOB2} on 2026-10-10, when PPOB2 started notifying on
+     * it. This is the discriminating case: an EXPIRED learned by <em>webhook</em> is MATCH whether
+     * or not the state is in that set, so only an EXPIRED learned by inquiry can tell the two
+     * configurations apart. Before the change this came back MATCH with "does not fire
+     * ORDER_STATUS_CHANGED for EXPIRED" in its detail.
+     */
+    @Test
+    void anExpiredStateLearnedOnlyByAskingIsNowFlaggedToo() {
+        Ppob1Transaction transaction = accepted("PAYMENT_PENDING");
+        transaction.applyPpob2State("EXPIRED", StateSource.INQUIRY);
+        givenWorkingSet(transaction);
+        given(ppob2Client.getOrder("ORD-1")).willReturn(ok("EXPIRED"));
+
+        ReconEntry entry = singleEntry(service.run(false));
+
+        assertThat(entry.getVerdict()).isEqualTo(ReconVerdict.WEBHOOK_NEVER_ARRIVED);
+        assertThat(entry.getVerdict().needsAttention()).isTrue();
+        assertThat(entry.getDetail()).contains("push integration is not working");
+    }
+
     @Test
     void aStateVerbatimPpob2NeverPushesIsNotFlaggedAsABrokenIntegration() {
-        // The scoping that keeps the verdict above meaningful. PPOB2 fires ORDER_STATUS_CHANGED
-        // only for post-dispatch outcomes, so a cancel is never pushed BY DESIGN -- flagging it
-        // would report PPOB2's documented trigger coverage as a fault on every single run and bury
-        // the findings that matter.
+        // The scoping that keeps the verdict above meaningful, and the boundary that stops EXPIRED
+        // joining the set from being read as "every terminal state is pushed now". A cancel is
+        // never pushed BY DESIGN -- it is PPOB1's own request, so there is nothing to learn --
+        // and flagging it would report PPOB2's documented trigger coverage as a fault on every
+        // single run and bury the findings that matter.
         Ppob1Transaction transaction = accepted("PAYMENT_PENDING");
         transaction.applyPpob2State("CANCELLED", StateSource.INQUIRY);
         givenWorkingSet(transaction);

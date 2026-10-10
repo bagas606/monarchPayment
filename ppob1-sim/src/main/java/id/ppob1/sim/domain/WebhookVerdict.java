@@ -43,30 +43,40 @@ public enum WebhookVerdict {
      * echoed the reseller's own id, this read as {@link #UNKNOWN_ORDER} — PPOB1 was being told about
      * one of its own sales and had nothing to match it on. Now it repairs itself.
      *
-     * <h2>What it does not reach, which is the part worth stating</h2>
-     * <b>Not the ordinary lost-create-response orphan</b>, despite that being the case this looks
-     * like it was built for. Traced through rather than assumed: when the create response is lost,
-     * {@code TransactionWriter} stores no {@code qr_payload} (only {@code acceptedByPpob2} sets one),
-     * so PPOB1 has no QR to show anybody, so the upstream order is never paid, so PPOB2's expiry
-     * sweep moves it to {@code EXPIRED} — and {@code EXPIRED} fires no Section 23.8 callback at all
-     * ({@code OutboundWebhookOrchestrator} fires only on post-dispatch SUCCESS / PARTIAL_FAILED /
-     * FAILED, and {@code WebhookDeliveryTargetResolver} independently refuses every other state).
-     * That orphan expires unpaid and still needs what {@link ReconVerdict#ORPHANED_SUBMIT}'s detail
-     * text recommends: a human reading the recon report and re-submitting under the same key.
-     *
-     * <h2>What it does reach</h2>
-     * Cases where PPOB1 holds no upstream id for an order that is nonetheless <em>live</em>, so a
-     * callback actually comes:
+     * <h2>What it reaches</h2>
      * <ul>
+     *   <li><b>The ordinary lost-create-response orphan — since 2026-10-10, and this is the case
+     *       the whole mechanism was wanted for.</b> It did not work when the reseller id was first
+     *       echoed back, and tracing why is worth keeping: a lost create response leaves no
+     *       {@code qr_payload} (only {@code acceptedByPpob2} sets one), so PPOB1 has no QR to show
+     *       anybody, so the order is never paid, so PPOB2 sweeps it to {@code EXPIRED} — and
+     *       {@code EXPIRED} fired no callback. PPOB2 now notifies on it
+     *       ({@code WebhookDeliveryTargetResolver.NOTIFIABLE_STATES}), so the callback arrives,
+     *       PPOB1 matches it on its own id, and the sale it could not name is finally closed as
+     *       dead. Recovery takes about seventeen minutes end to end: the 15-minute QR TTL, then
+     *       PPOB2's expiry sweep, then its webhook retry sweep. Until then recon still reports
+     *       {@link ReconVerdict#ORPHANED_SUBMIT}, correctly.</li>
      *   <li><b>A {@link LocalState#REJECTED} row whose order exists anyway.</b> A {@code 409}
      *       {@code IDEMPOTENCY_KEY_CONFLICT} is the one refusal PPOB2 issues while an order for that
-     *       key does exist. This is the case nothing else can fix, and the reason the guard is on the
-     *       id rather than on the state: {@code ReconciliationService} excludes {@code REJECTED} from
-     *       its working set, so recon will never look at that row again. The callback is the only
-     *       thing left.</li>
+     *       key does exist, and it is the reason the guard is on the id rather than on the state:
+     *       {@code ReconciliationService} excludes {@code REJECTED} from its working set, so recon
+     *       will never look at that row again. The callback is the only thing left.</li>
      *   <li><b>A row whose id was lost after the order went live</b> — a restored backup, a failed
      *       outcome write, an operational repair. PPOB1 kept the sale and lost the pointer.</li>
      * </ul>
+     *
+     * <h2>What it still does not reach</h2>
+     * Orphans whose upstream order never becomes notifiable, so no callback is ever sent:
+     * <ul>
+     *   <li><b>The order that stayed {@code CREATED}</b> — PPOB2 answered
+     *       {@code PG_UNAVAILABLE}, so the order row exists but never reached
+     *       {@code PAYMENT_PENDING}, is never swept, and never expires.</li>
+     *   <li><b>The submit that never arrived</b> — there is no upstream order to notify about at
+     *       all. ({@code E2E-ORPHAN-1} in the harness is this case, and asserts it stays an
+     *       orphan.)</li>
+     * </ul>
+     * Both still need {@link ReconVerdict#ORPHANED_SUBMIT}'s remedy: a human reading the recon
+     * report and re-submitting under the same key.
      *
      * <p>A row recovered out of {@code REJECTED} keeps its {@code rejection_code} and
      * {@code rejection_message}. Clearing them would make it indistinguishable from an ordinary

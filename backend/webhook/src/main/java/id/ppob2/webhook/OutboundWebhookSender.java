@@ -100,11 +100,13 @@ public class OutboundWebhookSender {
      * the id the partner itself chose removes that dependency, and lets a partner key its whole
      * callback handling on its own reference instead of ours.
      *
-     * <p>It also enables a recovery, and the honest scope of that is narrower than it first looks —
-     * see {@code WebhookVerdict.RECOVERED_BY_RESELLER_ID} in {@code ppob1-sim} for which cases it
-     * reaches and, more importantly, which it does not. In particular it does <em>not</em> rescue
-     * the ordinary lost-create-response orphan: no callback is ever sent for one, because that order
-     * is never paid and expires, and {@code EXPIRED} is not a state this sender fires on.
+     * <p>It also enables a recovery — see {@code WebhookVerdict.RECOVERED_BY_RESELLER_ID} in
+     * {@code ppob1-sim} for the receiving half. When this field was added that recovery deliberately
+     * did <em>not</em> reach the ordinary lost-create-response orphan, because no callback was ever
+     * sent for one: such an order is never paid (the reseller has no QR to show) and expires, and
+     * {@code EXPIRED} was not then a notifiable state. It is since 2026-10-10 — see
+     * {@code WebhookDeliveryTargetResolver.NOTIFIABLE_STATES} — so that orphan now does recover,
+     * which is the whole reason the trigger was widened.
      *
      * <p><b>Only {@code reseller_txn_id}, never the whole {@code metadata} object.</b> That column
      * holds whatever a partner chose to put in it, this body is persisted on both sides of the wire

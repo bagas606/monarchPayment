@@ -189,11 +189,13 @@ class WebhookIngestServiceTest {
      * as {@link WebhookVerdict#UNKNOWN_ORDER}: PPOB1 was being told about one of its own sales and
      * had nothing to match it on.
      *
-     * <p>Note what this fixture is and is not. {@code SUBMITTING} with no upstream id is the shape a
-     * lost create response leaves, but that orphan never produces a callback at all — no QR reached
-     * anyone, so the order expires unpaid, and {@code EXPIRED} fires nothing. The same row shape
-     * also covers a sale whose pointer was lost after the order went live, which does. See
-     * {@link WebhookVerdict#RECOVERED_BY_RESELLER_ID} for the full scope.
+     * <p>{@code SUBMITTING} with no upstream id is the shape a lost create response leaves. When
+     * this test was written that orphan produced no callback at all — no QR reached anyone, so the
+     * order expired unpaid and {@code EXPIRED} fired nothing — so the fixture then stood only for a
+     * sale whose pointer was lost after the order went live. PPOB2 notifies on {@code EXPIRED} as
+     * of 2026-10-10, so it now stands for both, which is what the harness drives end to end
+     * ({@code E2E-EXPREC-1}). See {@link WebhookVerdict#RECOVERED_BY_RESELLER_ID} for the scope,
+     * including the two orphans still out of reach.
      */
     @Test
     void anUnknownOrderIsRecoveredByTheResellersOwnId() {

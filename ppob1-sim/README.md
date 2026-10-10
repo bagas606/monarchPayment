@@ -209,8 +209,8 @@ figure you quoted last week. `GET .../latest` returns the newest; the older rows
 
 ```bash
 cd ppob1-sim
-./gradlew test                      # 64 unit tests, 7 classes
-scripts/e2e/run-ppob1.sh            # 113 assertions, both systems running
+./gradlew test                      # 65 unit tests, 7 classes
+scripts/e2e/run-ppob1.sh            # 126 assertions, both systems running
 ```
 
 `run-ppob1.sh` is a genuinely two-sided run: PPOB1 sells through PPOB2's signed API, PPOB2 fulfils,
@@ -326,31 +326,49 @@ the callback can be matched on an id PPOB1 owns:
 [`RECOVERED_BY_RESELLER_ID`](src/main/java/id/ppob1/sim/domain/WebhookVerdict.java). PPOB1 adopts
 the upstream id, applies the state, and a recon entry that read `ORPHANED_SUBMIT` comes back `MATCH`.
 
-**And here is the part worth reading, because it is the mistake this document originally made.** The
-first version of this section claimed the orphaned submit now recovers itself. It does not, and the
-reason is in this simulator's own code: when a create response is lost, `TransactionWriter` stores no
-`qr_payload` — only `acceptedByPpob2` sets one — so PPOB1 has no QR to show anybody, so the upstream
-order is never paid, so PPOB2 sweeps it to `EXPIRED`. And `EXPIRED` fires **no callback at all**
-(PPOB2's `OutboundWebhookOrchestrator` fires only on post-dispatch SUCCESS / PARTIAL_FAILED / FAILED,
-and its `WebhookDeliveryTargetResolver` independently refuses every other state). The ordinary
-lost-response orphan expires unpaid and still needs exactly what `ORPHANED_SUBMIT`'s detail text
-says: a human reading the recon report and re-submitting under the same key.
+**And here is the part worth reading, because it is a mistake this document originally made and
+then had to go back and fix on the other side.** The first version of this section claimed the
+orphaned submit now recovers itself. At the time it did not, and the reason was in this simulator's
+own code: when a create response is lost, `TransactionWriter` stores no `qr_payload` — only
+`acceptedByPpob2` sets one — so PPOB1 has no QR to show anybody, so the upstream order is never
+paid, so PPOB2 sweeps it to `EXPIRED`. And `EXPIRED` fired **no callback at all**.
 
-So what this recovery actually reaches is narrower, and worth naming precisely — the cases where
-PPOB1 holds no id for an order that is nonetheless **live**:
+That is not a fact about the reseller id at all. It is a fact about PPOB2's *trigger coverage*, and
+once named it was fixable: PPOB2 now notifies on `EXPIRED` too
+(`WebhookDeliveryTargetResolver.NOTIFIABLE_STATES`), which is what finally brings the ordinary
+lost-response orphan into reach. **Two changes, each useless without the other** — echoing the id
+gave the callback something PPOB1 could match on, widening the trigger made the callback happen at
+all — and neither was visible from inside one system.
 
+So the recovery now reaches:
+
+- **The ordinary lost create response.** PPOB2 expires the unpaid order, sends the callback, PPOB1
+  matches it on its own id and closes the sale as dead. About seventeen minutes end to end: the
+  15-minute QR TTL, PPOB2's expiry sweep, then its webhook retry sweep. Until then recon still
+  reports `ORPHANED_SUBMIT`, correctly. This is what `E2E-EXPREC-1` drives, down to the null
+  `qr_payload` — the field that makes such an order unpayable, and so the one a weaker fixture
+  would quietly keep.
 - **A `REJECTED` row whose order exists anyway.** A `409 IDEMPOTENCY_KEY_CONFLICT` is the one refusal
-  PPOB2 issues while an order for that key does exist. This is the *strongest* case for the whole
-  mechanism, not a footnote: `ReconciliationService` excludes `REJECTED` from its working set, so
-  recon will never look at that row again, and the callback is the only thing left that can correct
-  it.
+  PPOB2 issues while an order for that key does exist, and `ReconciliationService` excludes
+  `REJECTED` from its working set — so recon will never look at that row again and the callback is
+  the only thing left that can correct it.
 - **A row whose id was lost after the order went live** — a failed outcome write, a restored backup,
-  an operational repair. PPOB1 kept the sale and lost the pointer. This is what the harness stages.
+  an operational repair. PPOB1 kept the sale and lost the pointer. `E2E-WHRECOVER-1`.
 
-The harness states that boundary itself rather than leaving it to prose: the same run that asserts
-the recovered row now reads `MATCH` also asserts that `E2E-ORPHAN-1` — an orphan with no upstream
-order at all — is *still* flagged. That assertion exists because the first version of it counted
-`ORPHANED_SUBMIT` run-wide, failed, and was right to.
+And still does **not** reach, because no callback is ever sent for them:
+
+- **An order that stayed `CREATED`** — PPOB2 answered `PG_UNAVAILABLE`, so it never reached
+  `PAYMENT_PENDING`, is never swept, and never expires.
+- **A submit that never arrived** — there is no upstream order to be notified about. `E2E-ORPHAN-1`.
+
+The harness states that boundary itself rather than leaving it to prose: the run that asserts a
+recovered row reads `MATCH` also asserts that `E2E-ORPHAN-1` is *still* flagged. That assertion
+exists because the first version of it counted `ORPHANED_SUBMIT` run-wide, failed, and was right to.
+
+One side effect of the callback being queued rather than sent synchronously on PPOB2's side (it has
+its own good reason — see `OrderExpiredWebhookListener`): for up to a minute after an expiry, a recon
+run here reports `WEBHOOK_NEVER_ARRIVED` that is correct about the facts and wrong about the cause.
+The callback is merely still in flight.
 
 Three things about the mechanism are worth knowing before changing any of it:
 
@@ -376,10 +394,11 @@ body, and the first assertion reads `webhook_event.payload->>'reseller_txn_id'` 
 so the test cannot pass on PPOB1 inventing a match. `wh.sh` gained an optional `RESELLER_TXN_ID` only
 for the conflict case, which PPOB2 cannot be made to produce with one `api_client`.
 
-One thing that would widen this materially, named rather than implied: if PPOB2 fired a callback on
-`EXPIRED` too, the ordinary lost-response orphan would recover by the same path. That is a Section
-23.8 trigger-coverage decision on PPOB2's side, and PPOB2's README flags that coverage as partial
-already.
+`CANCELLED` is still unpushed by PPOB2 and should stay that way — a cancellation is PPOB1's own
+request (Section 23.7), so there is no state it could learn from being told. `PUSHED_BY_PPOB2` here
+and `NOTIFIABLE_STATES` there are mirrors of one decision and have to be changed together: a state
+PPOB2 pushes but this side omits hides a broken integration, and one listed here that PPOB2 does not
+push reports its documented coverage as a fault on every run.
 
 ## Design notes worth knowing before changing anything
 

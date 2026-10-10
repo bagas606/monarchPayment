@@ -272,18 +272,15 @@ echo "== A live order PPOB1 holds no id for, recovered from PPOB2's own callback
 # sequence ended in UNKNOWN_ORDER: correctly signed, naming an order id PPOB1 had no row for, and
 # nothing to do about it.
 #
-# WHAT IS STAGED HERE, precisely, because the obvious reading is wrong. This is NOT the ordinary
-# lost-create-response orphan: that one never produces a callback at all. A lost response means
-# PPOB1 stored no qr_payload, so no customer ever pays, so the upstream order is swept to EXPIRED --
-# and EXPIRED fires no Section 23.8 callback (OutboundWebhookOrchestrator fires only on
-# SUCCESS/PARTIAL_FAILED/FAILED, and WebhookDeliveryTargetResolver refuses every other state). That
-# orphan still needs the recon-plus-re-submit remedy driven in the block above.
+# WHAT IS STAGED HERE, precisely: the QR reached the payer and PPOB1's books lost the pointer to
+# the order -- a failed outcome write, a restored backup, an operational repair. The row shape
+# (SUBMITTING, no ppob2_order_id) with a live, payable upstream order behind it, so the order gets
+# paid and a SUCCESS callback comes.
 #
-# What is staged is the case that DOES produce a callback: the QR reached the payer and PPOB1's
-# books lost the pointer to the order -- a failed outcome write, a restored backup, an operational
-# repair. The same row shape (SUBMITTING, no ppob2_order_id) with a live upstream order behind it.
-# See WebhookVerdict.RECOVERED_BY_RESELLER_ID for the full scope, including the REJECTED/409 case
-# that recon can never see.
+# NOT the same thing as a lost create response, which leaves no qr_payload either and so is never
+# paid at all. That orphan ends in EXPIRED, and PPOB2 did not notify on EXPIRED when this block was
+# written -- so it was out of reach here. It is covered now, driven separately further down
+# (E2E-EXPREC-1), which is why both blocks exist rather than one.
 #
 # Deliberately a REAL round trip, not wh.sh: PPOB2 builds and signs the body, so this is also the
 # only thing that proves PPOB2 actually sends the field.
@@ -336,6 +333,66 @@ chk "...is an ORDER_ID_CONFLICT, not a recovery" "$(field "$(curl -s "$P1/sim/we
 chk "...and the pinned order id is unchanged" \
     "$(P1Q "select ppob2_order_id from ppob1_transaction where reseller_txn_id='E2E-OK-1'")" "$OID"
 chk "...and so is its state"             "$(P1Q "select local_state from ppob1_transaction where reseller_txn_id='E2E-OK-1'")" COMPLETED
+
+echo "== The REAL lost create response, recovering on its own =="
+# The case the two blocks above deliberately could NOT reach, and the reason PPOB2 now notifies on
+# EXPIRED. A create call that never answers leaves PPOB1 with no order id AND NO QR PAYLOAD -- only
+# acceptedByPpob2 sets one -- so no customer can pay, so the upstream order is swept to EXPIRED. For
+# as long as EXPIRED fired no callback, nothing could ever tell PPOB1 that the sale it is holding
+# was real and is now dead: its only route back was a human reading the recon report.
+#
+# Staged as the no-answer branch of TransactionWriter.applyCreateOutcome actually leaves it, right
+# down to the null qr_payload -- that field is the reason this orphan never gets paid, so a fixture
+# that kept it would be testing the easier case again.
+R=$(submit '{"reseller_txn_id":"E2E-EXPREC-1","product_code":"MOBILE_LEGENDS","amount":20000,"customer_reference":"GAMEID-EXPREC"}')
+XRID=$(field "$R" id); XROID=$(field "$R" ppob2_order_id)
+chk "a sale PPOB2 accepted and issued a QR for" "$([ -n "$XROID" ] && echo t || echo f)" t
+P1Q "update ppob1_transaction set local_state='SUBMITTING', ppob2_order_id=null, ppob2_state=null, qr_payload=null, qr_expires_at=null, last_source=null, recon_settled_at=null where reseller_txn_id='E2E-EXPREC-1'"
+chk "...whose create response was lost entirely" \
+    "$(P1Q "select ppob2_order_id is null and qr_payload is null from ppob1_transaction where reseller_txn_id='E2E-EXPREC-1'")" t
+# Recon sees it for what it is, and this is the state it was previously stuck in forever.
+curl -s -X POST "$P1/sim/recon/run" >/dev/null
+chk "...so recon reports ORPHANED_SUBMIT for it" \
+    "$(P1Q "select verdict from ppob1_recon_entry where reseller_txn_id='E2E-EXPREC-1' order by id desc limit 1")" ORPHANED_SUBMIT
+
+# Nobody pays -- there is no QR to pay. Forced past its TTL the same way run-routing-and-sweeps.sh
+# does, rather than waiting out the real 15-minute expiry.
+$Q "update parent_order set expires_at = now() - interval '2 hours' where order_no='$XROID'" >/dev/null 2>&1
+P1Q "update ppob1_transaction set recon_settled_at=null where reseller_txn_id='E2E-EXPREC-1'"
+# Two sweeps have to turn over: QrExpirySweepJob expires the order (60s tick), then
+# WebhookRetrySweepJob delivers the queued callback (60s tick). PPOB2 deliberately does NOT send
+# this one synchronously -- see OrderExpiredWebhookListener for why -- so the wait is the design,
+# not slowness. Budgeted at ~160s.
+for i in $(seq 1 20); do
+  [ "$(P1Q "select ppob2_order_id from ppob1_transaction where reseller_txn_id='E2E-EXPREC-1'")" = "$XROID" ] && break
+  sleep 8
+done
+chk "PPOB2 expired the unpaid order" "$(scalar "select state from parent_order where order_no='$XROID'")" EXPIRED
+# PPOB2-side oracle first, as before: the callback was built and sent by PPOB2, carrying the state
+# and the reseller's own id. Scoped to this order so a stray row cannot satisfy it.
+chk "...and sent an EXPIRED callback for it" \
+    "$(scalar "select payload->>'state' from webhook_event where direction='OUTBOUND' and payload->>'order_id'='$XROID' order by id desc limit 1")" EXPIRED
+chk "...carrying PPOB1's own transaction id" \
+    "$(scalar "select payload->>'reseller_txn_id' from webhook_event where direction='OUTBOUND' and payload->>'order_id'='$XROID' order by id desc limit 1")" E2E-EXPREC-1
+# ...queued for the sweep rather than attempted inline, which is what keeps the expiry sweep itself
+# from blocking on an unreachable partner. attempt_count tells the two paths apart.
+chk "...queued through webhook_delivery, not sent inline" \
+    "$(scalar "select count(*) from webhook_delivery where parent_order_id=(select id from parent_order where order_no='$XROID')")" 1
+chk "...and delivered on its first attempt" \
+    "$(scalar "select status || ':' || attempt_count from webhook_delivery where parent_order_id=(select id from parent_order where order_no='$XROID')")" DELIVERED:1
+
+# And the payoff: PPOB1 matched a callback it could not place by order_id, on an id it owns.
+chk "PPOB1 adopted the order id from the callback" \
+    "$(P1Q "select ppob2_order_id from ppob1_transaction where reseller_txn_id='E2E-EXPREC-1'")" "$XROID"
+chk "...and now knows the sale is dead"  "$(field "$(txn "$XRID")" local_state)" EXPIRED
+chk "...learned by WEBHOOK, not by asking" "$(field "$(txn "$XRID")" last_source)" WEBHOOK
+chk "...recorded as a recovery, not an unknown order" \
+    "$(P1Q "select verdict from ppob1_inbound_webhook where ppob2_order_id='$XROID' order by id desc limit 1")" RECOVERED_BY_RESELLER_ID
+# The orphan is closed: what was ORPHANED_SUBMIT now reconciles clean.
+P1Q "update ppob1_transaction set recon_settled_at=null where reseller_txn_id='E2E-EXPREC-1'"
+curl -s -X POST "$P1/sim/recon/run" >/dev/null
+chk "...and recon agrees instead of reporting an orphan" \
+    "$(P1Q "select verdict from ppob1_recon_entry where reseller_txn_id='E2E-EXPREC-1' order by id desc limit 1")" MATCH
 
 echo "== PPOB1's own gross-collected book =="
 # One-sided by design: computed entirely from PPOB1's books, with no call to PPOB2. The comparison

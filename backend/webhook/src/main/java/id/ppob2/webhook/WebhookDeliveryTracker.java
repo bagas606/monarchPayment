@@ -20,10 +20,15 @@ import org.springframework.transaction.annotation.Transactional;
  * table exists alongside {@link WebhookEventRecorder}'s per-attempt log rather than replacing it.
  *
  * <p>{@code ppob2.webhook.retry-backoff-minutes} lists the delay *between* attempts, not the
- * attempts themselves: the first (synchronous, made before this class is ever involved) attempt
- * plus one retry per configured delay gives a total attempt count of
- * {@code backoffMinutes.size() + 1}. The default {@code 5,60,240,1080} (minutes) yields 5 total
+ * attempts themselves: one attempt per configured delay, plus one more, gives a total attempt count
+ * of {@code backoffMinutes.size() + 1}. The default {@code 5,60,240,1080} (minutes) yields 5 total
  * attempts spanning ~23h — matching the PRD's "e.g." example without hardcoding it.
+ *
+ * <p>That total holds for both origins, which is why {@link #recordAttemptResult} needs no branch
+ * for them: a delivery entered via {@link #scheduleFirstRetry} has already spent one attempt
+ * synchronously and is swept 4 more times, while one entered via {@link #scheduleFirstDelivery} has
+ * spent none and is swept 5 times. The arithmetic reads {@code attemptCount}, so the only thing it
+ * depends on is that count being honest at insert.
  */
 @Service
 public class WebhookDeliveryTracker {
@@ -60,6 +65,29 @@ public class WebhookDeliveryTracker {
         }
         Instant nextAttemptAt = Instant.now().plus(Duration.ofMinutes(backoffMinutes.get(0)));
         repository.save(new WebhookDelivery(parentOrderId, eventType, failureReason, nextAttemptAt));
+    }
+
+    /**
+     * Schedules a delivery whose first attempt has not been made and will be made by the sweep job
+     * — the {@code EXPIRED} callback's path. Due immediately, with {@code attempt_count = 0}; see
+     * {@code OrderExpiredWebhookListener} for why that path has no synchronous attempt and
+     * {@link WebhookDelivery}'s Javadoc for how both origins still reach five total attempts.
+     *
+     * <p>Guarded against duplicates on the same {@code (order, event type)} key the same way
+     * {@link #scheduleFirstRetry} is: checked, logged and returned rather than left to the unique
+     * index. The point is the diagnosis, not the batch — Spring swallows an exception thrown from
+     * the {@code AFTER_COMMIT} callback this runs in (see {@code OrderExpiredWebhookListener}), so a
+     * constraint violation here would surface only as a framework log line naming neither the order
+     * nor the cause.
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void scheduleFirstDelivery(Long parentOrderId, String eventType) {
+        if (repository.findByParentOrderIdAndEventType(parentOrderId, eventType).isPresent()) {
+            log.warn("webhook_delivery already exists for parent_order {} / event_type {} — not scheduling a duplicate",
+                    parentOrderId, eventType);
+            return;
+        }
+        repository.save(new WebhookDelivery(parentOrderId, eventType));
     }
 
     /**

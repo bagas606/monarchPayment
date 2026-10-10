@@ -51,6 +51,46 @@ class WebhookDeliveryTargetResolverTest {
         assertThat(resolver.resolve(1L)).isEmpty();
     }
 
+    /**
+     * {@code EXPIRED} joined {@code NOTIFIABLE_STATES} on 2026-10-10. This resolver is the single
+     * gate — whatever fires the orchestrator, a state absent from that set sends nothing — so it is
+     * also the only place the change can be asserted at.
+     */
+    @Test
+    void anExpiredOrderResolvesToADeliveryTarget() {
+        ParentOrder order = new ParentOrder("ORD-1", 1L, 1L, "client-1", 1L, Money.of(20000L),
+                "API", "idem-1", "cust-ref", Instant.now(), "http://example.com/cb", null);
+        order.transitionTo(OrderState.PAYMENT_PENDING);
+        order.transitionTo(OrderState.EXPIRED);
+        given(parentOrderRepository.findById(1L)).willReturn(Optional.of(order));
+        given(parentOrderRepository.findResellerTxnIdByParentOrderId(1L)).willReturn("PPOB1-TX-1");
+        Partner partner = mock(Partner.class);
+        given(partner.getWebhookSecret()).willReturn("secret-123");
+        given(partner.getCode()).willReturn("PPOB1");
+        given(partnerRepository.findById(1L)).willReturn(Optional.of(partner));
+
+        Optional<WebhookDeliveryTarget> target = resolver.resolve(1L);
+
+        assertThat(target).isPresent();
+        assertThat(target.get().state()).isEqualTo("EXPIRED");
+    }
+
+    /**
+     * And the boundary, so adding EXPIRED cannot be read as "every terminal state now notifies".
+     * {@code CANCELLED} stays unpushed on purpose: cancellation is the partner's own request
+     * (Section 23.7), so there is nothing it could learn from being told.
+     */
+    @Test
+    void aCancelledOrderStillResolvesToNothing() {
+        ParentOrder order = new ParentOrder("ORD-1", 1L, 1L, "client-1", 1L, Money.of(20000L),
+                "API", "idem-1", "cust-ref", Instant.now(), "http://example.com/cb", null);
+        order.transitionTo(OrderState.PAYMENT_PENDING);
+        order.transitionTo(OrderState.CANCELLED);
+        given(parentOrderRepository.findById(1L)).willReturn(Optional.of(order));
+
+        assertThat(resolver.resolve(1L)).isEmpty();
+    }
+
     @Test
     void noCallbackUrlResolvesToNothing() {
         ParentOrder order = orderWithCallback(OrderState.SUCCESS, null, 1L);
