@@ -1,0 +1,20 @@
+-- V18 created webhook_delivery for one shape only: a delivery whose synchronous first attempt had
+-- already failed. `attempt_count` started at 1 and `last_attempt_at` was NOT NULL because, by
+-- construction, an attempt had just been made.
+--
+-- The EXPIRED callback (Section 48.3's state change, newly notified) is scheduled WITHOUT a
+-- synchronous attempt — deliberately, because that send would otherwise run inline in
+-- QrExpirySweepJob's own AFTER_COMMIT, on the scheduler thread, once per order in a batch of up to
+-- 200. One unreachable partner would then occupy that thread for 200 x the 5s HTTP timeout and delay
+-- the expiry of every other order, which is the exact contention
+-- `spring.task.scheduling.pool.size: 2` was added to prevent. So the row is created in a
+-- never-attempted state and WebhookRetrySweepJob makes every attempt, including the first.
+--
+-- Which leaves `last_attempt_at` with nothing truthful to hold. Storing now() would make
+-- `attempt_count = 0 AND last_attempt_at = <a time>` a self-contradictory row that reads as
+-- meaningful to anyone debugging a delivery; `created_at` already records when the row appeared.
+-- Nullable instead, so "scheduled, never attempted" is expressible rather than faked:
+--   attempt_count = 0 AND last_attempt_at IS NULL
+-- Both of this table's mutators (markDelivered, recordFailure) set it on every write, so a row
+-- leaves that state the first time anything is attempted and never returns to it.
+ALTER TABLE webhook_delivery ALTER COLUMN last_attempt_at DROP NOT NULL;

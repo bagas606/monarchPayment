@@ -15,9 +15,16 @@ import org.springframework.stereotype.Component;
  * PRD Section 48.3: "QR Expiry Sweep Job" — {@code findExpiredUnpaidOrders()} then transitions
  * each to {@code EXPIRED}. Lives in `order` (not `app`) because everything this needs —
  * {@code parent_order.expires_at}, the state transition — is `order`'s own data; no composition
- * with another module is required for the sweep itself (unlike the outbound
- * {@code ORDER_STATUS_CHANGED} webhook the same diagram shows, which IS a composition-root
- * concern — see the README for why that half is deliberately not built).
+ * with another module is required for the sweep itself. The outbound {@code ORDER_STATUS_CHANGED}
+ * webhook the same diagram shows IS a composition-root concern (it needs the
+ * {@code callback_url}/{@code webhook_secret} join `order` has no Section 20.2 edge for), and was
+ * for a long time deliberately not built. It is now: {@code expirePaymentPending} publishes
+ * {@link OrderExpiredEvent} and {@code OrderExpiredWebhookListener} in `app` queues the delivery.
+ *
+ * <p>That listener deliberately <b>queues</b> rather than sends, and the reason is this job's own
+ * loop: an {@code AFTER_COMMIT} send would run inline here, once per order, so one unreachable
+ * partner would occupy this thread for {@code BATCH_SIZE} × the HTTP timeout and stop anything else
+ * expiring. Keep that in mind before "simplifying" it into a direct call.
  *
  * <p>Requires {@code @EnableScheduling} somewhere in the application context — added on `app`'s
  * {@code SchedulingConfig}, kept separate from {@code JpaConfig} for the same reason: avoid

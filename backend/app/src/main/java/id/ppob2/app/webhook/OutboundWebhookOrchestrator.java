@@ -26,10 +26,14 @@ import org.springframework.stereotype.Component;
  * (from {@code WebhookRetrySweepJob}) go through, so there is exactly one place that can resolve
  * the target or record an attempt, not two copies to keep in sync.
  *
- * <p>Trigger coverage is still partial: only the post-dispatch terminal states
- * (SUCCESS/PARTIAL_FAILED/FAILED) fire this; CANCELLED/EXPIRED/REFUNDED transitions and the QR
- * expiry sweep's own state change (Section 48.3's diagram) do not — flagged in the README, not
- * silently left implied as done.
+ * <p>Trigger coverage, which is no longer only about this class: the post-dispatch terminal states
+ * (SUCCESS/PARTIAL_FAILED/FAILED) fire <em>this</em> path, and the QR expiry sweep's own state
+ * change (Section 48.3's diagram) fires a different one — {@code OrderExpiredWebhookListener}
+ * queues it for {@code WebhookRetrySweepJob} rather than attempting it here, for the reason that
+ * listener's Javadoc gives. Either way the gate is the same:
+ * {@link WebhookDeliveryTargetResolver}'s {@code NOTIFIABLE_STATES}. Still not covered:
+ * CANCELLED (deliberately — the partner asked for it) and REFUNDED/REFUND_PENDING (admin-driven,
+ * no partner-facing contract yet).
  *
  * <p>{@link #attempt} itself is not transactional: resolving the target is a separate
  * {@code REQUIRES_NEW} bean (see its Javadoc for why that propagation is load-bearing here, not

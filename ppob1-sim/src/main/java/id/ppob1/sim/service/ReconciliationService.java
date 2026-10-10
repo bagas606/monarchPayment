@@ -62,17 +62,25 @@ public class ReconciliationService {
     private static final List<LocalState> NOTHING_TO_ASK = List.of(LocalState.REJECTED);
 
     /**
-     * The terminal states PPOB2 actually fires {@code ORDER_STATUS_CHANGED} for — its
-     * {@code OutboundWebhookOrchestrator} triggers only on the post-dispatch outcomes.
+     * The terminal states PPOB2 actually fires {@code ORDER_STATUS_CHANGED} for. This mirrors
+     * PPOB2's own single gate, {@code WebhookDeliveryTargetResolver.NOTIFIABLE_STATES}, and the two
+     * must agree: a state PPOB2 pushes but this set omits reads as "PPOB2 does not push this" and
+     * hides a broken integration, while a state listed here that PPOB2 does not push reports its
+     * documented trigger coverage as a fault on every single run — noise that buries the findings
+     * that matter.
      *
      * <p>This is what makes {@link ReconVerdict#WEBHOOK_NEVER_ARRIVED} mean "the push integration
-     * is broken" rather than "PPOB2 does not push this state". {@code CANCELLED}, {@code EXPIRED},
-     * {@code REFUND_EXPECTED} and {@code REFUNDED} are never pushed by design, so flagging them
-     * would report PPOB2's documented trigger coverage as a fault on every single run — noise that
-     * would bury the findings that matter. If PPOB2 widens its coverage, this set widens with it.
+     * is broken" rather than "PPOB2 does not push this state".
+     *
+     * <p>{@code EXPIRED} joined the set on 2026-10-10, when PPOB2 began notifying on it — which is
+     * the change that lets a callback reach a reseller whose create response was lost, because an
+     * expiry is precisely what such an order ends in. {@code CANCELLED} is still absent and should
+     * stay absent for a reason that is not symmetry: a cancellation is PPOB1's own request
+     * (Section 23.7), so there is no state PPOB1 could learn from being told. {@code REFUND_EXPECTED}
+     * and {@code REFUNDED} are likewise unpushed, with no partner-facing contract yet.
      */
     private static final List<LocalState> PUSHED_BY_PPOB2 = List.of(
-            LocalState.COMPLETED, LocalState.PARTIALLY_FAILED, LocalState.FAILED);
+            LocalState.COMPLETED, LocalState.PARTIALLY_FAILED, LocalState.FAILED, LocalState.EXPIRED);
 
     private final Ppob1TransactionRepository transactionRepository;
     private final ReconEntryRepository reconEntryRepository;

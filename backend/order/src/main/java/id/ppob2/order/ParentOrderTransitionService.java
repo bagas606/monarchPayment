@@ -67,6 +67,12 @@ public class ParentOrderTransitionService {
      * /orders/{id}/payment} and the Payment-vs-PG/Payment-vs-Settlement reconciliation types see a
      * stale row for an order that's actually terminal) — `order` already depends on `payment`
      * (Section 20.2), so this is a direct call, not a composition-root concern.
+     *
+     * <p>Also publishes {@link OrderExpiredEvent} so the partner is told, which Section 48.3's own
+     * diagram shows and this codebase deliberately did not build until now. That one IS a
+     * composition-root concern (it needs the {@code callback_url} / {@code webhook_secret} join
+     * `order` has no edge for), so it is announced rather than sent from here — see that event and
+     * {@code OrderExpiredWebhookListener}.
      */
     @Transactional
     public boolean expirePaymentPending(Long parentOrderId) {
@@ -89,6 +95,10 @@ public class ParentOrderTransitionService {
             }
         }, () -> log.error("parent_order {} had no payment row at expiry time — Section 22.17 expects one for every PAYMENT_PENDING order", parentOrderId));
 
+        // Published only on the branch that actually transitioned, never on the guarded return
+        // above: a webhook announcing an expiry that did not happen would be worse than none, and
+        // the guard's whole purpose is that the order got paid in the race window.
+        eventPublisher.publishEvent(new OrderExpiredEvent(parentOrderId));
         return true;
     }
 

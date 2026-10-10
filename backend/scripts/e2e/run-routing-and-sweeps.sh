@@ -67,6 +67,16 @@ for i in $(seq 1 14); do
 done
 chk "TC-BE-007 swept to EXPIRED"          "$(state "$O")" EXPIRED
 chk "TC-BE-007 payment also EXPIRED"      "$(scalar "select status from payment where id=$PID")" EXPIRED
+# PPOB2 now notifies on EXPIRED (Section 48.3's other half), which makes this the discriminating
+# case for the guard in OrderExpiredWebhookListener: mkorder sends no callback_url, so there is
+# nobody to notify and NO webhook_delivery row may be created. Without that guard every expired
+# consumer-channel order would get one, and WebhookRetrySweepJob -- which counts "no target" as a
+# failed attempt -- would retry it five times over ~23 hours against nothing.
+sleep 2
+chk "EXPIRED with no callback_url queues no delivery" \
+    "$(scalar "select count(*) from webhook_delivery where parent_order_id=$OID")" 0
+chk "...and sends no outbound webhook either" \
+    "$(scalar "select count(*) from webhook_event where direction='OUTBOUND' and payload->>'order_id'='$O'")" 0
 ORIGREF="R-$O-late" $CB "$(pgref "$O")" 20000 00 >/dev/null; sleep 5
 chk "TC-BE-031 order stays EXPIRED"       "$(state "$O")" EXPIRED
 chk "TC-BE-031 no fulfilment"             "$(scalar "select count(*) from child_order where parent_order_id=$OID")" 0

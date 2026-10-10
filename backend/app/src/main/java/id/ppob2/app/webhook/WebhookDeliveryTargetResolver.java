@@ -5,7 +5,9 @@ import id.ppob2.order.domain.ParentOrder;
 import id.ppob2.order.repository.ParentOrderRepository;
 import id.ppob2.partner.domain.Partner;
 import id.ppob2.partner.repository.PartnerRepository;
+import java.util.EnumSet;
 import java.util.Optional;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -32,6 +34,28 @@ public class WebhookDeliveryTargetResolver {
 
     private static final Logger log = LoggerFactory.getLogger(WebhookDeliveryTargetResolver.class);
 
+    /**
+     * The order states a Section 23.8 callback is sent for. This is the single gate: whatever fires
+     * {@code OutboundWebhookOrchestrator}, a state absent from this set resolves to no target and
+     * nothing is sent. {@code ppob1-sim}'s {@code ReconciliationService.PUSHED_BY_PPOB2} is the
+     * mirror of this list on the receiving side, and the two must agree — a state pushed here but
+     * missing there reads as "PPOB2 does not push this", and a state listed there but not pushed
+     * here makes every run report a fault that is really just trigger coverage.
+     *
+     * <p>{@code EXPIRED} was added 2026-10-10. It is not a cosmetic addition: it is the default
+     * outcome of a lost create response (no {@code order_id} reaches the reseller, so it has no QR
+     * to show, so nobody pays, so the sweep expires the order), which made it the one terminal state
+     * a stranded reseller most needed to hear about and the only one it could not.
+     *
+     * <p>{@code CANCELLED} is deliberately still absent, and the reason is not symmetry with
+     * {@code EXPIRED}: cancellation is partner-initiated ({@code POST /orders/{id}/cancel}, Section
+     * 23.7), so the partner already knows — telling it back is a notification with no recipient who
+     * lacks the information. {@code REFUNDED} and {@code REFUND_PENDING} are also absent; those are
+     * admin-driven and have no partner-facing contract yet.
+     */
+    private static final Set<OrderState> NOTIFIABLE_STATES = EnumSet.of(
+            OrderState.SUCCESS, OrderState.PARTIAL_FAILED, OrderState.FAILED, OrderState.EXPIRED);
+
     private final ParentOrderRepository parentOrderRepository;
     private final PartnerRepository partnerRepository;
 
@@ -45,8 +69,7 @@ public class WebhookDeliveryTargetResolver {
         ParentOrder order = parentOrderRepository.findById(parentOrderId)
                 .orElseThrow(() -> new IllegalStateException("parent_order " + parentOrderId + " not found for webhook delivery"));
 
-        if (order.getState() != OrderState.SUCCESS && order.getState() != OrderState.PARTIAL_FAILED
-                && order.getState() != OrderState.FAILED) {
+        if (!NOTIFIABLE_STATES.contains(order.getState())) {
             return Optional.empty();
         }
 

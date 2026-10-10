@@ -65,6 +65,25 @@ class ParentOrderTransitionServiceExpiryTest {
         assertThat(expired).isTrue();
         assertThat(order.getState()).isEqualTo(OrderState.EXPIRED);
         assertThat(payment.getStatus()).isEqualTo(PaymentStatus.EXPIRED);
+        // Section 48.3's notification half: the partner is told, via the composition root.
+        verify(eventPublisher).publishEvent(new OrderExpiredEvent(1L));
+    }
+
+    /**
+     * The pair that matters more than either half alone. The guard above exists because an order
+     * can get paid between the sweep's query and this transition, and a callback announcing an
+     * expiry that did not happen would tell a reseller to stop expecting a delivery it is in fact
+     * owed. So the publish has to sit inside the transitioned branch, not beside it.
+     */
+    @Test
+    void publishesNothingWhenTheGuardSkipsTheOrder() {
+        ParentOrder order = paymentPendingOrder();
+        order.transitionTo(OrderState.PAID);
+        given(orderRepository.findById(1L)).willReturn(Optional.of(order));
+
+        assertThat(service.expirePaymentPending(1L)).isFalse();
+
+        verify(eventPublisher, never()).publishEvent(any(OrderExpiredEvent.class));
     }
 
     @Test

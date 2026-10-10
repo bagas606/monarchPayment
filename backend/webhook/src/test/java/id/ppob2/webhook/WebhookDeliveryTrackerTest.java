@@ -49,6 +49,67 @@ class WebhookDeliveryTrackerTest {
     }
 
     @Test
+    void scheduleFirstDeliveryPersistsARowThatHasNotBeenAttempted() {
+        given(repository.findByParentOrderIdAndEventType(1L, "ORDER_STATUS_CHANGED")).willReturn(Optional.empty());
+        Instant before = Instant.now();
+
+        tracker.scheduleFirstDelivery(1L, "ORDER_STATUS_CHANGED");
+
+        org.mockito.ArgumentCaptor<WebhookDelivery> captor = org.mockito.ArgumentCaptor.forClass(WebhookDelivery.class);
+        verify(repository).save(captor.capture());
+        WebhookDelivery saved = captor.getValue();
+        assertThat(saved.getStatus()).isEqualTo(WebhookDeliveryStatus.PENDING);
+        // Zero, and this is the whole point of the second constructor: reusing the four-argument
+        // one would claim an attempt nothing made, costing this delivery one of its attempts.
+        assertThat(saved.getAttemptCount()).isZero();
+        assertThat(saved.getLastAttemptAt()).isNull();
+        assertThat(saved.getLastFailureReason()).isNull();
+        // Due now, not after a backoff: there has been no failure to back off from.
+        assertThat(saved.getNextAttemptAt()).isBetween(before, Instant.now());
+    }
+
+    @Test
+    void scheduleFirstDeliveryWillNotCreateASecondRowForTheSameOrderAndEvent() {
+        // Not defensive tidiness: this runs from an AFTER_COMMIT callback, where Spring swallows
+        // whatever is thrown, so a constraint violation would surface as a framework log line
+        // naming neither the order nor the cause.
+        given(repository.findByParentOrderIdAndEventType(1L, "ORDER_STATUS_CHANGED"))
+                .willReturn(Optional.of(new WebhookDelivery(1L, "ORDER_STATUS_CHANGED")));
+
+        tracker.scheduleFirstDelivery(1L, "ORDER_STATUS_CHANGED");
+
+        verify(repository, never()).save(any());
+    }
+
+    /**
+     * The arithmetic is shared by both origins and branches on neither, so the only thing keeping
+     * the attempt budget right is the starting count. With 3 configured delays the budget is 4
+     * total attempts either way: this path spends all 4 in the sweep, while a
+     * {@code scheduleFirstRetry} row has already spent one synchronously and gets 3 more (asserted
+     * in the test above). Off by one here and an expiry callback silently gets one fewer chance.
+     */
+    @Test
+    void aNeverAttemptedDeliveryGetsTheFullAttemptBudgetInTheSweep() {
+        WebhookDelivery delivery = new WebhookDelivery(1L, "ORDER_STATUS_CHANGED");
+        given(repository.findById(10L)).willReturn(Optional.of(delivery));
+
+        tracker.recordAttemptResult(10L, false, "attempt 1 failed");
+        assertThat(delivery.getStatus()).as("after 1st failed attempt").isEqualTo(WebhookDeliveryStatus.PENDING);
+        assertThat(delivery.getAttemptCount()).isEqualTo(1);
+        assertThat(delivery.getLastAttemptAt()).as("no longer unattempted").isNotNull();
+
+        tracker.recordAttemptResult(10L, false, "attempt 2 failed");
+        tracker.recordAttemptResult(10L, false, "attempt 3 failed");
+        assertThat(delivery.getStatus()).as("after 3rd failed attempt").isEqualTo(WebhookDeliveryStatus.PENDING);
+        assertThat(delivery.getNextAttemptAt()).isNotNull();
+
+        tracker.recordAttemptResult(10L, false, "attempt 4 failed");
+        assertThat(delivery.getStatus()).as("after 4th (final) failed attempt").isEqualTo(WebhookDeliveryStatus.EXHAUSTED);
+        assertThat(delivery.getAttemptCount()).isEqualTo(4);
+        assertThat(delivery.getNextAttemptAt()).isNull();
+    }
+
+    @Test
     void successfulRetryMarksDelivered() {
         WebhookDelivery delivery = new WebhookDelivery(1L, "ORDER_STATUS_CHANGED", "x", Instant.now());
         given(repository.findById(10L)).willReturn(Optional.of(delivery));

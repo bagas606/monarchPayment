@@ -24,7 +24,7 @@ injection knobs below rather than a bare `bootRun`. Then, from `backend/`:
 
 ```bash
 scripts/e2e/run-core.sh                  # 177 assertions
-scripts/e2e/run-routing-and-sweeps.sh    # 13 assertions, ~2 min (waits on the 60s sweep tick)
+scripts/e2e/run-routing-and-sweeps.sh    # 15 assertions, ~2 min (waits on the 60s sweep tick)
 ```
 
 `run-refund-gateway.sh` (15 assertions) is separate because it needs the app booted with a *fourth*

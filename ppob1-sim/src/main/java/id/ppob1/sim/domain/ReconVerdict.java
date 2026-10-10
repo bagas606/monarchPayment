@@ -42,11 +42,20 @@ public enum ReconVerdict {
      * but it is the one verdict that detects the push integration having silently degraded to
      * polling: the books stay right while the mechanism keeping them right has stopped working.
      *
-     * <p>Scoped to the states PPOB2 actually pushes (its {@code OutboundWebhookOrchestrator} fires
-     * only on post-dispatch outcomes — SUCCESS, PARTIAL_FAILED, FAILED). A cancelled or expired
-     * order is never pushed <em>by design</em>, so flagging those would report PPOB2's documented
-     * trigger coverage as a fault on every run and bury the findings that matter; they come back
-     * as {@link #MATCH} with the reason recorded in the entry's detail.
+     * <p>Scoped to the states PPOB2 actually pushes — SUCCESS, PARTIAL_FAILED, FAILED and, since
+     * 2026-10-10, EXPIRED. A <em>cancelled</em> order is still never pushed by design (PPOB1 asked
+     * for the cancellation, so there is nothing to learn), so flagging that would report PPOB2's
+     * documented trigger coverage as a fault on every run and bury the findings that matter; it
+     * comes back as {@link #MATCH} with the reason recorded in the entry's detail. The authoritative
+     * list is {@code ReconciliationService.PUSHED_BY_PPOB2}.
+     *
+     * <p>One consequence of EXPIRED joining it, worth knowing before trusting a single run: PPOB2
+     * does not send that callback synchronously — it queues it for its own retry sweep (see
+     * {@code OrderExpiredWebhookListener} for why), so there is a window of up to a minute after an
+     * expiry in which this verdict is <em>correct about the facts and wrong about the cause</em>.
+     * A recon run inside that window reports a callback that is merely still in flight. The same
+     * failure class already existed for a delivery whose first attempt failed and is awaiting retry;
+     * this widens the window rather than introducing it.
      */
     WEBHOOK_NEVER_ARRIVED,
 

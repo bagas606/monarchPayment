@@ -19,21 +19,40 @@ import java.time.Instant;
  * same logical delivery, by design, not a duplication to reconcile — {@code webhook_event} is
  * the audit trail, this is the scheduler's own bookkeeping.
  *
- * <p>Created only when the first (synchronous) delivery attempt fails — a delivery that succeeds
- * immediately never gets a row here at all, since there is nothing left to schedule.
- * {@code attemptCount} therefore starts at {@code 1} (the failed synchronous attempt), not
- * {@code 0}.
+ * <h2>Two ways a row gets here, and they start in different states</h2>
+ * <ul>
+ *   <li><b>After a failed synchronous attempt</b> ({@link #WebhookDelivery(Long, String, String,
+ *       Instant)}, the fulfillment path). {@code attemptCount} starts at {@code 1} — the attempt
+ *       that just failed — and a delivery that succeeds synchronously never gets a row here at all,
+ *       since there is nothing left to schedule.</li>
+ *   <li><b>Scheduled with no attempt yet</b> ({@link #WebhookDelivery(Long, String)}, the
+ *       {@code EXPIRED} path). {@code attemptCount} starts at {@code 0} and
+ *       {@code lastAttemptAt} is {@code null}, because nothing has been attempted; the sweep job
+ *       makes every attempt including the first. See {@code OrderExpiredWebhookListener} for why
+ *       that path deliberately has no synchronous attempt.</li>
+ * </ul>
+ * Both reach five total attempts: 1 synchronous + 4 swept, or 0 + 5 swept. The arithmetic lives in
+ * {@code WebhookDeliveryTracker.recordAttemptResult} and works off {@code attemptCount}, so it
+ * needs no branch per origin — but it is the reason the starting count has to be honest.
+ *
+ * <p>One consequence worth knowing when reading this table: an {@code EXPIRED} delivery leaves a
+ * {@code DELIVERED} row even when the very first attempt succeeds, while a fulfillment delivery
+ * that succeeds first time leaves no row at all. So presence here does not mean "this delivery had
+ * trouble" any more; {@code attempt_count} does.
  *
  * <p>{@code webhook_delivery_order_event_uk} (unique on {@code parent_order_id, event_type})
- * assumes at most one {@code ORDER_STATUS_CHANGED} notification is ever owed per order — true
- * today, since only {@code FulfillmentDispatchListener}'s first terminal-state transition fires
- * one. If a future change also notifies on {@code AdminChildOrderRetryOrchestrator}'s
+ * assumes at most one {@code ORDER_STATUS_CHANGED} notification is ever owed per order. Still true
+ * with the {@code EXPIRED} path added, and worth re-checking rather than assuming: an order reaches
+ * exactly one of EXPIRED / SUCCESS / PARTIAL_FAILED / FAILED, and a payment confirmation arriving
+ * after expiry does not transition it (Section 25.2's late-callback guard in
+ * {@code ParentOrderTransitionService.markPaid}, driven by TC-BE-031), so the two paths cannot both
+ * fire for one order. If a future change also notifies on {@code AdminChildOrderRetryOrchestrator}'s
  * {@code PARTIAL_FAILED -> SUCCESS} retry path (PPOB1 arguably should hear about that too), a
  * second notification for the same order would find the old DELIVERED/EXHAUSTED row already
- * occupying the unique key and {@code scheduleFirstRetry} would log "not scheduling a duplicate"
- * and silently drop it. Revisit this constraint's shape (e.g. include an attempt/occurrence
- * discriminator) before wiring that path, same caution as {@code ChildOrderState.COMPENSATED}'s
- * flagged-but-unhandled predicate elsewhere in this codebase.
+ * occupying the unique key and the tracker would log "not scheduling a duplicate" and silently drop
+ * it. Revisit this constraint's shape (e.g. include an attempt/occurrence discriminator) before
+ * wiring that path, same caution as {@code ChildOrderState.COMPENSATED}'s flagged-but-unhandled
+ * predicate elsewhere in this codebase.
  */
 @Entity
 @Table(name = "webhook_delivery")
@@ -59,7 +78,10 @@ public class WebhookDelivery {
     @Column(name = "next_attempt_at")
     private Instant nextAttemptAt;
 
-    @Column(name = "last_attempt_at", nullable = false)
+    /** Null only while {@code attemptCount} is {@code 0} — a delivery scheduled but never yet
+     * attempted (V25 dropped this column's NOT NULL for exactly that state). Both mutators below
+     * set it, so a row leaves that state on its first attempt and never returns. */
+    @Column(name = "last_attempt_at")
     private Instant lastAttemptAt;
 
     @Column(name = "last_failure_reason", columnDefinition = "text")
@@ -71,6 +93,7 @@ public class WebhookDelivery {
     protected WebhookDelivery() {
     }
 
+    /** After a failed synchronous attempt: that attempt is already counted. */
     public WebhookDelivery(Long parentOrderId, String eventType, String firstFailureReason, Instant nextAttemptAt) {
         this.parentOrderId = parentOrderId;
         this.eventType = eventType;
@@ -79,6 +102,26 @@ public class WebhookDelivery {
         this.nextAttemptAt = nextAttemptAt;
         this.lastAttemptAt = Instant.now();
         this.lastFailureReason = firstFailureReason;
+    }
+
+    /**
+     * Scheduled with nothing attempted yet, due immediately — the sweep job makes every attempt
+     * including the first.
+     *
+     * <p>{@code attemptCount} is {@code 0} and {@code lastAttemptAt} is {@code null} because both
+     * are true, not as placeholders. Reusing the four-argument constructor here would claim an
+     * attempt that never happened, which would both cost this delivery one of its five attempts and
+     * put a time in {@code last_attempt_at} that nothing ever attempted at.
+     */
+    public WebhookDelivery(Long parentOrderId, String eventType) {
+        this.parentOrderId = parentOrderId;
+        this.eventType = eventType;
+        this.status = WebhookDeliveryStatus.PENDING;
+        this.attemptCount = 0;
+        // Due now rather than after a backoff: there has been no failure to back off from.
+        this.nextAttemptAt = Instant.now();
+        this.lastAttemptAt = null;
+        this.lastFailureReason = null;
     }
 
     public Long getId() {
