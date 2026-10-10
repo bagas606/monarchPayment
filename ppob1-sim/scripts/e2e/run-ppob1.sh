@@ -182,7 +182,8 @@ chk "the run is retrievable afterwards" \
 chk "the un-pushed cancel is a MATCH with the reason recorded" \
     "$(count "$(curl -s "$P1/sim/recon/$RUNID")" 'does not fire ORDER_STATUS_CHANGED for CANCELLED')" 1
 # ...and a reconciled transaction drops out, so a run stays proportional to open business.
-chk "reconciled transactions are settled"    "$(field "$(txn "$ID")" recon_settled_at)" "$(field "$(txn "$ID")" recon_settled_at)"
+chk "reconciled transactions are settled" \
+    "$([ -n "$(field "$(txn "$ID")" recon_settled_at)" ] && echo t || echo f)" t
 chk "...and a second run has nothing to do"  "$(field "$(curl -s -X POST "$P1/sim/recon/run")" examined)" 0
 
 echo "== A genuinely broken push integration =="
@@ -223,18 +224,43 @@ chk "...and is not re-reported on the next run" \
     "$(field "$(curl -s -X POST "$P1/sim/recon/run")" examined)" 0
 
 echo "== An orphaned submit: PPOB1 holding an order it cannot name =="
-# Staged in PPOB1's OWN books, because reproducing it for real needs PPOB2 to stop answering
-# mid-call -- see README. This is exactly what a lost create response leaves behind.
+# A second, still-open transaction so the ordering assertion below is not vacuous: with only the
+# orphan in the working set it would be "first" by default and prove nothing about severity order.
+submit '{"reseller_txn_id":"E2E-OPEN-1","product_code":"MOBILE_LEGENDS","amount":20000,"customer_reference":"GAMEID-OPEN"}' >/dev/null
+# Staged in PPOB1's OWN books: this is what a lost create response leaves behind.
 P1Q "insert into ppob1_transaction (reseller_txn_id, product_code, amount, customer_reference, local_state, updated_at) values ('E2E-ORPHAN-1','MOBILE_LEGENDS',20000,'GAMEID-ORPHAN','SUBMITTING', now())"
 RUN=$(curl -s -X POST "$P1/sim/recon/run")
 chk "recon reports ORPHANED_SUBMIT"     "$(count "$RUN" '"verdict":"ORPHANED_SUBMIT"')" 1
-chk "...as the worst verdict, listed first" "$(field "$RUN" verdict)" ORPHANED_SUBMIT
-chk "...telling the operator how to recover" \
-    "$(count "$RUN" 'Idempotency-Key')" 1
-# Unresolved business, so unlike a terminal finding it must NOT be settled -- the next run has to
-# look again.
-chk "...and is left unsettled for the next run" \
-    "$(field "$(curl -s -X POST "$P1/sim/recon/run")" examined)" 1
+chk "the open order is also in the run"  "$(count "$RUN" '"verdict":"IN_PROGRESS"')" 1
+# Meaningful now that the run holds two entries with different severities: a report is read
+# top-down by someone deciding what to do today, so the ordering is the recommendation.
+chk "...and the orphan is listed first, ahead of the open one" "$(field "$RUN" verdict)" ORPHANED_SUBMIT
+chk "...telling the operator how to recover" "$(count "$RUN" 'Idempotency-Key')" 1
+# Unresolved business, so unlike a terminal finding neither is settled -- the next run looks again.
+chk "...and both are left unsettled for the next run" \
+    "$(field "$(curl -s -X POST "$P1/sim/recon/run")" examined)" 2
+
+echo "== ...and the recovery that ORPHANED_SUBMIT actually recommends =="
+# The detail text and the README both tell operators to re-submit under the same reseller_txn_id,
+# on the grounds that PPOB2's Idempotency-Key returns the original order rather than creating a
+# second. That claim had never been driven -- the staged orphan above has no upstream order, so it
+# exercises the verdict and not the remedy. This drives the remedy.
+R=$(submit '{"reseller_txn_id":"E2E-RECOVER-1","product_code":"MOBILE_LEGENDS","amount":20000,"customer_reference":"GAMEID-RECOVER"}')
+RCID=$(field "$R" id); RCOID=$(field "$R" ppob2_order_id)
+chk "a sale to lose the response for" "$([ -n "$RCOID" ] && echo t || echo f)" t
+# Exactly what a create call that never answered leaves behind: the order exists at PPOB2, PPOB1
+# cannot name it.
+P1Q "update ppob1_transaction set local_state='SUBMITTING', ppob2_order_id=null, ppob2_state=null, last_source=null, recon_settled_at=null where reseller_txn_id='E2E-RECOVER-1'"
+chk "staged the lost create response" "$(field "$(txn "$RCID")" local_state)" SUBMITTING
+chk "...with recon seeing it as an orphan" \
+    "$(count "$(curl -s -X POST "$P1/sim/recon/run")" '"reseller_txn_id":"E2E-RECOVER-1"')" 1
+
+R2=$(submit '{"reseller_txn_id":"E2E-RECOVER-1","product_code":"MOBILE_LEGENDS","amount":20000,"customer_reference":"GAMEID-RECOVER"}')
+# The assertion that makes the recommendation true: the SAME upstream order comes back.
+chk "re-submitting recovers the original order id" "$(field "$R2" ppob2_order_id)" "$RCOID"
+chk "...rather than a 409 or a second order"       "$(field "$R2" local_state)" AWAITING_PAYMENT
+chk "...and PPOB2 still holds exactly one order for it" \
+    "$(scalar "select count(*) from parent_order where customer_reference='GAMEID-RECOVER'")" 1
 
 echo ""
 echo "================================"

@@ -79,7 +79,19 @@ public class WebhookIngestService {
 
         if (!signatureValid) {
             log.warn("Rejected an inbound webhook with an invalid signature (nonce={})", nonceHeader);
-            return record(rawBody, nonceHeader, null, null, null, false, WebhookVerdict.REJECTED_SIGNATURE);
+            // The nonce is stored as NULL, NOT as the header value, even though the header value is
+            // what gets logged above. Persisting an unauthenticated nonce into the unique `nonce`
+            // column would let anyone who can reach this endpoint burn a nonce: forge a request
+            // carrying the nonce of a callback not yet delivered, and when PPOB2's genuine one
+            // arrives it trips existsByNonce, is answered 200 DUPLICATE, and is dropped — and
+            // because 200 means "taken", PPOB2 never retries it. A real event lost by an
+            // unauthenticated caller, through the dedup path rather than the apply path.
+            //
+            // This also restores the invariant stated at the top of this class: a failed signature
+            // check applies nothing at all. An unverified nonce is still input, so it has no
+            // business in the keyspace that decides what gets dropped. Postgres permits any number
+            // of NULLs in a unique column, so rejected rows never collide with each other either.
+            return record(rawBody, null, null, null, null, false, WebhookVerdict.REJECTED_SIGNATURE);
         }
 
         JsonNode body;

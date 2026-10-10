@@ -104,6 +104,30 @@ class WebhookIngestServiceTest {
         assertThat(recorded.getRawBody()).isEqualTo(raw);
         // Deliberately NOT parsed out of an unauthenticated body.
         assertThat(recorded.getPpob2OrderId()).isNull();
+        // And the nonce is NOT stored. Persisting an unauthenticated nonce into the unique column
+        // would let anyone reaching this endpoint burn one: forge a request carrying the nonce of
+        // an undelivered callback, and PPOB2's genuine one then trips existsByNonce, is answered
+        // 200 DUPLICATE, and is dropped -- with no retry, because 200 means "taken". A real event
+        // lost via the dedup path rather than the apply path.
+        assertThat(recorded.getNonce()).isNull();
+    }
+
+    @Test
+    void aForgedNonceCannotBlockTheGenuineCallbackThatFollows() {
+        // The attack the null above prevents, driven end to end.
+        String raw = body("ORD-1", "SUCCESS", "n1");
+        Ppob1Transaction transaction = awaitingPayment("ORD-1");
+        given(transactionRepository.findByPpob2OrderId("ORD-1")).willReturn(Optional.of(transaction));
+
+        // Forged first, carrying the nonce PPOB2 is about to use.
+        assertThat(service.ingest(raw, TIMESTAMP, "n1", "00".repeat(32)))
+                .isEqualTo(WebhookVerdict.REJECTED_SIGNATURE);
+
+        // existsByNonce still answers false, because nothing claimed "n1" -- the mock defaults to
+        // false, which is exactly what the null-nonce write leaves true of the real table.
+        assertThat(service.ingest(raw, TIMESTAMP, "n1", signatureFor(raw, "n1")))
+                .isEqualTo(WebhookVerdict.APPLIED);
+        assertThat(transaction.getLocalState()).isEqualTo(LocalState.COMPLETED);
     }
 
     @Test

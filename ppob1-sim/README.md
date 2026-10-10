@@ -55,30 +55,27 @@ PPOB2_FULFILLMENT_STUBPROVIDER_TIMEOUTPROVIDERSKUIDS=4 \
 ./gradlew :app:bootRun
 psql -h localhost -U ppob2 -d ppob2 -f scripts/e2e/dev-seed.sql
 
-# 2. THE ONE EXTRA STEP — see below. Without it no webhook is ever delivered.
-psql -h localhost -U ppob2 -d ppob2 \
-  -c "UPDATE partner SET webhook_secret='ppob1-webhook-secret' WHERE code='PPOB1'"
-
-# 3. PPOB1's database, then PPOB1 on :8081
+# 2. PPOB1's database, then PPOB1 on :8081
 createdb -h localhost -U ppob2 ppob1     # once
 cd ../ppob1-sim && ./gradlew bootRun
 ```
 
-### The one extra step, and the gap it exposes
+### The seed gap this exposed
 
-`backend/scripts/e2e/dev-seed.sql` creates partner `PPOB1` but leaves `partner.webhook_secret`
-**NULL**. PPOB2 handles that correctly — `WebhookDeliveryTargetResolver` logs an error and skips
-delivery rather than signing with nothing — so the consequence is silent: **no webhook is ever
-delivered, by any order, in a stock dev environment.**
+`backend/scripts/e2e/dev-seed.sql` created partner `PPOB1` and left `partner.webhook_secret`
+**NULL** — V16 added the column and the fixture was never updated. PPOB2 handles that correctly:
+`WebhookDeliveryTargetResolver` logs an error and skips delivery rather than signing with nothing.
+So the consequence was entirely silent — **no outbound webhook was ever delivered, by any order, in
+any environment that fixture builds.**
 
-Which means PPOB2's entire outbound webhook path had never once been exercised end-to-end before
-this simulator existed. The unit tests cover the sender; the e2e harness never had a receiver. That
-is the same profile as every money defect this repository has found: compiles, has a mocked test,
-has never run.
+Which means PPOB2's entire Section 23.8 path had never once run end to end before this simulator
+existed. The sender had unit tests; the harness had no receiver. Same profile as every money defect
+this repository has found: compiles, has a mocked test, has never run.
 
-Setting the secret is left as a manual step rather than added to the seed on purpose, because
-`backend/`'s own assertions depend on absolute `audit_log` counts and a seeded callback would start
-changing `webhook_event` rows under them. Worth revisiting together with the seed, not unilaterally.
+The seed now sets it, so the step above is gone. That was checked rather than assumed to be safe
+for `backend/`'s own assertions: a webhook is only delivered when the *order* carries a
+`callback_url`, and `run-core.sh`'s `mkorder` never sends one, so those scripts produce no
+`webhook_event` rows either way. Re-verified after the change — 148/148 core, 13/13 routing.
 
 ## Driving it
 
@@ -121,8 +118,8 @@ shipped.
 
 ```bash
 cd ppob1-sim
-./gradlew test                      # 39 unit tests, 4 classes
-scripts/e2e/run-ppob1.sh            # 65 assertions, both systems running
+./gradlew test                      # 40 unit tests, 4 classes
+scripts/e2e/run-ppob1.sh            # 72 assertions, both systems running
 ```
 
 `run-ppob1.sh` is a genuinely two-sided run: PPOB1 sells through PPOB2's signed API, PPOB2 fulfils,
@@ -136,8 +133,9 @@ just a parser.
 Everything below came out of running it, not reading the code.
 
 1. **PPOB2's outbound webhook had never been delivered to anything.** See
-   [the extra step](#the-one-extra-step-and-the-gap-it-exposes). It works — the harness now proves a
-   full round trip with an independently verified signature — but nothing had ever established that.
+   [the seed gap](#the-seed-gap-this-exposed). It works — the harness now proves a full round trip
+   with an independently verified signature — but nothing had ever established that, and the fixture
+   guaranteed nobody would.
 
 2. **`metadata.reseller_txn_id` is accepted and silently discarded.** Section 23.4's documented
    request body carries it, `CreateOrderController` binds it into its request record, and
@@ -169,7 +167,15 @@ Everything below came out of running it, not reading the code.
    test passes, and at runtime neither write is in the transaction it appears to be in. Extracted to
    [`TransactionWriter`](src/main/java/id/ppob1/sim/service/TransactionWriter.java).
 
-6. **A harness bug that would have passed wrongly.** Nineteen assertions used `grep -c`, which counts
+6. **A nonce-burning hole in my own receiver, found in review.** A rejected-signature row stored
+   the *header* nonce in the unique `nonce` column. So an unauthenticated caller could forge a
+   request carrying the nonce of a callback not yet delivered, and PPOB2's genuine one would then
+   trip `existsByNonce`, be answered `200 DUPLICATE`, and be dropped — with no retry, because `200`
+   means "taken". A real event lost through the dedup path rather than the apply path, and a direct
+   contradiction of this class's own stated invariant that a failed signature check applies nothing
+   at all. Rejected rows now store a NULL nonce.
+
+7. **A harness bug that would have passed wrongly.** Nineteen assertions used `grep -c`, which counts
    matching *lines* — and every response here is one line of JSON, so it can report at most 1 and
    cannot tell one match from five. It surfaced as a visible failure on "all three agree" (got 1,
    wanted 3), but every "expect exactly 1" assertion would have passed just as happily with a
@@ -226,6 +232,10 @@ Everything below came out of running it, not reading the code.
   reconciliation to report; nothing automatically re-sends it. Deliberate for now: automatic
   re-submission of a money-moving call deserves its own backoff and cap design, and
   `ORPHANED_SUBMIT` makes the queue visible in the meantime.
-- **A genuine orphaned-submit reproduction.** The harness stages that one in PPOB1's own books,
-  because reproducing it faithfully needs PPOB2 to stop answering mid-call. Everything else in
-  `run-ppob1.sh` is driven for real, including the broken-push-integration case.
+- **A genuine orphaned-submit reproduction.** The harness stages the *condition* in PPOB1's own
+  books, because reproducing it faithfully needs PPOB2 to stop answering mid-call. The **recovery**
+  is driven for real, though, and that is the half that matters: a sale is made, PPOB1's record of
+  its upstream id is then destroyed, and re-submitting under the same `reseller_txn_id` is asserted
+  to return the original order with exactly one order existing at PPOB2 — so the remedy the
+  `ORPHANED_SUBMIT` detail text recommends to operators is tested, not just asserted. Everything
+  else in `run-ppob1.sh` is driven for real, including the broken-push-integration case.

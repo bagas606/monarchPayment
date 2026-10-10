@@ -2058,6 +2058,33 @@ Known gaps to close before this is production-real:
     *that* they resolved a discrepancy but not *why*: precisely the gap `TC-ADM-012` closed for
     retries, still open here. That is the next thing to build on this surface.
 
+- **Two PPOB2 gaps found from the outside, 2026-10-10** — by building `ppob1-sim/`, the reseller
+  side of the Section 23 contract, as a running system with its own database that can only reach
+  this one over signed HTTP. Full detail and the rest of that slice's findings are in
+  [`../ppob1-sim/README.md`](../ppob1-sim/README.md); recorded here because this file is where a
+  gap belongs, next to the thing it affects.
+  - **Section 23.8's outbound webhook had never been delivered to anything.** `V16` added
+    `partner.webhook_secret` and `scripts/e2e/dev-seed.sql` was never updated to fill it.
+    `WebhookDeliveryTargetResolver` handles a NULL secret correctly — it logs an error and skips
+    rather than sending unsigned — so the consequence was completely silent: **no outbound webhook
+    was ever delivered, by any order, in any environment that fixture builds.** The sender had unit
+    tests, the harness had no receiver, so the whole path had never run end to end. Exactly the
+    profile of every money defect found here: compiles, has a mocked test, has never run. The seed
+    now sets the secret, which is safe for this directory's assertions because a webhook is only
+    delivered when the *order* carries a `callback_url` and `mkorder` never sends one — checked, not
+    assumed, and re-verified at 148/148 core and 13/13 routing. The path is now driven for real: a
+    full round trip whose signature `ppob1-sim` verifies with its own independent implementation of
+    Section 23.2.
+  - **`metadata.reseller_txn_id` is accepted and silently discarded.** Section 23.4's documented
+    Create Order body carries it, `CreateOrderController`'s request record binds it, and
+    `parent_order` has no `metadata` column at all — so it goes nowhere. This is the same shape as
+    the `callback_url` gap `V16` fixed, whose own comment names the pattern ("already accepted and
+    silently dropped"). The cost is concrete rather than cosmetic: PPOB2 support cannot tie an order
+    back to the reseller's own reference, so every cross-company investigation has to start by
+    asking PPOB1 to map its id to ours. Not fixed here — it is a schema change on the PPOB2 side and
+    was outside the requested scope — but `run-ppob1.sh` asserts the column's absence, so the
+    assertion flips the day someone adds it.
+
 ## Running locally
 
 The short version is in the [root README's quickstart](../README.md#quickstart); this section adds
