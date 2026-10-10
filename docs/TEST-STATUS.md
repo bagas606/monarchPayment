@@ -5,13 +5,18 @@ One table per matrix, covering every ID in [`PRD-PPOB2.md`](PRD-PPOB2.md) Sectio
 The *evidence* — the HTTP statuses, the row states, the reasoning behind each deliberate deviation —
 lives in [`../backend/README.md`](../backend/README.md); searching it for an ID finds the entry.
 
-Last full pass: **2026-10-03**, against a wiped Postgres volume (all 20 Flyway migrations re-applied
-from zero) with the app booted on the default profile. Everything tagged **R** re-passed unchanged
-(68/68 and 13/13). That pass moved exactly one row: `TC-BE-018` was tagged **P** for a claim whose
-*other* half turned out to be an open defect — a paid order with no eligible pattern collected the
-money and opened no reconciliation record. Fixed, reproduced, and now script-asserted; the
-`backend/README.md` entry for 2026-10-03 has the detail. It is the reason this file warns you to be
-suspicious of anything not tagged **R**.
+Last full pass: **2026-10-10**, against a wiped schema (all 22 Flyway migrations re-applied from
+zero) with the app booted on the default profile. Everything tagged **R** re-passed unchanged —
+148/148 core, 13/13 routing-and-sweeps, and 15/15 gateway-mode on its own clean boot. That pass
+moved two rows, both **R\*** → **R**, and for the same underlying reason — the reconciliation read
+side made the queue enumerable, so what previously needed a psql prompt or a hand-seeded fixture is
+now scriptable: `TC-ADM-015`'s full `OPEN → INVESTIGATING → RESOLVED` lifecycle, and `TC-ADM-004`'s
+FINANCE grant-and-boundary pair.
+
+The 2026-10-03 pass is the reason this file warns you to be suspicious of anything not tagged
+**R**: it moved `TC-BE-018`, which had been tagged **P** for a claim whose *other* half turned out
+to be an open defect — a paid order with no eligible pattern collected the money and opened no
+reconciliation record. The `backend/README.md` entries for both dates have the detail.
 
 ## What the tags mean
 
@@ -19,17 +24,17 @@ Be suspicious of any claim here that is not tagged **R**.
 
 | Tag | Meaning |
 |---|---|
-| **R** | Re-verified in the 2026-10-03 pass, and asserted by [`../backend/scripts/e2e/`](../backend/scripts/e2e/README.md), so it is re-checkable by running two scripts |
-| **R\*** | Verified live in that same pass, but by hand rather than by a script — usually because it needs an action the scripts cannot take without breaking every later assertion (stopping Postgres) or genuine concurrency |
+| **R** | Re-verified in the 2026-10-10 pass, and asserted by [`../backend/scripts/e2e/`](../backend/scripts/e2e/README.md), so it is re-checkable by running the scripts |
+| **R\*** | Verified live in a dated pass, but by hand rather than by a script — usually because it needs an action the scripts cannot take without breaking every later assertion (stopping Postgres), genuine concurrency, or a fixture the seed does not create |
 | **P** | Passing on **prior** dated evidence only. Not re-run in this pass. Trust it less than **R** — and read what that evidence actually covered, not just the row's title: `TC-BE-018` sat here with an accurate half-claim hiding a money-visibility defect |
 | **U** | Covered by a unit test only. No end-to-end path exists to drive it |
 | **X** | **Not implemented.** There is nothing to test |
 
-Counts: **R 29 · R\* 7 · P 1 · U 1 · X 16** — 54 total.
+Counts: **R 31 · R\* 5 · P 1 · U 1 · X 16** — 54 total.
 
-The 2026-10-03 pass also cleared three of the four remaining **P** rows by driving them live
-(`TC-BE-034`, `TC-ADM-004`, `TC-ADM-014`). Only `TC-BE-011` is still **P**, and it stays there for a
-reason no test pass can remove: it needs the real gateway's RSA path.
+Only `TC-BE-011` is still **P**, and it stays there for a reason no test pass can remove: it needs
+the real gateway's RSA path. The 2026-10-03 pass cleared the other three (`TC-BE-034`,
+`TC-ADM-004`, `TC-ADM-014`) by driving them live.
 
 ## Section 52 — Backend (`TC-BE-*`)
 
@@ -62,7 +67,7 @@ reason no test pass can remove: it needs the real gateway's RSA path.
 | TC-BE-025 | Generation rollback | **X** | No pattern-generation engine |
 | TC-BE-026 | Redis down | **X** | Nothing is Redis-backed. The case is vacuous as written, but *why* it is vacuous is the finding — see blocker 3 in the root README |
 | TC-BE-027 | Database failure (simulated) | **R\*** | Re-driven live 2026-10-03 by stopping Postgres under a running app: `503 SERVICE_UNAVAILABLE` in the standard envelope on order creation **and** order lookup, `/actuator/health` `DOWN` (HTTP 503), and `/internal/webhooks/ayolinx` also non-2xx — which is the one that matters most, since a 2xx there would have Ayolinx treat a lost confirmation as delivered. Postgres restarted with the app untouched: health `UP` on the first poll, `201` on the next order, and zero orphan rows (the failed attempt wrote nothing; no order exists without its payment). Returned sooner than the ~6s Hikari `connection-timeout` the 2026-09-27 run saw, because a cleanly stopped Postgres refuses the connection instead of hanging. Run by hand: stopping Postgres mid-script would break every later assertion |
-| TC-BE-028 | Reconciliation discrepancy (seeded mismatch) | **R** | `ORDER_VS_FULFILLMENT` opened automatically with the correct discrepancy (`-20000` for a half-fulfilled 40,000 order), status `OPEN` |
+| TC-BE-028 | Reconciliation discrepancy (seeded mismatch) | **R** | `ORDER_VS_FULFILLMENT` opened automatically with the correct discrepancy (`-20000` for a half-fulfilled 40,000 order), status `OPEN`. Since 2026-10-10 the record is also **readable by an operator**, which is the half of FR-REC-003 ("record *and expose*") and Section 38.2 ("*visible* and actionable") this row previously could not claim: the PRD's traceability matrix maps "Admin Web reconciliation views" to this ID, and until that pass they did not exist — every reconciliation row quoted in `backend/README.md` had been found with a psql prompt. `GET /admin/reconciliations` is asserted to match SQL counts per filter, to **exclude** the rows each filter should exclude (checked specifically: the first version of these assertions passed vacuously, 12 of 12, because every seeded record is `OPEN` and same-day), to derive `reference_type` so a polymorphic `reference_id` is interpretable, to cap `size` and echo the effective value, and to write nothing to `audit_log` |
 | TC-BE-029 | Cancel order in a cancellable state | **R** | `200`, → `CANCELLED` |
 | TC-BE-030 | Cancel order in `SUCCESS` | **R** | `409 ORDER_NOT_CANCELLABLE`, state unchanged |
 | TC-BE-031 | Late callback after order `EXPIRED` | **R** | Order stays `EXPIRED`, no fulfilment, **and** a `PAYMENT_VS_PG` record with a `+20000` surplus. The `CANCELLED` variant is also covered and was the more dangerous one: funds were collected and a ledger `CREDIT` posted while nothing was delivered and nothing recorded |
@@ -96,7 +101,7 @@ the `/admin/**` REST endpoints and Section 42's RBAC.
 | TC-ADM-001 | Login, valid credentials | **R** | Every admin assertion in the harness authenticates for real |
 | TC-ADM-002 | Login, invalid credentials | **R** | `401` **and** an `ADMIN_LOGIN_FAILED` audit row (attempted username, failure class, client IP). Previously `audit_log` was empty — the audit half did not exist |
 | TC-ADM-003 | RBAC: VIEWER attempts a mutating action | **R** | `403 PERMISSION_DENIED` — asserted by `run-core.sh`, which drives a seeded VIEWER against a `retry:execute`-gated endpoint |
-| TC-ADM-004 | RBAC: FINANCE reaches reconciliation | **R\*** | Re-driven live on 2026-10-03 against a seeded `FINANCE` user: `200` on `investigate` (record moved to `INVESTIGATING`) **and** `403` on the `retry:execute`-gated endpoint — the boundary as well as the grant, since a role that reaches everything would also return `200` here. By hand, not scripted: the fixture seeds no FINANCE user |
+| TC-ADM-004 | RBAC: FINANCE reaches reconciliation | **R** | **Moved R\* → R on 2026-10-10**: `run-core.sh` now seeds `finance1` inline (exactly as it already did `viewer1` — the fixture seeding no FINANCE user was the only reason this was hand-driven) and asserts the grant over real HTTP: `200` on `GET /admin/reconciliations`, `200` on a detail read, `200` on `investigate` with the record verified as actually moved to `INVESTIGATING` — **and** `403` on the `retry:execute`-gated endpoint. The boundary matters as much as the grant: a role that reached everything would answer `200` there too, and then the three `200`s would prove nothing about RBAC. This is also what exercises `V22`'s FINANCE `reconciliation:view` grant over HTTP rather than only reading it back out of SQL |
 | TC-ADM-005 | Permission: no `retry:execute`, attempts retry | **R** | `403` **and** an `ADMIN_PERMISSION_DENIED` row carrying the real `actor_id`. Previously unrecorded |
 | TC-ADM-006 | Transaction search | **X** | No implementation |
 | TC-ADM-007 | Parent/child drilldown | **X** | No implementation |
@@ -107,7 +112,7 @@ the `/admin/**` REST endpoints and Section 42's RBAC.
 | TC-ADM-012 | Retry authorization + reason text | **R** | Permission enforced, and `reason` now required: `400 VALIDATION_ERROR` when absent **or blank**, recorded in `audit_log.after_state`. The endpoint previously took no body, so the log said *that* a retry happened and by whom, never *why* |
 | TC-ADM-013 | Audit log completeness | **R\*** | Re-checked 2026-10-03 across the whole `audit_log` after a full pass: exactly one row per admin action with the correct `actor_id`, 1:1 on the **denied** side too (which used to be 0) — including two `ADMIN_PERMISSION_DENIED` rows from two *different* actors, and three `CHILD_ORDER_RETRY` rows for three authorized retries even though TC-BE-015's concurrent pair collapsed to one execution. The only rows without an `actor_id` are `ADMIN_LOGIN_FAILED`, by design: there is no authenticated actor, so the attempted username is recorded instead |
 | TC-ADM-014 | Settlement display | **R\*** | Re-driven live on 2026-10-03: `GET /admin/settlements/{id}/allocations` returned the real per-partner breakdown for the TC-BE-034 settlement — `gross_amount`, `fee_allocated`, a derived `net_amount`, `allocation_method` and `computed_at` per partner, plus a `reconciling_gross_total` matching `actual_amount`. Section 41.8's literal per-payment expected/actual/fee view is still not built |
-| TC-ADM-015 | Reconciliation handling | **R\*** | Re-driven live 2026-10-03: full `OPEN → INVESTIGATING → RESOLVED` lifecycle with `resolved_by`/`resolved_at` recorded — driven against the *new* `TC-BE-018` record specifically, which is how that fix was shown to be actionable by an operator rather than merely present in the table |
+| TC-ADM-015 | Reconciliation handling | **R** | **Moved R\* → R on 2026-10-10**: the full `OPEN → INVESTIGATING → RESOLVED` lifecycle is now asserted by `run-core.sh` rather than driven by hand — `resolved_by` is the acting `admin_user` (never a client-supplied id), `resolved_at` is set, the resolver is surfaced by the API, the record moves between the two filter results on either side of the transition, and a second `resolve` applies nothing (Section 38.2's sequence is a sequence, not a set). It had been **R\*** for a specific reason now gone: scripting it needed a way to enumerate the queue, and until the read side existed there was none. The 2026-10-03 hand-run drove the same lifecycle against the *new* `TC-BE-018` record, which is how that fix was shown to be actionable by an operator rather than merely present in the table |
 
 ## Known deviations from the PRD's literal wording
 

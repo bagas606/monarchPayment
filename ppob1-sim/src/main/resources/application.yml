@@ -1,0 +1,67 @@
+spring:
+  application:
+    name: ppob1-sim
+  jackson:
+    # Same convention as PPOB2's partner-facing API, for two reasons: PPOB1's own /sim responses
+    # read consistently with the ecosystem, and -- the load-bearing one -- the Section 23.8 webhook
+    # body arrives snake_case, so this is what binds `event_type`/`order_id` without per-field
+    # annotations.
+    property-naming-strategy: SNAKE_CASE
+    default-property-inclusion: non_null
+  datasource:
+    # A database of PPOB1's OWN, not a schema inside ppob2. Reconciliation here is supposed to
+    # discover PPOB2's state over HTTP; sharing a database would let it cheat with a join, and then
+    # the thing being tested (the integration) would be the one thing never exercised.
+    url: ${PPOB1_DB_URL:jdbc:postgresql://localhost:5432/ppob1}
+    username: ${PPOB1_DB_USER:ppob2}
+    password: ${PPOB1_DB_PASSWORD:ppob2}
+    hikari:
+      connection-timeout: ${PPOB1_DB_CONNECTION_TIMEOUT_MS:5000}
+  jpa:
+    hibernate:
+      # Same stance as PPOB2: Flyway owns the schema, Hibernate only checks the mapping agrees with
+      # it. A generated schema would silently diverge from the migration that is actually applied.
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+server:
+  port: ${PORT:8081}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+ppob1:
+  ppob2:
+    base-url: ${PPOB1_PPOB2_BASE_URL:http://localhost:8080}
+    # Matches the `api_client` row that backend/scripts/e2e/dev-seed.sql seeds for partner PPOB1.
+    client-id: ${PPOB1_PPOB2_CLIENT_ID:ppob1-client}
+    # PPOB2 stores this verbatim in api_client.secret_hash (its own flagged go-live blocker: the
+    # Section 23.2 scheme needs the server to recompute the MAC, which a one-way hash cannot do).
+    client-secret: ${PPOB1_PPOB2_CLIENT_SECRET:dev-secret}
+    # Short on purpose. A reseller blocking indefinitely on an upstream call is how a retail till
+    # stops serving customers; a timeout here is recoverable because reseller_txn_id doubles as the
+    # Idempotency-Key, so re-submitting cannot double-charge.
+    connect-timeout-ms: ${PPOB1_PPOB2_CONNECT_TIMEOUT_MS:3000}
+    read-timeout-ms: ${PPOB1_PPOB2_READ_TIMEOUT_MS:10000}
+
+  # Sent to PPOB2 as `callback_url` on every order. PPOB2 only delivers a Section 23.8 webhook when
+  # the order carries one, so an order submitted without this is a polling-only order.
+  callback-url: ${PPOB1_CALLBACK_URL:http://localhost:8081/webhooks/ppob2}
+  # The PATH component of callback-url, and it must agree with it. PPOB2 signs the path of the URL
+  # it was given (OutboundWebhookSender takes URI.create(callbackUrl).getPath()), so a mismatch
+  # here makes every signature fail -- and fail looking exactly like a wrong secret.
+  callback-path: ${PPOB1_CALLBACK_PATH:/webhooks/ppob2}
+  # Must equal partner.webhook_secret for partner PPOB1 in PPOB2's database. The dev seed leaves
+  # that column NULL, in which case PPOB2 refuses to send unsigned and delivers nothing at all --
+  # see ppob1-sim/README.md for the one UPDATE that turns webhooks on.
+  webhook-secret: ${PPOB1_WEBHOOK_SECRET:ppob1-webhook-secret}

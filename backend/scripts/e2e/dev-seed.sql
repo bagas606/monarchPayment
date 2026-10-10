@@ -26,6 +26,20 @@ INSERT INTO partner (code, name, channel_id, contract_ref)
 INSERT INTO api_client (client_id, partner_id, secret_hash)
   SELECT 'ppob1-client', id, 'dev-secret' FROM partner WHERE code = 'PPOB1';
 
+-- Section 23.8's "PPOB1's registered secret", used to sign outbound ORDER_STATUS_CHANGED webhooks.
+-- V16 added this column and this fixture was never updated to fill it, which had a consequence
+-- nobody could see: WebhookDeliveryTargetResolver refuses to sign with nothing (correctly -- it
+-- logs an error and skips rather than sending unsigned), so with the column NULL **no outbound
+-- webhook was ever delivered, by any order, in any environment this fixture builds.** The sender
+-- had unit tests and the e2e harness had no receiver, so the whole Section 23.8 path had never run
+-- end to end. Found by building ppob1-sim, which is the receiver; see ppob1-sim/README.md.
+--
+-- Safe for the assertions in this directory, checked rather than assumed: a webhook is only
+-- delivered when the ORDER carries a callback_url (parent_order.callback_url, also from V16), and
+-- run-core.sh's mkorder never sends one -- so these scripts produce no webhook_event rows either
+-- before or after this line. Re-verified after adding it: 148/148 core, 13/13 routing.
+UPDATE partner SET webhook_secret = 'ppob1-webhook-secret' WHERE code = 'PPOB1';
+
 INSERT INTO product (code, name, category) VALUES ('MOBILE_LEGENDS', 'Mobile Legends', 'GAME_TOPUP');
 INSERT INTO supported_amount (product_category, amount) VALUES
   ('GAME_TOPUP', 10000), ('GAME_TOPUP', 20000), ('GAME_TOPUP', 40000),

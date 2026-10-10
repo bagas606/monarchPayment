@@ -23,7 +23,7 @@ Bring up Postgres, the app and the seed fixture as described in the
 injection knobs below rather than a bare `bootRun`. Then, from `backend/`:
 
 ```bash
-scripts/e2e/run-core.sh                  # 90 assertions
+scripts/e2e/run-core.sh                  # 148 assertions
 scripts/e2e/run-routing-and-sweeps.sh    # 13 assertions, ~2 min (waits on the 60s sweep tick)
 ```
 
@@ -35,7 +35,7 @@ wrong reason.
 Postgres does not have to be the docker-compose one. `q.sh` resolves it in three steps — an
 explicit `PPOB2_PSQL` command, then the compose container if it is actually running, then a native
 `psql` on `PGHOST`/`PGPORT` — so the matrices also run on a box with no Docker daemon (the
-2026-10-03 pass ran entirely against a host Postgres 16 this way). The container is *probed*, not
+2026-10-03 and 2026-10-10 passes ran entirely against a host Postgres 16 this way). The container is *probed*, not
 assumed: `docker exec` against a missing daemon writes to stderr and exits non-zero, which the
 callers' `2>/dev/null` would quietly turn into empty scalars and a sweep of unexplained failures
 instead of one clear error — the same failure shape as the `q.sh -t` incident below.
