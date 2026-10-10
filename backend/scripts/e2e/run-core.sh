@@ -248,6 +248,155 @@ SOK=$(scalar "select id from parent_order where state='SUCCESS' limit 1")
 chk "refund: SUCCESS order -> 409" \
     "$(curl -s -o /dev/null -w '%{http_code}' -u superadmin:admin123 -X POST -H 'Content-Type: application/json' -d '{"reason":"x","external_reference":"BANK-1"}' http://localhost:8080/admin/parent-orders/$SOK/refund)" 409
 
+# Runs after the refund block for the same reason that one runs last: the VIEWER-denial case below
+# adds a third ADMIN_PERMISSION_DENIED row. Nothing from the refund block onward asserts an
+# absolute audit_log count, and the one audit assertion here is a before/after delta, not a count.
+echo "== Reconciliation read side (FR-REC-003 'expose', Section 38.2 'visible', Section 41.9) =="
+# $OID / $PID are still the refund order from the block above: a 10000 order with no pattern, so the
+# BR-DEC exhaustion path opened an ORDER_VS_FULFILLMENT record with the full -10000 shortfall. Using
+# a known row rather than "whatever is first" is what makes the value assertions mean something.
+RECID=$(scalar "select id from reconciliation where recon_type='ORDER_VS_FULFILLMENT' and reference_id=$OID")
+RL="http://localhost:8080/admin/reconciliations"
+adm()    { curl -s -u superadmin:admin123 "$1"; }
+admcode(){ curl -s -o /dev/null -w '%{http_code}' -u superadmin:admin123 "$1"; }
+total()  { echo "$1" | grep -o '"total_elements":[0-9]*' | cut -d: -f2; }
+items()  { echo "$1" | grep -o '"id":' | wc -l | tr -d ' '; }
+field()  { echo "$1" | grep -o "\"$2\":[^,}]*" | head -1 | cut -d: -f2- | tr -d '" '; }
+
+# The V22 grant set was a judgement call, so it is asserted rather than left to the migration's
+# comment: three roles, and VIEWER deliberately not among them despite Section 42.1 calling it
+# "read-only across permitted modules" (see V22 for the reasoning and the revisit condition).
+chk "V22 reconciliation:view seeded" "$(scalar "select count(*) from permission where code='reconciliation:view'")" 1
+chk "V22 granted to exactly 3 roles" "$(scalar "select count(*) from role_permission rp join permission p on p.id=rp.permission_id where p.code='reconciliation:view'")" 3
+chk "V22 granted to SUPER_ADMIN+FINANCE+RECONCILIATION" \
+    "$(scalar "select string_agg(r.code,',' order by r.code) from role_permission rp join permission p on p.id=rp.permission_id join role r on r.id=rp.role_id where p.code='reconciliation:view'")" \
+    "FINANCE,RECONCILIATION,SUPER_ADMIN"
+
+# Every record this suite opens is OPEN and dated today, so a status or date filter asserted only
+# as "API total == SQL count for the same predicate" would pass against an endpoint that ignored
+# the parameter entirely -- 12 == 12 either way. Verified by hand that this was the case on the
+# first run of this block. So one record is moved out of OPEN first, which makes the status filters
+# discriminating, and each filter below is additionally asserted to EXCLUDE something.
+INVID=$(scalar "select min(id) from reconciliation where recon_type='PAYMENT_VS_PG'")
+chk "setup: a record moves OPEN -> INVESTIGATING" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -u superadmin:admin123 -X POST "$RL/$INVID/investigate")" 200
+sleep 2
+chk "setup: it really is INVESTIGATING" "$(scalar "select status from reconciliation where id=$INVID")" INVESTIGATING
+
+TOTAL_ROWS=$(scalar "select count(*) from reconciliation")
+OPEN_ROWS=$(scalar "select count(*) from reconciliation where status='OPEN'")
+# Snapshot AFTER the investigate above, which legitimately writes a RECONCILIATION_INVESTIGATE row.
+AUDIT_BEFORE_READS=$(scalar "select count(*) from audit_log")
+
+# Totals are compared against the SQL count for the SAME predicate, so these stay true as earlier
+# cases add rows -- a hardcoded number would have to be re-derived every time the suite above it
+# changes, and would silently stop testing the filter.
+chk "list: unfiltered total matches the table" "$(total "$(adm "$RL?size=200")")" "$TOTAL_ROWS"
+chk "list: status=OPEN matches SQL"            "$(total "$(adm "$RL?status=OPEN&size=200")")" "$OPEN_ROWS"
+# The discriminating half: OPEN must now be strictly fewer than everything, or the filter is doing
+# nothing and the assertion above it is decorative.
+chk "list: status=OPEN excludes the INVESTIGATING row" \
+    "$([ "$OPEN_ROWS" -lt "$TOTAL_ROWS" ] && echo t || echo "f($OPEN_ROWS/$TOTAL_ROWS)")" t
+chk "list: status=INVESTIGATING returns just that one" "$(total "$(adm "$RL?status=INVESTIGATING&size=200")")" 1
+chk "list: and it is the right row" "$(field "$(adm "$RL?status=INVESTIGATING")" id)" "$INVID"
+# The repeatable form is what makes "the unresolved work queue" one request: Section 38.2 defines
+# OPEN and INVESTIGATING as the two non-terminal states. Asserted as a union strictly larger than
+# either side, which is what a last-wins or first-wins binding would fail.
+chk "list: repeated status= is a union, not last-wins" \
+    "$(total "$(adm "$RL?status=OPEN&status=INVESTIGATING&size=200")")" "$TOTAL_ROWS"
+chk "list: status=RESOLVED returns none" "$(total "$(adm "$RL?status=RESOLVED&size=200")")" 0
+
+chk "list: recon_type=ORDER_VS_FULFILLMENT matches SQL" \
+    "$(total "$(adm "$RL?recon_type=ORDER_VS_FULFILLMENT&size=200")")" \
+    "$(scalar "select count(*) from reconciliation where recon_type='ORDER_VS_FULFILLMENT'")"
+chk "list: that type excludes the PAYMENT_VS_PG rows" \
+    "$([ "$(total "$(adm "$RL?recon_type=ORDER_VS_FULFILLMENT&size=200")")" -lt "$TOTAL_ROWS" ] && echo t || echo f)" t
+chk "list: two recon_types union to the whole table" \
+    "$(total "$(adm "$RL?recon_type=ORDER_VS_FULFILLMENT&recon_type=PAYMENT_VS_PG&size=200")")" "$TOTAL_ROWS"
+# Nothing opens this type (no provider report ingestion source), so it is the one filter value that
+# must come back empty against a non-empty table.
+chk "list: recon_type=PROVIDER_VS_REPORT returns none" \
+    "$(total "$(adm "$RL?recon_type=PROVIDER_VS_REPORT&size=200")")" 0
+
+TODAY=$(scalar "select current_date")
+chk "list: from_date=today returns everything" "$(total "$(adm "$RL?from_date=$TODAY&size=200")")" "$TOTAL_ROWS"
+chk "list: single-day range is inclusive at both ends" \
+    "$(total "$(adm "$RL?from_date=$TODAY&to_date=$TODAY&size=200")")" "$TOTAL_ROWS"
+# The discriminating half for dates: a range that ends before today must exclude every row, which a
+# same-day fixture cannot otherwise prove.
+chk "list: to_date before today excludes everything" \
+    "$(total "$(adm "$RL?to_date=$(scalar "select current_date - 1")&size=200")")" 0
+chk "list: from_date after today excludes everything" \
+    "$(total "$(adm "$RL?from_date=$(scalar "select current_date + 1")&size=200")")" 0
+
+# The narrow query an operator actually runs: one type, one referent.
+ROW=$(adm "$RL?recon_type=ORDER_VS_FULFILLMENT&reference_id=$OID")
+chk "list: type+reference_id narrows to exactly 1" "$(total "$ROW")" 1
+chk "list: that row is the TC-BE-018-shaped record" "$(field "$ROW" id)" "$RECID"
+chk "list: discrepancy -10000 is in the JSON"       "$(field "$ROW" discrepancy)" -10000
+# Without reference_type, reference_id is an unqualified integer -- nothing in the row says whether
+# it means parent_order N or payment N, and the table has no discriminator column.
+chk "list: reference_type derived as PARENT_ORDER"  "$(field "$ROW" reference_type)" PARENT_ORDER
+chk "list: status OPEN"                             "$(field "$ROW" status)" OPEN
+
+# Paging must not repeat or drop a row -- the reason the sort is a total order on id and not on the
+# non-unique recon_date.
+P0=$(field "$(adm "$RL?size=1&page=0")" id); P1=$(field "$(adm "$RL?size=1&page=1")" id)
+chk "list: page 0 and page 1 are different rows" "$([ -n "$P0" ] && [ "$P0" != "$P1" ] && echo t || echo "f($P0/$P1)")" t
+chk "list: newest first (page 0 is max id)" "$P0" "$(scalar "select max(id) from reconciliation")"
+
+chk "list: default size echoed as 50"       "$(field "$(adm "$RL")" size)" 50
+# An un-capped size is the one way a client could make this endpoint page the whole table; the
+# echoed value is what tells the caller its first page was truncated.
+chk "list: size=10000 capped to 200"        "$(field "$(adm "$RL?size=10000")" size)" 200
+chk "list: at most 200 items returned"      "$([ "$(items "$(adm "$RL?size=10000")")" -le 200 ] && echo t || echo f)" t
+
+chk "list: unknown recon_type -> 400"       "$(admcode "$RL?recon_type=NOPE")" 400
+chk "list: unparseable date -> 400"         "$(admcode "$RL?from_date=13-13-2026")" 400
+# Rejected, not answered with an empty page: on a discrepancy queue, empty reads as "nothing wrong".
+chk "list: from_date after to_date -> 400"  "$(admcode "$RL?from_date=2026-10-10&to_date=2026-10-01")" 400
+
+chk "detail: existing record -> 200"        "$(admcode "$RL/$RECID")" 200
+chk "detail: same discrepancy as the list row" "$(field "$(adm "$RL/$RECID")" discrepancy)" -10000
+chk "detail: unknown id -> 404"             "$(admcode "$RL/99999999")" 404
+
+# Load-bearing for TC-ADM-013, which asserts 1:1 absolute audit_log counts per admin action: a GET
+# that audited would break an unrelated test case, and only once someone browsed the queue.
+sleep 2
+chk "reads write no audit_log rows" "$(scalar "select count(*) from audit_log")" "$AUDIT_BEFORE_READS"
+
+# TC-ADM-015's remaining leg, and the strongest filter assertion available: resolving the record
+# moves it between two filter results that were both already asserted above, so the queue is shown
+# to track a live transition rather than a snapshot. Placed after the audit-delta check because
+# this one legitimately writes a RECONCILIATION_RESOLVE row.
+echo "== TC-ADM-015 full lifecycle, continued from the INVESTIGATING record above =="
+chk "TC-ADM-015 resolve -> 200" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -u superadmin:admin123 -X POST "$RL/$INVID/resolve")" 200
+sleep 2
+chk "TC-ADM-015 status RESOLVED"   "$(field "$(adm "$RL/$INVID")" status)" RESOLVED
+# Section 38.2 requires the resolver's identity, not just the status -- and it must be the acting
+# admin_user, never a client-supplied id.
+chk "TC-ADM-015 resolved_by is the acting admin" \
+    "$(scalar "select resolved_by = (select id from admin_user where username='superadmin') from reconciliation where id=$INVID")" t
+chk "TC-ADM-015 resolved_at recorded" "$(scalar "select resolved_at is not null from reconciliation where id=$INVID")" t
+chk "TC-ADM-015 resolver surfaced by the API" \
+    "$(field "$(adm "$RL/$INVID")" resolved_by)" "$(scalar "select id from admin_user where username='superadmin'")"
+# The same two filters as above, now on the other side of the transition.
+chk "list: status=RESOLVED now returns exactly it" "$(total "$(adm "$RL?status=RESOLVED&size=200")")" 1
+chk "list: it has left the unresolved queue" \
+    "$(total "$(adm "$RL?status=OPEN&status=INVESTIGATING&size=200")")" "$((TOTAL_ROWS - 1))"
+# Section 38.2's "OPEN -> INVESTIGATING -> RESOLVED" is a sequence, not a set: a second resolve has
+# nothing left to apply.
+chk "TC-ADM-015 re-resolve applies nothing" \
+    "$(curl -s -u superadmin:admin123 -X POST "$RL/$INVID/resolve" | grep -o '"applied":[a-z]*' | cut -d: -f2)" false
+
+# Last, as above: this adds the third ADMIN_PERMISSION_DENIED row.
+chk "list: unauthenticated -> 401" "$(curl -s -o /dev/null -w '%{http_code}' "$RL")" 401
+chk "list: VIEWER lacks reconciliation:view -> 403" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -u viewer1:admin123 "$RL")" 403
+chk "detail: VIEWER -> 403 too" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -u viewer1:admin123 "$RL/$RECID")" 403
+
 echo ""
 echo "================================"
 echo "  PASS: $pass    FAIL: $fail"

@@ -49,8 +49,10 @@ public class ReconciliationService {
         return repository.save(reconciliation);
     }
 
-    /** Unreachable from any path in this codebase yet — Admin Web (Section 40.8), the only
-     * intended caller, isn't built. Exercised only by {@code ReconciliationServiceTest}. */
+    /** Reached from {@code AdminReconciliationController}, the Section 41.9 resolution workflow.
+     * (An earlier revision of this comment said "unreachable from any path in this codebase yet —
+     * Admin Web, the only intended caller, isn't built"; that stopped being true when the
+     * controller was added, and the read side that makes the ids discoverable followed later.) */
     @Transactional
     public boolean investigate(Long reconciliationId) {
         Reconciliation reconciliation = repository.findById(reconciliationId)
@@ -63,7 +65,7 @@ public class ReconciliationService {
         return applied;
     }
 
-    /** Same unreachable-until-Admin-Web caveat as {@link #investigate}. */
+    /** Same caller as {@link #investigate}: {@code AdminReconciliationController}. */
     @Transactional
     public boolean resolve(Long reconciliationId, Long resolvedBy) {
         Reconciliation reconciliation = repository.findById(reconciliationId)

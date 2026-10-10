@@ -62,8 +62,8 @@ payment callback, and the dev-only failure-injection knobs.
 
 ```bash
 cd backend
-./gradlew build                          # 29 unit / slice test classes + ArchUnit
-scripts/e2e/run-core.sh                  # 90 assertions against a running app + real Postgres
+./gradlew build                          # 32 unit / slice test classes + ArchUnit
+scripts/e2e/run-core.sh                  # 138 assertions against a running app + real Postgres
 scripts/e2e/run-routing-and-sweeps.sh    # 13 assertions (waits on the 60s expiry-sweep tick)
 scripts/e2e/run-refund-gateway.sh        # 15 assertions; needs its own boot flag, see its header
 ```
@@ -99,7 +99,13 @@ something a test pass can close.
    Section 73.3's open-assumptions list.
 5. **Most of Admin Web does not exist.** `TC-ADM-006..011` — transaction search, parent/child
    drilldown, pricing update, configuration update, pattern viewing, generation trigger — have no
-   implementation to test.
+   implementation to test. The reconciliation surface (Section 41.9) is the exception and is now
+   complete enough to work a queue from: `GET /admin/reconciliations` lists and filters
+   discrepancies, `GET /admin/reconciliations/{id}` drills into one, and the
+   `investigate`/`resolve` actions move them. What is still missing there is Section 41.9's
+   resolution **notes** — `resolve` records who and when, but not why, so a resolved discrepancy
+   carries no explanation (the gap `TC-ADM-012` closed for retries). All of this is REST, not a
+   browser UI; Section 54's own method column names Playwright/Cypress and none exists here.
 6. **No daily re-scoring job.** Runtime routing reads `pattern_economics.score`, which Section 30.1
    says an offline daily job recomputes. That job does not exist, so scores must be seeded.
 7. **No pattern invalidation writer.** `decomposition_pattern.structural_status` is only ever read

@@ -14,19 +14,22 @@ import java.time.LocalDate;
 import org.junit.jupiter.api.Test;
 
 /**
- * {@link ReconciliationService#investigate}/{@link ReconciliationService#resolve} are unreachable
- * from any real path in this codebase — Admin Web (Section 40.8), the only intended caller, isn't
- * built yet — so this is the only thing that will ever exercise Section 38.2's "must be moved to
- * INVESTIGATING then RESOLVED" guard, including that OPEN can't resolve directly.
+ * Exercises Section 38.2's "must be moved to INVESTIGATING then RESOLVED" guard, including that
+ * OPEN can't resolve directly.
  *
  * <p><b>This covers the state-machine guards only, not the database write path.</b> {@code
  * investigate}/{@code resolve} mutate the entity in place and rely on JPA dirty-checking to flush
  * at commit — with a mocked repository and no {@code EntityManager}, the mutation this test
  * observes only ever touches the in-memory object, never Postgres. Given this exact class of gap
  * (a mutation that looks applied in Java and never lands) has bitten this codebase before — see
- * {@code ParentOrderTransitionService.markPaid}'s Javadoc — that distinction matters: until
- * Admin Web exists and drives these methods for real, whether the entity mutation these guards
- * perform actually persists is unverified, not merely untested-by-e2e.
+ * {@code ParentOrderTransitionService.markPaid}'s Javadoc — that distinction matters.
+ *
+ * <p>An earlier revision of this comment said these methods were "unreachable from any real path"
+ * and that whether the mutation persists was therefore "unverified". Both have since been closed,
+ * which is recorded here because the second one is the part a reader would otherwise still
+ * mistrust: {@code AdminReconciliationController} calls them, and TC-ADM-015 drove the full
+ * {@code OPEN → INVESTIGATING → RESOLVED} lifecycle against a live Postgres and read
+ * {@code resolved_by}/{@code resolved_at} back out of the table.
  */
 class ReconciliationServiceTest {
 

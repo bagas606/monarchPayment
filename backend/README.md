@@ -1851,9 +1851,13 @@ Known gaps to close before this is production-real:
   - **Still open, deliberately**: no `ORDER_STATUS_CHANGED` webhook fires for `REFUND_PENDING`.
     That is the pre-existing partial-trigger-coverage gap `OutboundWebhookOrchestrator`'s Javadoc
     already names (`CANCELLED`/`EXPIRED`/`REFUNDED` don't fire either), not something this fix
-    introduced, and widening it is a separate change. There is also still no reconciliation
-    *listing* endpoint for an operator to browse (`TC-ADM-006..011`, root README blocker 5), so the
-    row is correct and queryable but not yet visible in a UI.
+    introduced, and widening it is a separate change. There was also, at the time of this entry, no
+    reconciliation *listing* endpoint for an operator to browse, so the row was correct and
+    queryable but not visible to anyone without a psql prompt — closed by the 2026-10-10 entry
+    below. (That gap was attributed here to `TC-ADM-006..011`, which was wrong: those IDs are
+    transaction search, drilldown, pricing, configuration, patterns and generation. The
+    reconciliation read side has no `TC-ADM-*` ID of its own — Section 2643's traceability row ties
+    Admin Web's reconciliation views to `TC-BE-028`.)
 
 - **Refund execution** (Section 33.2's `REFUND_PENDING → REFUNDED`, FR-PAY-007, Section 42.2's
   `refund:initiate`) — `POST /admin/parent-orders/{id}/refund`, `AdminRefundOrchestrator`,
@@ -1936,6 +1940,99 @@ Known gaps to close before this is production-real:
     chain, ledger-reversal verification) is a go-live prerequisite. Also no partner notification:
     `ORDER_STATUS_CHANGED` still does not fire for `REFUNDED`, the same partial-trigger-coverage gap
     `OutboundWebhookOrchestrator` already flags for `CANCELLED`/`EXPIRED`.
+
+- **Reconciliation read side, 2026-10-10** (FR-REC-003's "record **and expose**", Section 38.2's
+  "**visible** and actionable in Admin Web", Section 41.9) — `GET /admin/reconciliations`,
+  `GET /admin/reconciliations/{id}`, `ReconciliationQueryService`, `ReconciliationQuery`,
+  `V22__reconciliation_view_permission.sql`. The write half had existed since the RBAC slice:
+  `investigate`/`resolve` move a record **by id**, and nothing could produce an id. Every
+  reconciliation row quoted anywhere in this file was located with a psql prompt, including the
+  `TC-BE-018` record whose whole point was that an operator should be able to act on it. A queue
+  nobody can enumerate is not an operational control, so this is the half that was missing.
+  - **One filtered endpoint, not three.** Section 41.9 names a payment, a provider and a settlement
+    reconciliation "view"; they differ only in which `recon_type` values they show. Filters:
+    `recon_type` and `status` (both repeatable — `?status=OPEN&status=INVESTIGATING` is the whole
+    unresolved queue in one call, since Section 38.2 defines exactly those two as non-terminal),
+    `reference_id`, and an inclusive `from_date`/`to_date` range.
+  - **`reference_type` is derived and is the field that makes a row readable.** `reference_id` is a
+    plain nullable `BIGINT` with no FK and no discriminator column (Section 22.23 defines it that
+    way because it is polymorphic), so a row saying `reference_id=31` does not say whether that is
+    parent_order 31 or payment 31 — a distinction invisible in SQL and actively dangerous in a UI.
+    `ReconciliationType.referenceType()` answers it, with each value read off the single
+    `ReconciliationService.open` call site that produces that type rather than inferred from the
+    name. `PAYMENT_VS_SETTLEMENT` is the one that would have been gotten wrong by reading the name:
+    it points at the **settlement batch**, not a payment. `PROVIDER_VS_REPORT` returns `null`
+    deliberately — nothing in this codebase opens that type, so no call site has ever decided what
+    its `reference_id` means, and a plausible-looking answer there would be an invention a UI would
+    then trust. A unit test fails if a sixth type is added without that decision.
+  - **A new `reconciliation:view` permission, granted to SUPER_ADMIN, FINANCE and RECONCILIATION.**
+    This is the precedent `AdminSettlementController` asked for when it reused `settlement:ingest`
+    for a single read endpoint and said to revisit "as its own `:view` permission" once the read
+    surface grew. Reusing `reconciliation:investigate` to gate a *read* would also invert Section
+    42.1's own distinction — it grants FINANCE "reconciliation (read + resolve)", naming read as
+    separable — and would mean no role could ever be shown the queue without also being given the
+    power to advance records through it.
+  - **VIEWER is deliberately withheld, and this is the one call here that cuts against the PRD's
+    literal wording.** Section 42.1 describes VIEWER as "read-only across permitted modules, no
+    mutation", and this permission is exactly that. It is withheld on the qualifier in the same
+    sentence — "permitted modules" is never specified, so the grant is a judgement either way — and
+    on what the rows actually are: every one is, by construction, money that does not add up
+    (`TC-BE-018`'s −10,000 shortfall, `TC-BE-031`'s +20,000 surplus). "Can see every open financial
+    exposure" is a Finance-shaped grant implemented as a read, not a general read. `V22`'s comments
+    carry the reasoning and the revisit condition; the e2e run asserts the grant set is exactly
+    those three roles, so widening it silently is not possible.
+  - **Paging is clamped, and the clamp is echoed.** Fixed `id DESC` sort with no client-supplied
+    sort property (an unknown one raises `PropertyReferenceException` — an unmapped `500` on a
+    client typo — and `id` is a total order on an append-only queue, so paging cannot repeat or
+    skip a row the way a sort on the non-unique `recon_date` can). No `Pageable` argument and no
+    `Page` in the response body, whose JSON shape Spring Data itself warns is unstable across
+    versions. `size` is capped at 200 and the **effective** value is returned, because a client
+    that asked for 10,000 and silently got 200 would read a truncated first page as the complete
+    queue.
+  - **An inverted date range is a `400`, not an empty page.** On a discrepancy queue, empty reads as
+    "nothing is wrong" — the most expensive possible way to render a typo. An unparseable
+    `recon_type` or date is also a `400` in the standard envelope, via the
+    `MethodArgumentTypeMismatchException` mapping `GlobalExceptionHandler` already had.
+  - **Neither GET touches `audit_log`**, same reasoning and precedent as `AdminSettlementController`
+    (Section 43's "Recorded" requirement is about admin *mutations*). That is load-bearing rather
+    than cosmetic: `TC-ADM-013` asserts absolute 1:1 audit-row counts, so a GET that audited would
+    break an unrelated test case, and only once someone browsed the queue. Asserted in both the
+    unit test and the e2e run.
+  - **A harness bug in my own new assertions, caught by checking rather than by a failure.** The
+    first version asserted each filter as "API total == SQL count for the same predicate", which
+    looked rigorous and proved nothing: every record this suite opens is `OPEN` and dated today, so
+    `status=OPEN`, `status=OPEN&status=INVESTIGATING` and a today-to-today date range all returned
+    12 of 12 — an endpoint ignoring those parameters entirely would have passed all three. Verified
+    by querying the distribution by hand. Fixed by making the fixture discriminating (one record is
+    moved to `INVESTIGATING` first, through the real endpoint) and by asserting each filter
+    **excludes** something: `OPEN` is now strictly fewer than all rows, the repeated-`status` union
+    is strictly larger than either side (which a last-wins binding would fail), `PROVIDER_VS_REPORT`
+    returns none against a non-empty table, and a range ending yesterday returns none.
+  - **`TC-ADM-015` is now script-asserted end to end**, which is why its tag moved **R\*** → **R**.
+    The full `OPEN → INVESTIGATING → RESOLVED` lifecycle runs in `run-core.sh`, asserting
+    `resolved_by` is the acting `admin_user` (never a client-supplied id), that `resolved_at` is
+    set, that the resolver is surfaced by the API, that the record moves between the two filter
+    results on either side of the transition, and that a second `resolve` applies nothing —
+    Section 38.2's sequence is a sequence, not a set. It had been **R\*** (verified by hand)
+    because nothing could enumerate the queue to script it.
+  - **48 new `run-core.sh` assertions** (90 → 138) and 22 new unit tests across three classes
+    (`ReconciliationTypeTest`, `ReconciliationQueryTest`, `AdminReconciliationControllerTest`;
+    142 → 164). Full pass re-run from zero against a wiped schema (all 22 Flyway migrations
+    re-applied): 138/138 core, 13/13 routing-and-sweeps, and 15/15 gateway-mode on its own clean
+    boot.
+  - **Three stale comments corrected** rather than left to mislead: `ReconciliationService`'s
+    `investigate`/`resolve` and `ReconciliationServiceTest`'s class Javadoc both still said these
+    methods were "unreachable from any real path — Admin Web, the only intended caller, isn't
+    built", and `AdminReconciliationController`'s said it "does not build the read-side list/detail
+    views Section 41.9 also names". The `backend/README.md` entry above also attributed the missing
+    listing endpoint to `TC-ADM-006..011`; those IDs are transaction search, drilldown, pricing,
+    configuration, patterns and generation. The reconciliation read side has no `TC-ADM-*` ID of its
+    own — the PRD's traceability matrix ties Admin Web's reconciliation views to `TC-BE-028`.
+  - **Gap, not built**: Section 41.9's resolution **notes**. Its bullet reads "OPEN → INVESTIGATING
+    → RESOLVED, with notes and resolver identity" — resolver identity is recorded, notes are not.
+    `reconciliation` has no notes column and `resolve` takes no body, so an operator can record
+    *that* they resolved a discrepancy but not *why*: precisely the gap `TC-ADM-012` closed for
+    retries, still open here. That is the next thing to build on this surface.
 
 ## Running locally
 
