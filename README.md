@@ -79,8 +79,8 @@ scripts/e2e/run-routing-and-sweeps.sh    # 13 assertions (waits on the 60s expir
 scripts/e2e/run-refund-gateway.sh        # 15 assertions; needs its own boot flag, see its header
 
 cd ../ppob1-sim
-./gradlew test                           # 40 unit tests for the PPOB1 side
-scripts/e2e/run-ppob1.sh                 # 72 assertions, both systems live; see ppob1-sim/README.md
+./gradlew test                           # 56 unit tests for the PPOB1 side
+scripts/e2e/run-ppob1.sh                 # 98 assertions, both systems live; see ppob1-sim/README.md
 ```
 
 **A green `./gradlew build` is not evidence that the money paths work.** Three of the defects found

@@ -262,6 +262,110 @@ chk "...rather than a 409 or a second order"       "$(field "$R2" local_state)" 
 chk "...and PPOB2 still holds exactly one order for it" \
     "$(scalar "select count(*) from parent_order where customer_reference='GAMEID-RECOVER'")" 1
 
+echo "== PPOB1's own gross-collected book =="
+# One-sided by design: computed entirely from PPOB1's books, with no call to PPOB2. The comparison
+# against PPOB2's figure is the half that needs a contract decision first -- PPOB2 exposes no
+# partner-facing settlement figure (both its settlement endpoints are behind admin RBAC, and the
+# allocations one returns every partner's numbers).
+SNAP_URL="$P1/sim/collections/snapshots"
+TODAY_UTC=$(date -u +%Y-%m-%d)
+bgross() { echo "$1" | grep -o "\"bucket\":\"$2\",\"txn_count\":[0-9]*,\"gross\":[0-9-]*" | grep -o '"gross":[0-9-]*' | cut -d: -f2; }
+bcount() { echo "$1" | grep -o "\"bucket\":\"$2\",\"txn_count\":[0-9]*" | grep -o '"txn_count":[0-9]*' | cut -d: -f2; }
+# PPOB1's own books only -- never PPOB2's. The bucket SQL mirrors CollectionBucket.of so a drift
+# between the two shows up as a failure here rather than as a quietly wrong figure.
+p1sum() { P1Q "select coalesce(sum(amount),0) from ppob1_transaction where local_state in ($1) and created_at >= '$TODAY_UTC 00:00:00+00' and created_at < ('$TODAY_UTC'::date + 1)::timestamptz"; }
+p1cnt() { P1Q "select count(*) from ppob1_transaction where local_state in ($1) and created_at >= '$TODAY_UTC 00:00:00+00' and created_at < ('$TODAY_UTC'::date + 1)::timestamptz"; }
+
+SNAP=$(curl -s -X POST "$SNAP_URL?business_date=$TODAY_UTC")
+chk "snapshot cut in the configured zone"  "$(field "$SNAP" zone_id)" UTC
+chk "...for the date asked for"            "$(field "$SNAP" business_date)" "$TODAY_UTC"
+# Omitted before computed_at was set in Java rather than left to the column default -- Hibernate
+# does not re-read the row after save(), so the POST response silently dropped it.
+chk "...and says when it was computed"     "$([ -n "$(field "$SNAP" computed_at)" ] && echo t || echo f)" t
+
+# Each bucket against PPOB1's own SQL for the same predicate.
+chk "DELIVERED gross matches SQL"   "$(bgross "$SNAP" DELIVERED)"   "$(p1sum "'COMPLETED'")"
+chk "DELIVERED count matches SQL"   "$(bcount "$SNAP" DELIVERED)"   "$(p1cnt "'COMPLETED'")"
+chk "PARTIAL gross matches SQL"     "$(bgross "$SNAP" PARTIAL)"     "$(p1sum "'PARTIALLY_FAILED'")"
+# FAILED and REFUND_EXPECTED share this bucket: both are money collected with nothing delivered.
+chk "COLLECTED_UNDELIVERED matches SQL" "$(bgross "$SNAP" COLLECTED_UNDELIVERED)" "$(p1sum "'FAILED','REFUND_EXPECTED'")"
+chk "REVERSED matches SQL"          "$(bgross "$SNAP" REVERSED)"    "$(p1sum "'REFUNDED'")"
+chk "IN_FLIGHT matches SQL"         "$(bgross "$SNAP" IN_FLIGHT)"   "$(p1sum "'AWAITING_RESULT'")"
+chk "NOT_COLLECTED matches SQL"     "$(bgross "$SNAP" NOT_COLLECTED)" "$(p1sum "'AWAITING_PAYMENT','CANCELLED','EXPIRED','REJECTED'")"
+chk "INDETERMINATE matches SQL"     "$(bgross "$SNAP" INDETERMINATE)" "$(p1sum "'SUBMITTING','UNKNOWN'")"
+
+# The census invariant, same discipline as BR-REC-002's "allocations MUST sum exactly": every
+# transaction in exactly one bucket, so the buckets sum to the totals. A transaction dropped or
+# double-counted shows up here and nowhere else.
+BSUM=$(echo "$SNAP" | grep -o '"gross":[0-9-]*' | cut -d: -f2 | paste -sd+ | bc)
+CSUM=$(echo "$SNAP" | grep -o '"txn_count":[0-9]*' | cut -d: -f2 | paste -sd+ | bc)
+chk "buckets sum to total_gross"  "$BSUM" "$(field "$SNAP" total_gross)"
+chk "buckets sum to total_count"  "$CSUM" "$(field "$SNAP" total_count)"
+chk "total_count matches the day's rows" "$(field "$SNAP" total_count)" "$(p1cnt "'COMPLETED','PARTIALLY_FAILED','FAILED','REFUND_EXPECTED','REFUNDED','AWAITING_RESULT','AWAITING_PAYMENT','CANCELLED','EXPIRED','REJECTED','SUBMITTING','UNKNOWN'")"
+chk "every bucket has a line, zeros included" "$(echo "$SNAP" | grep -o '"bucket":' | wc -l | tr -d ' ')" 7
+# The staged orphan has no upstream order, so the day is not final.
+chk "a day holding indeterminate work is provisional" "$(field "$SNAP" provisional)" true
+
+echo "== ORACLE: do PPOB1's bucket definitions actually match PPOB2's basis? =="
+# Harness-only. The service never does this -- it is the cheapest available proof that
+# CollectionBucket.of agrees with the number PPOB1's figure would one day be reconciled against.
+# PPOB2 computes a settlement's expected_amount as SUM(payment.amount) WHERE status='SUCCESS',
+# independent of order state. Restricted to the orders PPOB1 knows about, so anything else in
+# PPOB2's database cannot flatter or spoil the comparison.
+P1_ORDERS=$(P1Q "select string_agg(quote_literal(ppob2_order_id), ',') from ppob1_transaction where ppob2_order_id is not null")
+PPOB2_SUCCESS=$(scalar "select coalesce(sum(p.amount),0) from payment p join parent_order o on o.id=p.parent_order_id where p.status='SUCCESS' and o.order_no in ($P1_ORDERS)")
+# Everything collected and not reversed: DELIVERED + PARTIAL + COLLECTED_UNDELIVERED + IN_FLIGHT.
+# REVERSED is excluded because markRefunded moves the payment off SUCCESS, so it leaves PPOB2's
+# figure too; NOT_COLLECTED never had a SUCCESS payment; INDETERMINATE has no order id to join on.
+P1_COLLECTED=$(( $(bgross "$SNAP" DELIVERED) + $(bgross "$SNAP" PARTIAL) + $(bgross "$SNAP" COLLECTED_UNDELIVERED) + $(bgross "$SNAP" IN_FLIGHT) ))
+chk "PPOB1's collected buckets equal PPOB2's SUCCESS-payment sum" "$P1_COLLECTED" "$PPOB2_SUCCESS"
+
+echo "== The business-day boundary =="
+# Staged in PPOB1's own books: a sale backdated to one second before the day began must fall out,
+# and the last second of the day must stay in. The query is a half-open instant range rather than
+# created_at::date, because that cast runs in the Postgres session timezone -- the same ambiguity
+# PPOB2 has on its side.
+submit '{"reseller_txn_id":"E2E-EDGE-1","product_code":"MOBILE_LEGENDS","amount":11000,"customer_reference":"GAMEID-EDGE"}' >/dev/null
+IN_BEFORE=$(bgross "$(curl -s -X POST "$SNAP_URL?business_date=$TODAY_UTC")" NOT_COLLECTED)
+P1Q "update ppob1_transaction set created_at = '$TODAY_UTC 23:59:59+00' where reseller_txn_id='E2E-EDGE-1'"
+chk "23:59:59 of the day is still inside it" \
+    "$(bgross "$(curl -s -X POST "$SNAP_URL?business_date=$TODAY_UTC")" NOT_COLLECTED)" "$IN_BEFORE"
+P1Q "update ppob1_transaction set created_at = ('$TODAY_UTC'::date - 1 + interval '23:59:59')::timestamptz where reseller_txn_id='E2E-EDGE-1'"
+chk "one second before the day starts falls out" \
+    "$(bgross "$(curl -s -X POST "$SNAP_URL?business_date=$TODAY_UTC")" NOT_COLLECTED)" "$((IN_BEFORE - 11000))"
+# ...and lands on the previous day instead, rather than vanishing.
+chk "...and is counted on the previous day" \
+    "$(bgross "$(curl -s -X POST "$SNAP_URL?business_date=$(date -u -d "$TODAY_UTC - 1 day" +%Y-%m-%d)")" NOT_COLLECTED)" 11000
+P1Q "update ppob1_transaction set created_at = now() where reseller_txn_id='E2E-EDGE-1'"
+
+echo "== A snapshot freezes what PPOB1 believed =="
+# The reason snapshots are append-only and not unique per date: the transaction book moves when
+# reconciliation repairs a stale belief, so the same day legitimately yields a different figure
+# later -- and the figure quoted to PPOB2 last week has to stay quotable.
+R=$(submit '{"reseller_txn_id":"E2E-FREEZE-1","product_code":"MOBILE_LEGENDS","amount":20000,"customer_reference":"GAMEID-FREEZE"}')
+FID=$(field "$R" id); FOID=$(field "$R" ppob2_order_id)
+ORIGREF="R-$FOID" $CB "$(pgref "$FOID")" 20000 00 >/dev/null; sleep 7
+# Rewind PPOB1's belief only -- PPOB2 has genuinely delivered.
+P1Q "update ppob1_transaction set local_state='AWAITING_PAYMENT', ppob2_state='PAYMENT_PENDING', last_source='CREATE_RESPONSE', recon_settled_at=null where reseller_txn_id='E2E-FREEZE-1'"
+BEFORE=$(curl -s -X POST "$SNAP_URL?business_date=$TODAY_UTC")
+BEFORE_ID=$(field "$BEFORE" id); BEFORE_DELIVERED=$(bgross "$BEFORE" DELIVERED)
+
+curl -s -X POST "$P1/sim/recon/run" >/dev/null   # repairs the belief to COMPLETED
+AFTER=$(curl -s -X POST "$SNAP_URL?business_date=$TODAY_UTC")
+chk "the later snapshot sees the repaired belief" \
+    "$(bgross "$AFTER" DELIVERED)" "$((BEFORE_DELIVERED + 20000))"
+chk "...and is a new row, not an overwrite" \
+    "$([ "$(field "$AFTER" id)" != "$BEFORE_ID" ] && echo t || echo f)" t
+# The point: the earlier figure is unchanged on disk, so what was quoted then is still quotable.
+chk "...while the earlier snapshot is untouched" \
+    "$(P1Q "select gross from ppob1_collection_bucket where snapshot_id=$BEFORE_ID and bucket='DELIVERED'")" "$BEFORE_DELIVERED"
+chk "latest for the date is the newer one" \
+    "$(field "$(curl -s "$SNAP_URL/latest?business_date=$TODAY_UTC")" id)" "$(field "$AFTER" id)"
+chk "history keeps both"  "$([ "$(count "$(curl -s "$SNAP_URL")" '"business_date"')" -ge 2 ] && echo t || echo f)" t
+# "Nobody computed this" and "this day had no sales" are different answers.
+chk "a never-snapshotted date is 404, not a zeroed census" \
+    "$(curl -s -o /dev/null -w '%{http_code}' "$SNAP_URL/latest?business_date=2020-01-01")" 404
+
 echo ""
 echo "================================"
 echo "  PASS: $pass    FAIL: $fail"
