@@ -209,15 +209,19 @@ figure you quoted last week. `GET .../latest` returns the newest; the older rows
 
 ```bash
 cd ppob1-sim
-./gradlew test                      # 56 unit tests, 6 classes
-scripts/e2e/run-ppob1.sh            # 99 assertions, both systems running
+./gradlew test                      # 64 unit tests, 7 classes
+scripts/e2e/run-ppob1.sh            # 113 assertions, both systems running
 ```
 
 `run-ppob1.sh` is a genuinely two-sided run: PPOB1 sells through PPOB2's signed API, PPOB2 fulfils,
 PPOB2 calls back, PPOB1 verifies the signature with its own implementation, and both databases are
 asserted on. `scripts/e2e/wh.sh` forges callbacks PPOB2 will never send — a wrong signature, an
-unknown order, a malformed body — because those branches decide whether the receiver is a control or
-just a parser.
+unknown order, a malformed body, a reseller id already pinned to a different order — because those
+branches decide whether the receiver is a control or just a parser. What PPOB2 *can* produce is
+driven for real instead, including
+[a callback PPOB1 cannot place](#a-callback-ppob1-cannot-place-and-the-scope-error-i-nearly-shipped):
+there the first assertion
+reads PPOB2's own `webhook_event` row, so the test cannot pass on PPOB1 inventing a match.
 
 ## What building this found
 
@@ -246,6 +250,13 @@ Everything below came out of running it, not reading the code.
    One small illustration of what the gap cost, visible in the diff: the idempotency case had to
    count upstream orders through `customer_reference`, with a comment saying why. It can now count by
    `metadata->>'reseller_txn_id'` — the question it actually wanted to ask.
+
+   **And then the field paid for itself in the other direction.** Storing it made PPOB2 answerable;
+   *echoing it back in the Section 23.8 callback* made a callback matchable on an id PPOB1 owns. See
+   [a callback PPOB1 cannot place](#a-callback-ppob1-cannot-place-and-the-scope-error-i-nearly-shipped)
+   below, which also records the scope error that nearly shipped with it — this is the one finding
+   where the fix on PPOB2's side and the fix on this side are two halves of one mechanism, which is
+   also why neither half was visible from inside one system.
 
 3. **Section 23.2 has two ambiguities that cost a real integrator a day each.** Both are now
    resolved in `Ppob2RequestSigner`'s Javadoc and pinned by tests. The spec says the signature may
@@ -301,6 +312,74 @@ Everything below came out of running it, not reading the code.
    duplicate row — including "duplicate wrote no second row", whose entire purpose is to count. Same
    shape as the `q.sh -t` incident `backend/scripts/e2e/README.md` warns about: suspect the harness
    first.
+
+### A callback PPOB1 cannot place, and the scope error I nearly shipped
+
+A correctly signed `ORDER_STATUS_CHANGED` that PPOB1 cannot connect to any sale is the shape of a
+real problem: PPOB2 fulfilled an order attributable to PPOB1, and PPOB1's books do not know which
+sale it was. It arrived carrying only `order_id`, so acting on it required PPOB1 to have
+successfully stored *PPOB2's* number — and a reseller whose books lost that number could do nothing:
+`WebhookVerdict.UNKNOWN_ORDER`, recorded and set aside.
+
+PPOB2 now echoes `reseller_txn_id` back — one field, additive to Section 23.8's documented five — so
+the callback can be matched on an id PPOB1 owns:
+[`RECOVERED_BY_RESELLER_ID`](src/main/java/id/ppob1/sim/domain/WebhookVerdict.java). PPOB1 adopts
+the upstream id, applies the state, and a recon entry that read `ORPHANED_SUBMIT` comes back `MATCH`.
+
+**And here is the part worth reading, because it is the mistake this document originally made.** The
+first version of this section claimed the orphaned submit now recovers itself. It does not, and the
+reason is in this simulator's own code: when a create response is lost, `TransactionWriter` stores no
+`qr_payload` — only `acceptedByPpob2` sets one — so PPOB1 has no QR to show anybody, so the upstream
+order is never paid, so PPOB2 sweeps it to `EXPIRED`. And `EXPIRED` fires **no callback at all**
+(PPOB2's `OutboundWebhookOrchestrator` fires only on post-dispatch SUCCESS / PARTIAL_FAILED / FAILED,
+and its `WebhookDeliveryTargetResolver` independently refuses every other state). The ordinary
+lost-response orphan expires unpaid and still needs exactly what `ORPHANED_SUBMIT`'s detail text
+says: a human reading the recon report and re-submitting under the same key.
+
+So what this recovery actually reaches is narrower, and worth naming precisely — the cases where
+PPOB1 holds no id for an order that is nonetheless **live**:
+
+- **A `REJECTED` row whose order exists anyway.** A `409 IDEMPOTENCY_KEY_CONFLICT` is the one refusal
+  PPOB2 issues while an order for that key does exist. This is the *strongest* case for the whole
+  mechanism, not a footnote: `ReconciliationService` excludes `REJECTED` from its working set, so
+  recon will never look at that row again, and the callback is the only thing left that can correct
+  it.
+- **A row whose id was lost after the order went live** — a failed outcome write, a restored backup,
+  an operational repair. PPOB1 kept the sale and lost the pointer. This is what the harness stages.
+
+The harness states that boundary itself rather than leaving it to prose: the same run that asserts
+the recovered row now reads `MATCH` also asserts that `E2E-ORPHAN-1` — an orphan with no upstream
+order at all — is *still* flagged. That assertion exists because the first version of it counted
+`ORPHANED_SUBMIT` run-wide, failed, and was right to.
+
+Three things about the mechanism are worth knowing before changing any of it:
+
+- **The reseller id is read only after the signature verifies.** That ordering is what makes it safe
+  to act on: the value is an *authenticated echo* of PPOB1's own id, not a lookup key a caller gets
+  to choose. Reading it first would let anyone who can reach the endpoint attach an order id of their
+  choosing to any open sale. A test drives exactly that: a forged-signature callback carrying a valid
+  reseller id adopts nothing and never reaches the second lookup.
+- **A reseller id is unique here but not necessarily upstream.** PPOB2's `parent_order_idem_uk` is
+  `(client_id, idempotency_key)` and Section 22.3 lets one partner hold several `api_client` rows, so
+  the same id sent through two of them produces two distinct orders. Adopting blindly would overwrite
+  the order PPOB1 is tracking: one silent write, two orders, one record. Hence `ORDER_ID_CONFLICT`,
+  which applies nothing, and `Ppob1Transaction.adoptPpob2OrderId` throwing if an id is already held —
+  the guard behind the guard, since the service-level check can be removed by an edit.
+- **The guard is on `ppob2_order_id IS NULL`, not on the state.** `REJECTED` also qualifies, which
+  looks wrong until you notice that `ReconciliationService` excludes `REJECTED` from its working set:
+  recon will never look at that row again, so the callback is the *only* thing that can correct it. A
+  row recovered out of `REJECTED` keeps its `rejection_code` — a `COMPLETED` transaction still
+  carrying one is the whole finding, and clearing it would hide it.
+
+The harness drives this as a real round trip rather than through `wh.sh`: PPOB2 builds and signs the
+body, and the first assertion reads `webhook_event.payload->>'reseller_txn_id'` on **PPOB2's** side,
+so the test cannot pass on PPOB1 inventing a match. `wh.sh` gained an optional `RESELLER_TXN_ID` only
+for the conflict case, which PPOB2 cannot be made to produce with one `api_client`.
+
+One thing that would widen this materially, named rather than implied: if PPOB2 fired a callback on
+`EXPIRED` too, the ordinary lost-response orphan would recover by the same path. That is a Section
+23.8 trigger-coverage decision on PPOB2's side, and PPOB2's README flags that coverage as partial
+already.
 
 ## Design notes worth knowing before changing anything
 

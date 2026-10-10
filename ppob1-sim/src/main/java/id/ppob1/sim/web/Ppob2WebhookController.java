@@ -48,9 +48,13 @@ public class Ppob2WebhookController {
             // taken. Answering non-2xx to a redelivery would make PPOB2 keep retrying something
             // already accepted.
             case APPLIED, DUPLICATE -> 200;
-            // Signed correctly but names an order PPOB1 has never seen. Retrying cannot fix that,
-            // and a retry storm would bury the row recording a genuine integration gap.
-            case UNKNOWN_ORDER -> 200;
+            // The orphaned submit recovering itself: the order id was unknown, the reseller's own
+            // id matched a sale holding none, and PPOB1 adopted it. A success like APPLIED.
+            case RECOVERED_BY_RESELLER_ID -> 200;
+            // Signed correctly but names an order PPOB1 has never seen, or claims a reseller id
+            // PPOB1 already holds against a different order. Retrying cannot fix either, and a
+            // retry storm would bury the row recording a genuine integration gap.
+            case UNKNOWN_ORDER, ORDER_ID_CONFLICT -> 200;
             case REJECTED_SIGNATURE -> 401;
             case MALFORMED -> 400;
         };

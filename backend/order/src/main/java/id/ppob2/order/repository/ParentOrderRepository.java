@@ -13,6 +13,23 @@ import org.springframework.data.repository.query.Param;
 
 public interface ParentOrderRepository extends JpaRepository<ParentOrder, Long> {
 
+    /**
+     * The one SQL expression that extracts Section 23.4's {@code metadata.reseller_txn_id} (V23).
+     *
+     * <p>A constant rather than a repeated literal because three places have to agree on it
+     * character for character and only two of them can be kept in step by the compiler: this
+     * repository's two queries below, and {@code parent_order_reseller_txn_idx} in
+     * {@code V23__parent_order_metadata.sql}. A functional index only serves the expression it was
+     * declared with, so a drift degrades the lookup to a sequential scan of every order ever placed,
+     * silently — which is why {@code run-core.sh} asserts the planner's chosen index by name rather
+     * than only that the lookup returns the right row.
+     *
+     * <p>{@code ->>} (text), never {@code ->} (jsonb): the two do not share an index, and the text
+     * form is also what makes the admin lookup and the outbound webhook agree about a partner
+     * sending something that is not a string.
+     */
+    String RESELLER_TXN_ID = "metadata ->> 'reseller_txn_id'";
+
     Optional<ParentOrder> findByClientIdAndIdempotencyKey(String clientId, String idempotencyKey);
 
     Optional<ParentOrder> findByOrderNo(String orderNo);
@@ -92,10 +109,28 @@ public interface ParentOrderRepository extends JpaRepository<ParentOrder, Long> 
      * the hundred the caller is given is how {@code AdminOrderController} knows to say the result
      * was truncated instead of presenting a hundred of an unknown number as all of them.
      */
-    @Query(value = "SELECT * FROM parent_order WHERE metadata ->> 'reseller_txn_id' = :resellerTxnId "
+    @Query(value = "SELECT * FROM parent_order WHERE " + RESELLER_TXN_ID + " = :resellerTxnId "
             + "ORDER BY id DESC LIMIT 101",
             nativeQuery = true)
     List<ParentOrder> findByResellerTxnId(@Param("resellerTxnId") String resellerTxnId);
+
+    /**
+     * The reverse of {@link #findByResellerTxnId}: the reseller's own id for one order, for the
+     * Section 23.8 outbound callback to echo back (see {@code OutboundWebhookSender}).
+     *
+     * <p>Extracted in SQL rather than by parsing {@code ParentOrder.getMetadata()} with Jackson, and
+     * that is a correctness choice, not a shortcut. The value this returns must be the same text the
+     * admin lookup matches on, and {@code ->>} is what makes that true for every shape a partner
+     * might send: a number comes back as its digits, an object as its JSON, both identically on both
+     * sides. {@code JsonNode.asText()} on an object node returns the empty string instead, so the
+     * webhook would echo something the lookup could never find.
+     *
+     * <p>{@code null} for an order with no metadata and for metadata without that key — the two are
+     * not distinguished here because nothing downstream acts on the difference.
+     */
+    @Query(value = "SELECT " + RESELLER_TXN_ID + " FROM parent_order WHERE id = :parentOrderId",
+            nativeQuery = true)
+    String findResellerTxnIdByParentOrderId(@Param("parentOrderId") Long parentOrderId);
 
     interface PartnerAmountProjection {
         Long getPartnerId();

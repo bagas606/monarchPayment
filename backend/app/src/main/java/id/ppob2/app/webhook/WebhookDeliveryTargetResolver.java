@@ -63,6 +63,14 @@ public class WebhookDeliveryTargetResolver {
             return Optional.empty();
         }
 
-        return Optional.of(new WebhookDeliveryTarget(callbackUrl, partner.getWebhookSecret(), partner.getCode(), order.getOrderNo(), order.getState().name()));
+        // Read out of the column by the same SQL expression the admin lookup matches on, so the id
+        // PPOB2 echoes in the callback is the id PPOB2 can be asked about afterwards. A second
+        // cheap query rather than parsing order.getMetadata() here -- see
+        // ParentOrderRepository.findResellerTxnIdByParentOrderId for why that is correctness and
+        // not tidiness.
+        String resellerTxnId = parentOrderRepository.findResellerTxnIdByParentOrderId(parentOrderId);
+
+        return Optional.of(new WebhookDeliveryTarget(callbackUrl, partner.getWebhookSecret(),
+                partner.getCode(), order.getOrderNo(), order.getState().name(), resellerTxnId));
     }
 }

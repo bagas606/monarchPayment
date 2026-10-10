@@ -73,14 +73,14 @@ payment callback, and the dev-only failure-injection knobs.
 
 ```bash
 cd backend
-./gradlew build                          # 35 unit / slice test classes + ArchUnit (189 tests)
+./gradlew build                          # 36 unit / slice test classes + ArchUnit (193 tests)
 scripts/e2e/run-core.sh                  # 177 assertions against a running app + real Postgres
 scripts/e2e/run-routing-and-sweeps.sh    # 13 assertions (waits on the 60s expiry-sweep tick)
 scripts/e2e/run-refund-gateway.sh        # 15 assertions; needs its own boot flag, see its header
 
 cd ../ppob1-sim
-./gradlew test                           # 56 unit tests for the PPOB1 side
-scripts/e2e/run-ppob1.sh                 # 99 assertions, both systems live; see ppob1-sim/README.md
+./gradlew test                           # 64 unit tests for the PPOB1 side
+scripts/e2e/run-ppob1.sh                 # 113 assertions, both systems live; see ppob1-sim/README.md
 ```
 
 **A green `./gradlew build` is not evidence that the money paths work.** Three of the defects found

@@ -507,6 +507,9 @@ database — see that slice's notes.
     `FulfillmentDispatchListener` right after the reconciliation orchestrator) send a webhook;
     `CANCELLED`/`EXPIRED`/`REFUNDED` transitions and the QR expiry sweep's own state change
     (Section 48.3's diagram) do not, and are not covered by the retry-sweep slice either.
+  - **The body gained a sixth field later**, `reseller_txn_id`, which Section 23.8 does not
+    document — see the 2026-10-10 entry on the callback carrying the reseller's own id for why, and why
+    only that one key of `metadata` is echoed.
   - **`webhook`'s new `OutboundWebhookSender`** signs with the exact same `HmacSigner` scheme as
     inbound Open API auth (Section 23.2), using the callback URL's own path component. Uses
     `WebClient` (the `spring-boot-starter-webflux` dependency this module already declared but
@@ -2279,6 +2282,103 @@ Known gaps to close before this is production-real:
     13/13, `run-ppob1.sh` 99/99, `run-refund-gateway.sh` 15/15 — the last one re-run this time
     rather than reasoned about, because every e2e script drives the order-creation path this slice
     changes.
+
+- **The callback carries the reseller's own id, 2026-10-10** (`OutboundWebhookSender.payload`,
+  `ppob1-sim`'s `WebhookIngestService`). Closes the Section 23.8 gap the `V23` entry above named as
+  still open.
+  - **What it is for.** With `order_id` alone, acting on a callback requires the partner to have
+    successfully stored *our* order number. A partner whose books lost it — for any reason — receives
+    a correctly signed message about one of its own sales and can do nothing with it:
+    `WebhookVerdict.UNKNOWN_ORDER`, recorded and set aside. Echoing back the id the partner itself
+    chose removes that dependency, and lets a partner key its whole callback handling on its own
+    reference rather than ours.
+  - **The recovery it enables, and the headline this entry originally claimed and should not
+    have.** The first draft said this makes "the orphaned submit recover itself". That is wrong, and
+    tracing it is worth recording because the mistake is the natural reading. When a create response
+    is lost, PPOB1 stores **no `qr_payload`** (only its `acceptedByPpob2` sets one), so no customer
+    ever pays, so the upstream order is swept to `EXPIRED` — and `EXPIRED` fires no Section 23.8
+    callback at all. Confirmed from two independent places: `sendOrderStatusChanged` has exactly one
+    caller (`FulfillmentDispatchListener`, post-dispatch terminal states), and
+    `WebhookDeliveryTargetResolver` separately refuses every state but SUCCESS / PARTIAL_FAILED /
+    FAILED. **The ordinary lost-response orphan expires unpaid, produces no callback, and still needs
+    the recon-plus-re-submit remedy.**
+
+    What the recovery does reach is the cases where PPOB1 holds no id for an order that is
+    nonetheless *live*, so a callback actually comes:
+    - **A `REJECTED` row whose order exists anyway** — a `409 IDEMPOTENCY_KEY_CONFLICT` is the one
+      refusal PPOB2 issues while an order for that key does exist. This is the strongest case for
+      the whole mechanism, not an afterthought: `ReconciliationService` excludes `REJECTED` from its
+      working set, so recon will never look at that row again and the callback is the only thing
+      left that can correct it.
+    - **A row whose id was lost after the order went live** — a failed outcome write, a restored
+      backup, an operational repair. PPOB1 kept the sale and lost the pointer.
+  - **An additive extension of a documented body.** Section 23.8's example has five fields; the
+    callback now sends a sixth, `reseller_txn_id`, so a partner parsing only the documented five is
+    unaffected. Recorded as a deliberate contract change in the sender's Javadoc rather than left
+    for a reader to discover against the PRD.
+  - **Only that one key, never the whole `metadata` object.** The column holds whatever a partner
+    chose to put there; this body is persisted on *both* sides of the wire (`webhook_event` here,
+    `ppob1_inbound_webhook` there) and is in flight to a URL the partner supplied. Echoing the lot
+    would copy any incidental personal data a partner annotates orders with into two more places.
+  - **Read back out of the column by SQL, not remembered from the create request**, because a retry
+    sweep may send the callback hours later in a different process — and by the same `->>` expression
+    the admin lookup matches on (`ParentOrderRepository.RESELLER_TXN_ID`, now a single constant both
+    queries share). That is correctness, not tidiness: `JsonNode.asText()` on an object node returns
+    the empty string, so a partner sending a non-string would get a callback echoing something the
+    lookup could never find.
+  - **The guard is what makes matching on a reseller's id safe, and it is not defensive
+    boilerplate.** That id is unique in PPOB1 but *not* necessarily upstream:
+    `parent_order_idem_uk` is `(client_id, idempotency_key)` and Section 22.3 lets one partner hold
+    several `api_client` rows, so the same reseller id sent through two of them produces two
+    distinct orders. Adopting blindly would overwrite the order PPOB1 is tracking — one silent
+    write, two orders, one record. Hence `WebhookVerdict.ORDER_ID_CONFLICT`, which applies nothing,
+    and `Ppob1Transaction.adoptPpob2OrderId` throwing if an id is already held, so a future caller
+    cannot bypass the service-level check.
+  - **Guarded on `ppob2_order_id IS NULL`, not on the local state.** The orphan (`SUBMITTING`) is
+    the case worth building for; `REJECTED` also qualifies and is narrower but real, since a
+    `409 IDEMPOTENCY_KEY_CONFLICT` is the one refusal PPOB2 issues while an order for that key does
+    exist. It matters more than its frequency suggests because `ReconciliationService` excludes
+    `REJECTED` from its working set — recon will never look at that row again, so the callback is
+    the only thing that can correct it. Such a row keeps its `rejection_code`: a `COMPLETED`
+    transaction still carrying one is the entire finding, and clearing it would make the row
+    indistinguishable from an ordinary recovery.
+  - **The verdict is read only after the signature verifies**, which is what makes it safe to act
+    on at all — it is an authenticated echo of PPOB1's own id, not a lookup key a caller chooses.
+    Otherwise anyone who could reach the endpoint could attach an order id of their choosing to any
+    open sale. Asserted directly: a forged-signature callback carrying a valid reseller id adopts
+    nothing and never reaches the second lookup.
+  - **Driven as a real round trip, with PPOB2's own row as the oracle.** `run-ppob1.sh` submits,
+    stages a *live* order whose id PPOB1 then lost (not a lost create response — see above), pays,
+    and lets PPOB2 build and sign the callback itself. It then asserts
+    `webhook_event.payload->>'reseller_txn_id'` on *PPOB2's* side before asserting anything about
+    PPOB1's, so the test cannot pass on PPOB1 inventing the match. The same sequence returned
+    `UNKNOWN_ORDER` before this change, so the verdict assertion discriminates. The
+    `ORDER_ID_CONFLICT` case goes through `wh.sh`, which gained an optional `RESELLER_TXN_ID` to
+    keep its "mirrors `OutboundWebhookSender` exactly" claim true: two upstream orders for one
+    reseller id needs a second `api_client`, which the fixture does not have.
+  - **A harness bug caught by running it, and it pointed at the scope error above.** The first
+    version of "recon now agrees instead of reporting an orphan" counted `ORPHANED_SUBMIT` across
+    the whole run and failed — correctly, as it turned out: `E2E-ORPHAN-1` earlier in the script has
+    no upstream order at all, so no callback will ever come for it and it stays an orphan forever.
+    Rescoped to the recovered transaction's own recon entry (`MATCH`), plus an assertion that that
+    orphan *is* still flagged in the same run — which both proves the detector still works and
+    states the scope in the harness itself: the callback recovers a lost pointer, not every orphan.
+  - **`OutboundWebhookSender` had no unit test at all**, which is why the case that matters most
+    here was previously undriveable by any means: an order with no metadata must send *no such key*,
+    and every order the harness places carries one. Payload construction is now a package-private
+    method so the shape can be asserted without a `WebClient`. The trap it pins: Jackson's
+    `NON_NULL` inclusion does not apply to map entries, and this class deliberately uses its own
+    bare `ObjectMapper`, so `put(key, null)` would have serialized `"reseller_txn_id":null` — a key
+    asserting the reseller has no id.
+  - **Gap, unchanged, and it is what bounds everything above**: callbacks fire only on post-dispatch
+    terminal states (SUCCESS / PARTIAL_FAILED / FAILED). `CANCELLED` and `EXPIRED` send nothing — and
+    `EXPIRED` is not an edge case here, it is the **default outcome** of a lost create response,
+    since PPOB1 holds no QR for such an order and nobody can pay it. Widening the trigger to
+    `EXPIRED` would let the callback reach the ordinary orphan too; that is a Section 23.8 scope
+    decision, not part of this slice.
+  - **Verified**: 193 PPOB2 unit tests (was 189) and 64 PPOB1 (was 56), `run-core.sh` 177/177,
+    `run-routing-and-sweeps.sh` 13/13, `run-ppob1.sh` 113/113 (was 99), `run-refund-gateway.sh`
+    15/15 — all five on their own clean boots against a wiped schema, since both systems change here.
 
 ## Running locally
 

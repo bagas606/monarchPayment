@@ -120,18 +120,64 @@ public class WebhookIngestService {
 
         Optional<Ppob1Transaction> transaction = transactionRepository.findByPpob2OrderId(orderId);
         if (transaction.isEmpty()) {
-            // Correctly signed, so it did come from PPOB2 — PPOB1 simply has no row for it. The
-            // expected cause is a transaction still stuck in SUBMITTING because the create
-            // response never arrived, which makes this callback the first PPOB1 has heard of an
-            // order it is nonetheless on the hook for.
-            log.error("Signed webhook for order {} that PPOB1 has no record of — state {}. "
-                    + "Check for a SUBMITTING transaction whose create response was lost", orderId, state);
-            return record(rawBody, nonce, eventType, orderId, state, true, WebhookVerdict.UNKNOWN_ORDER);
+            return ingestUnmatchedOrder(rawBody, nonce, eventType, orderId, state,
+                    body.hasNonNull("reseller_txn_id") ? body.get("reseller_txn_id").asText() : null);
         }
 
         transaction.get().applyPpob2State(state, StateSource.WEBHOOK);
         transactionRepository.save(transaction.get());
         return record(rawBody, nonce, eventType, orderId, state, true, WebhookVerdict.APPLIED);
+    }
+
+    /**
+     * A correctly signed callback naming an order id PPOB1 holds no row for — so it did come from
+     * PPOB2, and PPOB1 is nonetheless on the hook for an order it cannot see.
+     *
+     * <p>The second chance is {@code reseller_txn_id}, which PPOB2 echoes back from the
+     * {@code metadata} PPOB1 sent on the create request. It is read only here, after the signature
+     * has verified, and that ordering is the whole reason this is safe to act on: the value is an
+     * authenticated echo of PPOB1's own id, not a caller-supplied lookup key. An unsigned caller
+     * that could reach this method would otherwise be able to attach an order id of its choosing to
+     * any sale PPOB1 has open.
+     *
+     * <p>Three outcomes, and only the first writes anything — see {@link WebhookVerdict} for the
+     * reasoning behind each, and for why the guard is {@code ppob2_order_id IS NULL} rather than a
+     * check on the local state.
+     */
+    private WebhookVerdict ingestUnmatchedOrder(String rawBody, String nonce, String eventType,
+                                                 String orderId, String state, String resellerTxnId) {
+        Optional<Ppob1Transaction> byResellerId = resellerTxnId == null
+                ? Optional.empty()
+                : transactionRepository.findByResellerTxnId(resellerTxnId);
+
+        if (byResellerId.isEmpty()) {
+            log.error("Signed webhook for order {} that PPOB1 has no record of — state {}, "
+                            + "reseller_txn_id {}. Check for a SUBMITTING transaction whose create "
+                            + "response was lost", orderId, state, resellerTxnId);
+            return record(rawBody, nonce, eventType, orderId, state, true, WebhookVerdict.UNKNOWN_ORDER);
+        }
+
+        Ppob1Transaction candidate = byResellerId.get();
+        if (candidate.getPpob2OrderId() != null) {
+            log.error("Signed webhook for order {} carries reseller_txn_id {}, which PPOB1 already "
+                            + "holds against a DIFFERENT order id {}. Applying nothing — adopting would "
+                            + "replace the order being tracked. Two upstream orders for one reseller id "
+                            + "is possible when a partner submits through more than one api_client",
+                    orderId, resellerTxnId, candidate.getPpob2OrderId());
+            return record(rawBody, nonce, eventType, orderId, state, true, WebhookVerdict.ORDER_ID_CONFLICT);
+        }
+
+        // The previous local state is logged because adopting overwrites it and nothing else keeps
+        // it -- and it is the only thing that says which problem this was. REJECTED means PPOB2
+        // refused this sale at create time and an order for it exists anyway (the 409 case, which
+        // recon can never see); SUBMITTING means PPOB1 lost the pointer to a live order.
+        log.warn("Recovered a sale PPOB1 held no upstream id for: reseller_txn_id {} was {} with no "
+                        + "order id, adopting {} and applying state {}",
+                resellerTxnId, candidate.getLocalState(), orderId, state);
+        candidate.adoptPpob2OrderId(orderId);
+        candidate.applyPpob2State(state, StateSource.WEBHOOK);
+        transactionRepository.save(candidate);
+        return record(rawBody, nonce, eventType, orderId, state, true, WebhookVerdict.RECOVERED_BY_RESELLER_ID);
     }
 
     /**

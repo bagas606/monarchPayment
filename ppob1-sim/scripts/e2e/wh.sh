@@ -24,8 +24,18 @@ TS="${TS:-$(($(date +%s)*1000))}"
 
 # RAWBODY sends a body verbatim, for the malformed case. Without it every body here is well-formed
 # and the MALFORMED branch is unreachable from this script.
+#
+# RESELLER_TXN_ID adds the sixth field PPOB2 sends (OutboundWebhookSender.payload), which is
+# omitted entirely when unset -- exactly as PPOB2 omits it for an order carrying no metadata. It is
+# needed here for the one case PPOB2 cannot be made to produce: a callback naming an order id PPOB1
+# does not hold against a reseller id it already holds against a different one
+# (WebhookVerdict.ORDER_ID_CONFLICT). That takes two upstream orders for one reseller id, which
+# requires a second api_client, which this fixture does not have.
 if [ -n "${RAWBODY-}" ]; then
   BODY="$RAWBODY"
+elif [ -n "${RESELLER_TXN_ID-}" ]; then
+  BODY=$(printf '{"event_type":"ORDER_STATUS_CHANGED","order_id":"%s","state":"%s","timestamp":"%s","nonce":"%s","reseller_txn_id":"%s"}' \
+    "$ORDER_ID" "$STATE" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$NONCE" "$RESELLER_TXN_ID")
 else
   BODY=$(printf '{"event_type":"ORDER_STATUS_CHANGED","order_id":"%s","state":"%s","timestamp":"%s","nonce":"%s"}' \
     "$ORDER_ID" "$STATE" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$NONCE")
