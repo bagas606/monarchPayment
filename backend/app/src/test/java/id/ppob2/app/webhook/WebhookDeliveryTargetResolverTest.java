@@ -89,6 +89,7 @@ class WebhookDeliveryTargetResolverTest {
     void everythingPresentResolvesToADeliveryTarget() {
         ParentOrder order = orderWithCallback(OrderState.PARTIAL_FAILED, "http://example.com/cb", 1L);
         given(parentOrderRepository.findById(1L)).willReturn(Optional.of(order));
+        given(parentOrderRepository.findResellerTxnIdByParentOrderId(1L)).willReturn("PPOB1-TX-98213");
         Partner partner = mock(Partner.class);
         given(partner.getWebhookSecret()).willReturn("secret-123");
         given(partner.getCode()).willReturn("PPOB1");
@@ -102,5 +103,27 @@ class WebhookDeliveryTargetResolverTest {
         assertThat(target.get().partnerCode()).isEqualTo("PPOB1");
         assertThat(target.get().orderNo()).isEqualTo("ORD-1");
         assertThat(target.get().state()).isEqualTo("PARTIAL_FAILED");
+        // Read out of the column by SQL at delivery time, not remembered from the create request:
+        // a retry sweep may send this hours later, in a different process.
+        assertThat(target.get().resellerTxnId()).isEqualTo("PPOB1-TX-98213");
+    }
+
+    @Test
+    void anOrderWithNoMetadataStillResolvesWithANullResellerId() {
+        // Every order placed before V23, and any order placed without the field. The target must
+        // resolve -- the callback is still owed -- carrying null, which OutboundWebhookSender turns
+        // into an absent key rather than a null-valued one.
+        ParentOrder order = orderWithCallback(OrderState.SUCCESS, "http://example.com/cb", 1L);
+        given(parentOrderRepository.findById(1L)).willReturn(Optional.of(order));
+        given(parentOrderRepository.findResellerTxnIdByParentOrderId(1L)).willReturn(null);
+        Partner partner = mock(Partner.class);
+        given(partner.getWebhookSecret()).willReturn("secret-123");
+        given(partner.getCode()).willReturn("PPOB1");
+        given(partnerRepository.findById(1L)).willReturn(Optional.of(partner));
+
+        Optional<WebhookDeliveryTarget> target = resolver.resolve(1L);
+
+        assertThat(target).isPresent();
+        assertThat(target.get().resellerTxnId()).isNull();
     }
 }

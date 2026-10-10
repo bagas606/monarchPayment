@@ -266,6 +266,77 @@ chk "...rather than a 409 or a second order"       "$(field "$R2" local_state)" 
 chk "...and PPOB2 still holds exactly one order for it" \
     "$(scalar "select count(*) from parent_order where customer_reference='GAMEID-RECOVER'")" 1
 
+echo "== A live order PPOB1 holds no id for, recovered from PPOB2's own callback =="
+# PPOB2 now echoes metadata.reseller_txn_id back in the Section 23.8 body, so a callback PPOB1
+# cannot place by order_id can still be matched on an id PPOB1 owns. Before this, this exact
+# sequence ended in UNKNOWN_ORDER: correctly signed, naming an order id PPOB1 had no row for, and
+# nothing to do about it.
+#
+# WHAT IS STAGED HERE, precisely, because the obvious reading is wrong. This is NOT the ordinary
+# lost-create-response orphan: that one never produces a callback at all. A lost response means
+# PPOB1 stored no qr_payload, so no customer ever pays, so the upstream order is swept to EXPIRED --
+# and EXPIRED fires no Section 23.8 callback (OutboundWebhookOrchestrator fires only on
+# SUCCESS/PARTIAL_FAILED/FAILED, and WebhookDeliveryTargetResolver refuses every other state). That
+# orphan still needs the recon-plus-re-submit remedy driven in the block above.
+#
+# What is staged is the case that DOES produce a callback: the QR reached the payer and PPOB1's
+# books lost the pointer to the order -- a failed outcome write, a restored backup, an operational
+# repair. The same row shape (SUBMITTING, no ppob2_order_id) with a live upstream order behind it.
+# See WebhookVerdict.RECOVERED_BY_RESELLER_ID for the full scope, including the REJECTED/409 case
+# that recon can never see.
+#
+# Deliberately a REAL round trip, not wh.sh: PPOB2 builds and signs the body, so this is also the
+# only thing that proves PPOB2 actually sends the field.
+R=$(submit '{"reseller_txn_id":"E2E-WHRECOVER-1","product_code":"MOBILE_LEGENDS","amount":20000,"customer_reference":"GAMEID-WHRECOVER"}')
+WRID=$(field "$R" id); WROID=$(field "$R" ppob2_order_id)
+chk "a sale that reached PPOB2 and got a QR" "$([ -n "$WROID" ] && echo t || echo f)" t
+P1Q "update ppob1_transaction set local_state='SUBMITTING', ppob2_order_id=null, ppob2_state=null, last_source=null, recon_settled_at=null where reseller_txn_id='E2E-WHRECOVER-1'"
+chk "...whose order id PPOB1 then lost" \
+    "$(P1Q "select ppob2_order_id is null from ppob1_transaction where reseller_txn_id='E2E-WHRECOVER-1'")" t
+
+# The customer pays the QR they already had. PPOB2 fulfils and fires the callback at an order PPOB1
+# cannot recognise.
+ORIGREF="R-$WROID" $CB "$(pgref "$WROID")" 20000 00 >/dev/null; sleep 7
+chk "PPOB2 fulfilled it"  "$(scalar "select state from parent_order where order_no='$WROID'")" SUCCESS
+# PPOB2-side oracle, read out of PPOB2's own webhook_event row: the field was sent, independently of
+# how PPOB1 read it. Without this the assertions below could pass on PPOB1 inventing the match.
+chk "PPOB2 sent the reseller's own id in the callback" \
+    "$(scalar "select payload->>'reseller_txn_id' from webhook_event where direction='OUTBOUND' and payload->>'order_id'='$WROID' order by id desc limit 1")" E2E-WHRECOVER-1
+
+W=$(curl -s "$P1/sim/webhooks")
+chk "PPOB1 recovered the order from it" "$(field "$W" verdict)" RECOVERED_BY_RESELLER_ID
+T=$(txn "$WRID")
+chk "...adopting the upstream order id"  "$(field "$T" ppob2_order_id)" "$WROID"
+chk "...and applying PPOB2's state"      "$(field "$T" local_state)" COMPLETED
+chk "...learned by WEBHOOK, not by asking" "$(field "$T" last_source)" WEBHOOK
+# The finding is closed, not merely silenced: the row that was ORPHANED_SUBMIT now reconciles clean.
+# Scoped to this transaction rather than counting ORPHANED_SUBMIT across the run -- the first
+# version of this assertion did that and failed, because E2E-ORPHAN-1 above is a staged orphan with
+# no upstream order at all and is correctly still reported.
+curl -s -X POST "$P1/sim/recon/run" >/dev/null
+chk "recon now agrees instead of reporting an orphan" \
+    "$(P1Q "select verdict from ppob1_recon_entry where reseller_txn_id='E2E-WHRECOVER-1' order by id desc limit 1")" MATCH
+# Which is only meaningful if the detector still works -- and this is also the assertion that keeps
+# the scope honest: E2E-ORPHAN-1 has no upstream order at all, so no callback will ever come for it
+# and it stays an orphan. The callback recovers a lost pointer, not every orphan.
+chk "...while the orphan no callback can reach is still flagged" \
+    "$(P1Q "select verdict from ppob1_recon_entry where reseller_txn_id='E2E-ORPHAN-1' order by id desc limit 1")" ORPHANED_SUBMIT
+
+echo "== ...and the guard that keeps that match safe =="
+# A reseller id is unique in PPOB1 but not necessarily upstream: PPOB2's idempotency key is per
+# (client_id, idempotency_key) and Section 22.3 lets one partner hold several api_client rows, so the
+# same id through two of them yields two orders. Adopting then would overwrite the order PPOB1 is
+# tracking -- one write, two orders, one record. wh.sh rather than a real callback because this
+# fixture has a single api_client and PPOB2 cannot be made to produce it.
+WHCONF=$(RESELLER_TXN_ID=E2E-OK-1 $WH "ORD-NOT-PPOB1S" SUCCESS)
+chk "a callback claiming a reseller id already pinned elsewhere -> 200" \
+    "$(echo "$WHCONF" | grep -o 'HTTP [0-9]*' | awk '{print $2}')" 200
+chk "...is an ORDER_ID_CONFLICT, not a recovery" "$(field "$(curl -s "$P1/sim/webhooks")" verdict)" ORDER_ID_CONFLICT
+# The whole point: PPOB1's books are untouched.
+chk "...and the pinned order id is unchanged" \
+    "$(P1Q "select ppob2_order_id from ppob1_transaction where reseller_txn_id='E2E-OK-1'")" "$OID"
+chk "...and so is its state"             "$(P1Q "select local_state from ppob1_transaction where reseller_txn_id='E2E-OK-1'")" COMPLETED
+
 echo "== PPOB1's own gross-collected book =="
 # One-sided by design: computed entirely from PPOB1's books, with no call to PPOB2. The comparison
 # against PPOB2's figure is the half that needs a contract decision first -- PPOB2 exposes no

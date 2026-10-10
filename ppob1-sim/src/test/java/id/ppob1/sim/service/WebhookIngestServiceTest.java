@@ -44,6 +44,22 @@ class WebhookIngestServiceTest {
                 + "\",\"timestamp\":\"2026-10-10T00:00:00Z\",\"nonce\":\"" + nonce + "\"}";
     }
 
+    /** The same body plus the sixth field PPOB2 echoes back from {@code metadata.reseller_txn_id}
+     * (its {@code OutboundWebhookSender.payload}), which is absent entirely when the order carries
+     * no metadata — hence a separate helper rather than a nullable parameter on {@link #body}. */
+    private static String bodyWithResellerId(String orderId, String state, String nonce, String resellerTxnId) {
+        return "{\"event_type\":\"ORDER_STATUS_CHANGED\",\"order_id\":\"" + orderId + "\",\"state\":\"" + state
+                + "\",\"timestamp\":\"2026-10-10T00:00:00Z\",\"nonce\":\"" + nonce
+                + "\",\"reseller_txn_id\":\"" + resellerTxnId + "\"}";
+    }
+
+    /** What a create call that never answered leaves behind: a committed sale with no upstream
+     * order id, which is both {@code ReconVerdict.ORPHANED_SUBMIT} and the row this recovery is
+     * for. */
+    private static Ppob1Transaction orphanedSubmit() {
+        return new Ppob1Transaction("PPOB1-TX-1", "MOBILE_LEGENDS", BigInteger.valueOf(20000), "GAMEID-1");
+    }
+
     private String signatureFor(String rawBody, String nonce) {
         return signer.sign(SECRET, signer.stringToSign("POST", PATH, TIMESTAMP, nonce, signer.sha256Hex(rawBody)));
     }
@@ -165,6 +181,126 @@ class WebhookIngestServiceTest {
         // rejected-signature case above. This row is how a lost create-response is discovered.
         assertThat(captor.getValue().isSignatureValid()).isTrue();
         assertThat(captor.getValue().getPpob2OrderId()).isEqualTo("ORD-GHOST");
+    }
+
+    /**
+     * A signed callback for a live order PPOB1 holds no id for — the case this receiver gained a
+     * second lookup for. Before PPOB2 echoed {@code reseller_txn_id} back, this exact callback read
+     * as {@link WebhookVerdict#UNKNOWN_ORDER}: PPOB1 was being told about one of its own sales and
+     * had nothing to match it on.
+     *
+     * <p>Note what this fixture is and is not. {@code SUBMITTING} with no upstream id is the shape a
+     * lost create response leaves, but that orphan never produces a callback at all — no QR reached
+     * anyone, so the order expires unpaid, and {@code EXPIRED} fires nothing. The same row shape
+     * also covers a sale whose pointer was lost after the order went live, which does. See
+     * {@link WebhookVerdict#RECOVERED_BY_RESELLER_ID} for the full scope.
+     */
+    @Test
+    void anUnknownOrderIsRecoveredByTheResellersOwnId() {
+        String raw = bodyWithResellerId("ORD-RECOVERED", "SUCCESS", "n1", "PPOB1-TX-1");
+        Ppob1Transaction orphan = orphanedSubmit();
+        given(transactionRepository.findByPpob2OrderId("ORD-RECOVERED")).willReturn(Optional.empty());
+        given(transactionRepository.findByResellerTxnId("PPOB1-TX-1")).willReturn(Optional.of(orphan));
+
+        WebhookVerdict verdict = service.ingest(raw, TIMESTAMP, "n1", signatureFor(raw, "n1"));
+
+        assertThat(verdict).isEqualTo(WebhookVerdict.RECOVERED_BY_RESELLER_ID);
+        assertThat(orphan.getPpob2OrderId()).isEqualTo("ORD-RECOVERED");
+        assertThat(orphan.getLocalState()).isEqualTo(LocalState.COMPLETED);
+        assertThat(orphan.getPpob2State()).isEqualTo("SUCCESS");
+        assertThat(orphan.getLastSource()).isEqualTo(StateSource.WEBHOOK);
+        verify(transactionRepository).save(orphan);
+    }
+
+    @Test
+    void aResellerIdPpob1NeverIssuedIsStillAnUnknownOrder() {
+        String raw = bodyWithResellerId("ORD-GHOST", "SUCCESS", "n1", "SOMEONE-ELSES-TX");
+        given(transactionRepository.findByPpob2OrderId("ORD-GHOST")).willReturn(Optional.empty());
+        given(transactionRepository.findByResellerTxnId("SOMEONE-ELSES-TX")).willReturn(Optional.empty());
+
+        assertThat(service.ingest(raw, TIMESTAMP, "n1", signatureFor(raw, "n1")))
+                .isEqualTo(WebhookVerdict.UNKNOWN_ORDER);
+        verify(transactionRepository, never()).save(any());
+    }
+
+    /**
+     * The guard that makes matching on a reseller's own id safe to do at all. That id is unique in
+     * PPOB1 but not necessarily upstream: PPOB2's idempotency key is per
+     * {@code (client_id, idempotency_key)} and Section 22.3 lets one partner hold several
+     * {@code api_client} rows, so the same reseller id sent through two of them produces two orders.
+     * Adopting here would replace the order PPOB1 is tracking and leave one record for two orders.
+     */
+    @Test
+    void aResellerIdAlreadyHeldAgainstADifferentOrderIsAConflictAndChangesNothing() {
+        String raw = bodyWithResellerId("ORD-SECOND", "SUCCESS", "n1", "PPOB1-TX-1");
+        Ppob1Transaction pinned = awaitingPayment("ORD-FIRST");
+        given(transactionRepository.findByPpob2OrderId("ORD-SECOND")).willReturn(Optional.empty());
+        given(transactionRepository.findByResellerTxnId("PPOB1-TX-1")).willReturn(Optional.of(pinned));
+
+        WebhookVerdict verdict = service.ingest(raw, TIMESTAMP, "n1", signatureFor(raw, "n1"));
+
+        assertThat(verdict).isEqualTo(WebhookVerdict.ORDER_ID_CONFLICT);
+        assertThat(pinned.getPpob2OrderId()).isEqualTo("ORD-FIRST");
+        assertThat(pinned.getLocalState()).isEqualTo(LocalState.AWAITING_PAYMENT);
+        verify(transactionRepository, never()).save(any());
+    }
+
+    /**
+     * {@code REJECTED} is the other state that holds no upstream order id, and the guard is on the
+     * id rather than on the state deliberately. This is in fact the <b>strongest</b> case for the
+     * whole mechanism, not an afterthought: a {@code 409 IDEMPOTENCY_KEY_CONFLICT} is the one
+     * refusal PPOB2 issues while an order for that key does exist, and
+     * {@code ReconciliationService} excludes {@code REJECTED} from its working set — so recon will
+     * never look at that row again and the callback is the only thing that can ever correct it.
+     */
+    @Test
+    void aRejectedSaleIsAlsoRecoverableAndKeepsWhyItWasRejected() {
+        String raw = bodyWithResellerId("ORD-EXISTED-ANYWAY", "SUCCESS", "n1", "PPOB1-TX-1");
+        Ppob1Transaction rejected = new Ppob1Transaction(
+                "PPOB1-TX-1", "MOBILE_LEGENDS", BigInteger.valueOf(20000), "GAMEID-1");
+        rejected.rejectedByPpob2("IDEMPOTENCY_KEY_CONFLICT", "Idempotency-Key already used.");
+        given(transactionRepository.findByPpob2OrderId("ORD-EXISTED-ANYWAY")).willReturn(Optional.empty());
+        given(transactionRepository.findByResellerTxnId("PPOB1-TX-1")).willReturn(Optional.of(rejected));
+
+        WebhookVerdict verdict = service.ingest(raw, TIMESTAMP, "n1", signatureFor(raw, "n1"));
+
+        assertThat(verdict).isEqualTo(WebhookVerdict.RECOVERED_BY_RESELLER_ID);
+        assertThat(rejected.getPpob2OrderId()).isEqualTo("ORD-EXISTED-ANYWAY");
+        assertThat(rejected.getLocalState()).isEqualTo(LocalState.COMPLETED);
+        // Kept, not cleared. A COMPLETED row still carrying a rejection code is the whole finding:
+        // PPOB2 refused this sale at create time and an order for it reached a terminal state
+        // anyway. Clearing them would make this indistinguishable from an ordinary recovery.
+        assertThat(rejected.getRejectionCode()).isEqualTo("IDEMPOTENCY_KEY_CONFLICT");
+        assertThat(rejected.getRejectionMessage()).isEqualTo("Idempotency-Key already used.");
+    }
+
+    @Test
+    void aCallbackWithNoResellerIdAtAllNeverReachesTheSecondLookup() {
+        // Every order placed before PPOB2's V23 carries no metadata, and so no reseller id. The
+        // recovery must degrade to the old behaviour rather than querying for null.
+        String raw = body("ORD-GHOST", "SUCCESS", "n1");
+        given(transactionRepository.findByPpob2OrderId("ORD-GHOST")).willReturn(Optional.empty());
+
+        assertThat(service.ingest(raw, TIMESTAMP, "n1", signatureFor(raw, "n1")))
+                .isEqualTo(WebhookVerdict.UNKNOWN_ORDER);
+        verify(transactionRepository, never()).findByResellerTxnId(any());
+    }
+
+    @Test
+    void anInvalidSignatureIsNotRecoveredEither() {
+        // The reseller id is read only after the signature verifies, and that ordering is what
+        // makes it safe to act on: it is an authenticated echo of PPOB1's own id, not a lookup key
+        // a caller gets to choose. Otherwise anyone reaching this endpoint could attach an order id
+        // of their choosing to any open sale.
+        String raw = bodyWithResellerId("ORD-ATTACKER", "SUCCESS", "n1", "PPOB1-TX-1");
+        Ppob1Transaction orphan = orphanedSubmit();
+        given(transactionRepository.findByResellerTxnId("PPOB1-TX-1")).willReturn(Optional.of(orphan));
+
+        assertThat(service.ingest(raw, TIMESTAMP, "n1", "00".repeat(32)))
+                .isEqualTo(WebhookVerdict.REJECTED_SIGNATURE);
+        assertThat(orphan.getPpob2OrderId()).isNull();
+        verify(transactionRepository, never()).findByResellerTxnId(any());
+        verify(transactionRepository, never()).save(any());
     }
 
     @Test

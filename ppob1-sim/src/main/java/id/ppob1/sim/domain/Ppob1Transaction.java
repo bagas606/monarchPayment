@@ -143,6 +143,36 @@ public class Ppob1Transaction {
         this.updatedAt = Instant.now();
     }
 
+    /**
+     * Learns the upstream order id from a Section 23.8 callback that matched on
+     * {@code reseller_txn_id} — the orphaned-submit recovery, see
+     * {@link WebhookVerdict#RECOVERED_BY_RESELLER_ID}.
+     *
+     * <p>Throws rather than overwriting if an id is already held. The caller checks the same thing
+     * before calling, so this is the guard behind the guard: the whole danger of matching on a
+     * reseller's own id is that the id is unique in PPOB1 but not necessarily upstream, and one
+     * careless {@code adopt} would replace the order PPOB1 is tracking with a different one and
+     * leave no trace.
+     *
+     * <p>Reaching this with an id already set is a bug in the caller, and the failure is not quiet:
+     * the exception escapes {@code WebhookIngestService.ingest}, which is {@code @Transactional}, so
+     * the transaction rolls back and <b>no {@code ppob1_inbound_webhook} row is written either</b> —
+     * PPOB1 answers {@code 500} and PPOB2 schedules a retry. Losing the receipt is a real cost, and
+     * it is still the right trade against silently repointing a sale at a different order: the retry
+     * brings the event back, and a {@code 500} is visible.
+     *
+     * <p>Does not apply the state: the caller does that through {@link #applyPpob2State} so the
+     * {@link StateSource} stays its decision, and so this method does exactly one thing.
+     */
+    public void adoptPpob2OrderId(String orderId) {
+        if (this.ppob2OrderId != null) {
+            throw new IllegalStateException("ppob1_transaction " + id + " already holds order id "
+                    + this.ppob2OrderId + "; refusing to adopt " + orderId);
+        }
+        this.ppob2OrderId = orderId;
+        this.updatedAt = Instant.now();
+    }
+
     /** Used when PPOB2 no longer recognises an order id PPOB1 holds — see {@link LocalState#UNKNOWN}. */
     public void markUnknown() {
         this.localState = LocalState.UNKNOWN;

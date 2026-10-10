@@ -87,7 +87,8 @@ public class OutboundWebhookOrchestrator {
             }
             WebhookDeliveryTarget t = target.get();
 
-            OutboundWebhookDeliveryResult result = sender.send(t.callbackUrl(), t.webhookSecret(), t.orderNo(), t.state());
+            OutboundWebhookDeliveryResult result = sender.send(
+                    t.callbackUrl(), t.webhookSecret(), t.orderNo(), t.state(), t.resellerTxnId());
 
             webhookEventRecorder.recordIndependently(WebhookDirection.OUTBOUND, t.partnerCode(), eventType,
                     result.requestBody(), result.success() ? "SUCCESS" : "FAILED", null);
