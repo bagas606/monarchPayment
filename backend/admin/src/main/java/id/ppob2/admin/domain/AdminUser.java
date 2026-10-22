@@ -39,6 +39,18 @@ public class AdminUser {
     @Column(name = "last_login_at")
     private Instant lastLoginAt;
 
+    @Column(name = "mfa_secret")
+    private String mfaSecret;
+
+    @Column(name = "mfa_last_step")
+    private Long mfaLastStep;
+
+    @Column(name = "failed_logins", nullable = false)
+    private int failedLogins;
+
+    @Column(name = "locked_until")
+    private Instant lockedUntil;
+
     protected AdminUser() {
     }
 
@@ -63,5 +75,62 @@ public class AdminUser {
 
     public boolean isActive() {
         return "ACTIVE".equals(status);
+    }
+
+    public boolean isMfaEnabled() {
+        return mfaEnabled;
+    }
+
+    /** AES-GCM ciphertext, never the TOTP secret itself. */
+    public String getMfaSecret() {
+        return mfaSecret;
+    }
+
+    public Long getMfaLastStep() {
+        return mfaLastStep;
+    }
+
+    public boolean isLocked(Instant now) {
+        return lockedUntil != null && now.isBefore(lockedUntil);
+    }
+
+    /** Overwrites any earlier unconfirmed secret; the account is not MFA-protected until {@link #confirmMfa}. */
+    public void beginMfaEnrollment(String encryptedSecret) {
+        this.mfaSecret = encryptedSecret;
+        this.mfaEnabled = false;
+        this.mfaLastStep = null;
+    }
+
+    public void confirmMfa(long step) {
+        this.mfaEnabled = true;
+        this.mfaLastStep = step;
+    }
+
+    /** Replay protection: a step must be strictly newer than the last accepted one. */
+    public boolean canAcceptMfaStep(long step) {
+        return mfaLastStep == null || step > mfaLastStep;
+    }
+
+    public void acceptMfaStep(long step) {
+        this.mfaLastStep = step;
+    }
+
+    public void recordLoginFailure(Instant now, int maxFailures, java.time.Duration lockout) {
+        this.failedLogins++;
+        if (this.failedLogins >= maxFailures) {
+            this.lockedUntil = now.plus(lockout);
+            this.failedLogins = 0;
+        }
+    }
+
+    /** A correct password clears the failure streak even when MFA is still owed; the streak guards guessing. */
+    public void resetFailuresOnly() {
+        this.failedLogins = 0;
+    }
+
+    public void recordLoginSuccess(Instant now) {
+        this.failedLogins = 0;
+        this.lockedUntil = null;
+        this.lastLoginAt = now;
     }
 }

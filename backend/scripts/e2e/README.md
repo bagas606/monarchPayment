@@ -23,7 +23,7 @@ Bring up Postgres, the app and the seed fixture as described in the
 injection knobs below rather than a bare `bootRun`. Then, from `backend/`:
 
 ```bash
-scripts/e2e/run-core.sh                  # 177 assertions
+scripts/e2e/run-core.sh                  # 178 assertions
 scripts/e2e/run-routing-and-sweeps.sh    # 15 assertions, ~2 min (waits on the 60s sweep tick)
 ```
 
@@ -58,11 +58,23 @@ binding strips hyphens *within* a property segment but not underscores *between*
 naive all-underscores name silently does not bind.
 
 ```bash
+PPOB2_ADMIN_BASIC_AUTH_ENABLED=true \
 PPOB2_FULFILLMENT_STUBPROVIDER_FAILPROVIDERSKUIDS=2 \
 PPOB2_FULFILLMENT_STUBPROVIDER_AMBIGUOUSPROVIDERSKUIDS=3 \
 PPOB2_FULFILLMENT_STUBPROVIDER_TIMEOUTPROVIDERSKUIDS=4 \
 ./gradlew :app:bootRun
 ```
+
+`PPOB2_ADMIN_BASIC_AUTH_ENABLED=true` is the fourth requirement, added with Section 42.3's sessions: HTTP
+Basic is off by default because it carries no MFA, and these suites authenticate with `curl -u`.
+`run-core.sh`, `run-refund-gateway.sh` and `run-backoffice-read.sh` run a preflight that stops with this
+flag's name if it is missing, rather than failing dozens of assertions with 401.
+
+`run-admin-auth.sh` (89 assertions) is the opposite case: it boots **its own** instance on `:8081` with Basic
+*off* and timeouts of a few seconds, because it is testing exactly that posture. Run it after `run-core.sh`
+(it adds audit rows, and `run-core.sh` asserts absolute audit counts). It needs the built jar
+(`./gradlew :app:bootJar`), `python3` for the TOTP codes, and takes ~3 minutes, most of it waiting for TOTP
+time-steps and the timeouts to elapse.
 
 ## The pieces
 

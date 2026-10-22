@@ -23,4 +23,9 @@ public interface AdminUserRepository extends JpaRepository<AdminUser, Long> {
             + "JOIN permission p ON p.id = rp.permission_id "
             + "WHERE aur.admin_user_id = :adminUserId", nativeQuery = true)
     List<String> findPermissionCodes(@Param("adminUserId") Long adminUserId);
+
+    /** Role codes, used to decide whether Section 42.3 makes MFA mandatory for this admin. */
+    @Query(value = "SELECT r.code FROM admin_user_role aur JOIN role r ON r.id = aur.role_id "
+            + "WHERE aur.admin_user_id = :adminUserId", nativeQuery = true)
+    List<String> findRoleCodes(@Param("adminUserId") Long adminUserId);
 }

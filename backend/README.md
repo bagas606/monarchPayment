@@ -2515,10 +2515,70 @@ Known gaps to close before this is production-real:
     which is why it was fixed here rather than left as the known-pre-existing item.
   - **Closes** `TC-ADM-006` (search by `customer_reference`) and `TC-ADM-007` (parent -> payment ->
     pattern -> child orders -> provider transactions in one response).
-  - **Verified**: 213 PPOB2 unit tests (was 203); `run-core.sh` 177/177; new `run-backoffice-read.sh`
+  - **Verified**: 213 PPOB2 unit tests (was 203); `run-core.sh` 178/178 (177 + the TECH_SUPPORT boundary assertion that replaced the FINANCE one); new `run-backoffice-read.sh`
     95/95 - RBAC matrix over five roles, paging/clamp/`has_more`, every filter against the database,
     bad-parameter 400s with an absence check for Java types, and planted secrets (callback URL token,
     metadata api key, audit `password_hash`) asserted *absent* from the response.
+
+- **2026-10-22 - Admin sessions and TOTP MFA (Section 42.3).** `POST /admin/auth/login`,
+  `/admin/auth/mfa/verify`, `/admin/auth/mfa/enroll`, `/admin/auth/mfa/confirm`, `/admin/auth/logout`,
+  `GET /admin/auth/me`, `POST /admin/auth/sessions/revoke`. Logic in `admin/.../session`, HTTP in `app`.
+  - **HTTP Basic is now OFF by default - and that is the point, not a side effect.** Basic carries no
+    TOTP, so while it is accepted MFA is bypassed for whoever uses it, including the SUPER_ADMIN /
+    FINANCE / RECONCILIATION accounts Section 42.3 makes MFA mandatory for. `ppob2.admin.basic-auth-enabled`
+    (env `PPOB2_ADMIN_BASIC_AUTH_ENABLED`) turns it back on for the dev seed and the suites that
+    authenticate with `curl -u`; booting with it on logs a WARN. `deploy/docker-compose.prod.yml` pins it
+    `false`. `run-core.sh`, `run-refund-gateway.sh` and `run-backoffice-read.sh` now source
+    `preflight-basic.sh`, which stops with the flag's name instead of letting a default boot produce dozens
+    of unrelated-looking 401 failures.
+  - **Opaque tokens in a table, not JWTs.** Section 42.3 requires sessions "revocable on logout /
+    administrative action"; a JWT cannot be revoked without a server-side list, and then the list is the
+    session store. Only the SHA-256 of a token is stored (`admin_session.token_hash`), so a database read
+    yields nothing usable. Asserted: no row contains the raw token, one contains its hash.
+  - **Idle (30 min) slides; absolute (8 h) never does.** Both are properties so `run-admin-auth.sh` can
+    set 6 s / 15 s and watch them fire: a session used every 4 s for 12 s survives the idle limit, then
+    dies at 15 s with `revoked_reason = EXPIRED_ABSOLUTE`. A password-only session lives 5 minutes.
+  - **A pending session authenticates as `ROLE_PENDING_MFA` and nothing else**, carrying the account's
+    identity but none of its permissions, so no URL rule can accidentally open data to it. **Promotion
+    rotates the token** (old row revoked as `PROMOTED`): the credential that existed before the second
+    factor was proven must not be the one that outlives it.
+  - **TOTP is hand-written (RFC 6238, HMAC-SHA1)** and checked against the RFC's Appendix B vectors, all six.
+    Replay: `admin_user.mfa_last_step` must be strictly exceeded, so a code seen once is dead for its
+    whole window (asserted over HTTP: the same code on a second login -> 401). Attempts: five wrong codes
+    revoke the session, after which even the right code is refused. The secret is AES-256-GCM encrypted at
+    rest with a key from configuration (`ppob2.admin.mfa.encryption-key`), never stored plain; with no key,
+    enrolment is refused (503) rather than falling back to plaintext.
+  - **Mandatory MFA is a login state, not a flag.** A SUPER_ADMIN/FINANCE/RECONCILIATION account with no
+    enrolment gets `MFA_ENROLLMENT_REQUIRED`: the session may enrol and nothing else, and `mfa_enabled` is set
+    only after a confirming code. Re-enrolling an enrolled account is a 409: replacing the second factor
+    from a live session would let a hijacked session lock the real owner out.
+  - **Cookie vs Bearer.** The browser UI gets an `HttpOnly; SameSite=Strict` cookie and the token is not in
+    the body unless `return_token: true`. A cookie is ambient, so state-changing requests carrying one need
+    `X-CSRF-Token` equal to a value derived from the token; `Authorization: Bearer` is not ambient and is
+    exempt. Spring's own CSRF filter stays off (it is session-based).
+  - **Brute force.** Five wrong passwords lock the account for 15 minutes; a locked account answers the
+    same generic 401 for the *right* password, so lockout is not an oracle. Unknown user and wrong
+    password return the identical message and cost the same (a dummy BCrypt check).
+  - **Audited**, per 42.3: failures still flow through Spring's failure event to the existing
+    `AdminSecurityAuditListener`; new rows for `ADMIN_LOGIN_SUCCESS`, `ADMIN_MFA_CHALLENGE_SUCCESS/FAILED`,
+    `ADMIN_MFA_ENROLLMENT_STARTED/FAILED`, `ADMIN_MFA_ENROLLED`, `ADMIN_LOGOUT`, `ADMIN_SESSIONS_REVOKED`.
+    The submitted password, the TOTP secret and codes are asserted absent from `audit_log`.
+  - **Found only by running it:** the first live enrolment answered "Start enrolment first" right after
+    starting one. `Resolved` carries entities from the filter's transaction; with open-in-view off they
+    are detached by the time a controller calls the service, and a change to a detached entity is silently
+    not saved - the audit row was written, the secret was not. Every service method taking a `Resolved`
+    now re-loads it inside its own transaction. The mocked-repository unit tests could not have seen it:
+    a mock returns the same instance. `V27` also first used `CHAR(64)`, which Hibernate's schema validation
+    rejects against a `String` (the same trap `V8` documents); it is `VARCHAR(64)`.
+  - **Not done, on purpose:** MFA reset for a locked-out user (a DB operation, by design), per-IP rate
+    limiting at the edge, and `Secure`-cookie behaviour is covered by config only (the e2e boots with
+    `cookie-secure=false` because it runs over plain HTTP).
+  - **`V27`** adds `admin_session`, four `admin_user` columns and the `session:revoke` permission
+    (SUPER_ADMIN only, explicit grant per V19).
+  - **Verified**: 238 PPOB2 unit tests (was 213) incl. RFC 6238 vectors and a clock-driven session state
+    machine; new `run-admin-auth.sh` 89/89 on its own instance (Basic off, 6 s / 15 s / 8 s timeouts), run
+    twice; `run-core.sh` 178/178, `run-backoffice-read.sh` 95/95 and `run-routing-and-sweeps.sh` 15/15 on a
+    Basic-enabled boot.
 
 ## Running locally
 
@@ -2749,6 +2809,10 @@ python -c "import bcrypt; print(bcrypt.hashpw(b'<your-password>', bcrypt.gensalt
 ```sql
 INSERT INTO admin_user (username, password_hash) VALUES ('admin1', '<paste hash here>');
 ```
+
+> **HTTP Basic is off by default** since Section 42.3's sessions landed (see the 2026-10-22 entry below).
+> The `curl -u` examples here need the app booted with `PPOB2_ADMIN_BASIC_AUTH_ENABLED=true`, which also
+> bypasses MFA - local development only. The real login is `POST /admin/auth/login`.
 
 ```bash
 curl -X POST -u admin1:<your-password> http://localhost:8080/admin/reconciliations/1/investigate

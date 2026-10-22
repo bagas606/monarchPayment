@@ -2,6 +2,7 @@
 # Final clean-slate verification pass. Assumes: fresh DB, seeded via dev-seed.sql, app up on 8080
 # with fail=2 ambiguous=3 timeout=4.
 SP="$(cd "$(dirname "$0")" && pwd)"
+. "$SP/preflight-basic.sh"
 CALL="$SP/call.sh"; CB="$SP/cb.sh"; Q="$SP/q.sh"
 pass=0; fail=0
 ok()   { echo "  PASS  $1"; pass=$((pass+1)); }

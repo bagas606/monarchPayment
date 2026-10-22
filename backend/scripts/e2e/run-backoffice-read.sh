@@ -6,6 +6,7 @@
 # Only mutates rows it creates itself or restores: three marker values on existing rows, put back at the end.
 # Assumes the app is up on :8080 with Basic auth enabled (see scripts/e2e/README.md).
 SP="$(cd "$(dirname "$0")" && pwd)"
+. "$SP/preflight-basic.sh"
 Q="$SP/q.sh"
 B="${PPOB2_BASE_URL:-http://localhost:8080}"
 SU="-u superadmin:admin123"

@@ -1,6 +1,14 @@
 package id.ppob2.app.security;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import id.ppob2.admin.security.AdminUserDetailsService;
+import id.ppob2.admin.session.AdminProperties;
+import id.ppob2.admin.session.AdminSessionService;
+import id.ppob2.app.web.CorrelationIdFilter;
+import id.ppob2.sharedkernel.error.ErrorCode;
+import id.ppob2.sharedkernel.error.ErrorResponse;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.security.web.authentication.www.BasicAuthenticationFilter;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
@@ -20,6 +28,7 @@ import org.springframework.security.web.SecurityFilterChain;
  * that already passed the HMAC filter through to the controllers.
  */
 @Configuration
+@EnableConfigurationProperties(AdminProperties.class)
 @EnableWebSecurity
 @EnableMethodSecurity
 public class SecurityConfig {
@@ -79,18 +88,42 @@ public class SecurityConfig {
      */
     @Bean
     public SecurityFilterChain adminFilterChain(HttpSecurity http, AdminUserDetailsService adminUserDetailsService,
-                                                 PasswordEncoder passwordEncoder) throws Exception {
+                                                 PasswordEncoder passwordEncoder, AdminProperties adminProperties,
+                                                 AdminSessionService sessionService, ObjectMapper objectMapper)
+            throws Exception {
         DaoAuthenticationProvider authProvider = new DaoAuthenticationProvider();
         authProvider.setUserDetailsService(adminUserDetailsService);
         authProvider.setPasswordEncoder(passwordEncoder);
 
         http
                 .securityMatcher("/admin/**", "/internal/settlement/**")
+                // Spring's CSRF filter is off because it is session-based; the cookie path has its own
+                // double-submit check in AdminSessionAuthenticationFilter, and Bearer/Basic callers are
+                // not ambient credentials a cross-site page can ride.
                 .csrf(csrf -> csrf.disable())
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authenticationProvider(authProvider)
-                .httpBasic(basic -> {})
-                .authorizeHttpRequests(auth -> auth.anyRequest().hasRole("ADMIN"));
+                .addFilterBefore(new AdminSessionAuthenticationFilter(sessionService, adminProperties, objectMapper),
+                        BasicAuthenticationFilter.class)
+                .authorizeHttpRequests(auth -> auth
+                        .requestMatchers("/admin/auth/login").permitAll()
+                        // A pending (password-only) session may reach exactly these, and nothing else.
+                        .requestMatchers("/admin/auth/mfa/**", "/admin/auth/logout")
+                                .hasAnyRole("ADMIN", "PENDING_MFA")
+                        .anyRequest().hasRole("ADMIN"));
+        if (adminProperties.basicAuthEnabled()) {
+            http.httpBasic(basic -> {});
+        } else {
+            // No Basic means no WWW-Authenticate challenge (a browser would pop its own login box) and a
+            // JSON 401 instead of Spring's default 403 for "no authentication mechanism configured".
+            http.exceptionHandling(eh -> eh.authenticationEntryPoint((request, response, ex) -> {
+                response.setStatus(401);
+                response.setContentType("application/json");
+                Object correlation = request.getAttribute(CorrelationIdFilter.ATTRIBUTE);
+                objectMapper.writeValue(response.getWriter(), ErrorResponse.of(ErrorCode.AUTHENTICATION_FAILED,
+                        "Authentication required.", correlation == null ? null : correlation.toString()));
+            }));
+        }
         return http.build();
     }
 

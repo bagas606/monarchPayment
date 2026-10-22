@@ -73,11 +73,14 @@ payment callback, and the dev-only failure-injection knobs.
 
 ```bash
 cd backend
-./gradlew build                          # 38 unit / slice test classes + ArchUnit (213 tests)
-scripts/e2e/run-core.sh                  # 177 assertions against a running app + real Postgres
+# The e2e suites authenticate to /admin/** with `curl -u`. HTTP Basic is OFF by default (it carries no MFA),
+# so boot the app for them with:  PPOB2_ADMIN_BASIC_AUTH_ENABLED=true
+./gradlew build                          # 38 unit / slice test classes + ArchUnit (238 tests)
+scripts/e2e/run-core.sh                  # 178 assertions against a running app + real Postgres
 scripts/e2e/run-routing-and-sweeps.sh    # 15 assertions (waits on the 60s expiry-sweep tick)
 scripts/e2e/run-refund-gateway.sh        # 15 assertions; needs its own boot flag, see its header
 scripts/e2e/run-backoffice-read.sh       # 95 assertions; run after run-core.sh, it reads what that left behind
+scripts/e2e/run-admin-auth.sh            # 89 assertions; boots its own app on :8081 (sessions, MFA, timeouts)
 
 cd ../ppob1-sim
 ./gradlew test                           # 65 unit tests for the PPOB1 side

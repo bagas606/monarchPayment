@@ -48,6 +48,14 @@ services:
       PPOB2_AYOLINX_PRIVATE_KEY_PEM: ${PPOB2_AYOLINX_PRIVATE_KEY_PEM:-}
       PPOB2_AYOLINX_PUBLIC_KEY_PEM: ${PPOB2_AYOLINX_PUBLIC_KEY_PEM:-}
       PPOB2_BUSINESS_ZONE: ${PPOB2_BUSINESS_ZONE:-UTC}
+      # Section 42.3. Basic auth carries no MFA, so it is pinned OFF here whatever the host environment says.
+      PPOB2_ADMIN_BASIC_AUTH_ENABLED: "false"
+      # Encrypts TOTP secrets at rest. Required: without it SUPER_ADMIN / FINANCE / RECONCILIATION cannot sign in.
+      # Losing this key invalidates every enrolled authenticator - back it up with the database.
+      PPOB2_ADMIN_MFA_ENCRYPTION_KEY: "${PPOB2_ADMIN_MFA_ENCRYPTION_KEY:?set PPOB2_ADMIN_MFA_ENCRYPTION_KEY in deploy/.env (openssl rand -base64 32)}"
+      # Behind Caddy the TCP peer is always Caddy; trust X-Forwarded-For so audit_log.ip_address is the admin's.
+      # Safe only because the app is not published on the host - nothing else can reach it to forge the header.
+      SERVER_FORWARD_HEADERS_STRATEGY: native
     # Only reachable from Caddy, never published on the host.
     expose:
       - "8080"

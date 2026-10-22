@@ -11,13 +11,14 @@ Internet :443 -> Caddy (TLS, path allow-list) -> app :8080 -> Postgres (not publ
 
 1. A server with Docker + the compose plugin, and a DNS A record for your domain pointing at it
    (Caddy requests the certificate on first start). Ports 80 and 443 open.
-2. `cp deploy/.env.example deploy/.env` and fill it in (`PPOB2_DOMAIN`, `PPOB2_DB_PASSWORD` are required).
+2. `cp deploy/.env.example deploy/.env` and fill it in (`PPOB2_DOMAIN`, `PPOB2_DB_PASSWORD` and `PPOB2_ADMIN_MFA_ENCRYPTION_KEY` are required).
 3. From `backend/`:
    ```bash
    docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env up -d --build
    docker compose -f deploy/docker-compose.prod.yml logs -f app   # wait for "Started Ppob2Application"
    ```
-   Flyway migrates from zero on first boot. Nothing is seeded: `scripts/e2e/dev-seed.sql` carries dev
+   Flyway migrates from zero on first boot. HTTP Basic is disabled in this stack: admins sign in at
+   `POST /admin/auth/login` (see `backend/README.md`, 2026-10-22). Nothing is seeded: `scripts/e2e/dev-seed.sql` carries dev
    credentials, so create your partner, API client and admin user deliberately instead of loading it.
 
 ## What is and is not exposed
