@@ -43,6 +43,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
 public class AdminSessionAuthenticationFilter extends OncePerRequestFilter {
 
     public static final String REQUEST_ATTRIBUTE = "ppob2.admin.session";
+    public static final String TOKEN_ATTRIBUTE = "ppob2.admin.token";
     public static final String CSRF_HEADER = "X-CSRF-Token";
     private static final Set<String> SAFE_METHODS = Set.of("GET", "HEAD", "OPTIONS");
 
@@ -92,6 +93,7 @@ public class AdminSessionAuthenticationFilter extends OncePerRequestFilter {
                         List.of(new SimpleGrantedAuthority("ROLE_PENDING_MFA")));
         SecurityContextHolder.getContext().setAuthentication(authentication);
         request.setAttribute(REQUEST_ATTRIBUTE, session);
+        request.setAttribute(TOKEN_ATTRIBUTE, token);
         chain.doFilter(request, response);
     }
 

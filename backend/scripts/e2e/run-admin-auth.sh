@@ -75,6 +75,17 @@ chk "...with no WWW-Authenticate (no browser popup)" "$(echo "$R" | grep -ci '^w
 
 AUD_FAILED0=$(scalar "select count(*) from audit_log where action='ADMIN_LOGIN_FAILED' and after_state->>'username' in ('ops1','nobody-here')")
 AUD_LOGOUT0=$(scalar "select count(*) from audit_log where action='ADMIN_LOGOUT'")
+echo "== Backoffice UI is served with its security headers =="
+UH=$(curl -s -i $B/backoffice/)
+chk "index is served"                                 "$(echo "$UH" | head -1 | grep -o '[0-9][0-9][0-9]')" 200
+chk "CSP forbids inline script and foreign origins"   "$(echo "$UH" | grep -i '^content-security-policy:' | grep -c "default-src 'none'; script-src 'self'")" 1
+chk "CSP forbids framing"                             "$(echo "$UH" | grep -i '^content-security-policy:' | grep -c "frame-ancestors 'none'")" 1
+chk "X-Frame-Options: DENY"                           "$(echo "$UH" | grep -ci '^x-frame-options: deny')" 1
+chk "Referrer-Policy: no-referrer"                    "$(echo "$UH" | grep -ci '^referrer-policy: no-referrer')" 1
+chk "page contains no inline script"                  "$(echo "$UH" | grep -ci '<script[^>]*>[^<]')" 0
+chk "bare /backoffice redirects to /backoffice/"      "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' $B/backoffice)" "302 $B/backoffice/"
+chk "the UI holds no data: an asset needs no login"   "$(curl -s -o /dev/null -w '%{http_code}' $B/backoffice/js/main.js)" 200
+
 echo "== Login failures =="
 R=$(login ops1 WRONGPW); chk "wrong password -> 401"  "$(code_of "$R")" 401
 M1=$(py "$(body_of "$R")" "d['message']")
@@ -101,6 +112,7 @@ chk "...the CSRF value is"                            "$(count "${H#*$'\r\n\r\n'
 
 echo "== Cookie + CSRF =="
 JAR_C=$(mktemp); CSRF=$(py "$(curl -s -c $JAR_C -X POST $B/admin/auth/login -H 'Content-Type: application/json' -d '{"username":"ops1","password":"admin123"}')" "d['csrf_token']")
+chk "/me hands a cookie session its CSRF value (the page cannot read the HttpOnly cookie to derive it)" "$(py "$(curl -s -b $JAR_C $B/admin/auth/me)" "d['csrf_token']")" "$CSRF"
 chk "cookie alone: GET -> 200"                        "$(curl -s -o /dev/null -w '%{http_code}' -b $JAR_C $B/admin/parent-orders?size=1)" 200
 chk "cookie, POST, no CSRF header -> 403"             "$(curl -s -o /dev/null -w '%{http_code}' -b $JAR_C -X POST $B/admin/auth/logout)" 403
 chk "cookie, POST, wrong CSRF -> 403"                 "$(curl -s -o /dev/null -w '%{http_code}' -b $JAR_C -H 'X-CSRF-Token: wrong' -X POST $B/admin/auth/logout)" 403

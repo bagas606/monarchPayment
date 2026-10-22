@@ -3,17 +3,21 @@
 #
 #   /api/v1/*                    partner Open API   (HMAC-signed, Section 23)
 #   /internal/webhooks/ayolinx   payment callback   (signature verified by the app)
-#   /admin/*                     Admin REST         (HTTP Basic + RBAC)
+#   /admin/*                     Admin REST         (session cookie / bearer token + RBAC + MFA)
+#   /backoffice/*                Admin UI           (static files; every datum still comes from /admin/*)
 #
 # Deliberately NOT exposed: /actuator/* (the compose healthcheck talks to the app directly) and
 # /internal/settlement/* (an ops trigger; run it from the host with `docker compose exec`).
 {$PPOB2_DOMAIN} {
 	encode zstd gzip
 
-	@exposed path /api/v1/* /internal/webhooks/ayolinx /admin/*
+	@exposed path /api/v1/* /internal/webhooks/ayolinx /admin/* /backoffice /backoffice/*
 	handle @exposed {
 		reverse_proxy app:8080
 	}
+
+	# The bare domain lands on the console instead of a 404.
+	redir / /backoffice/ 302
 
 	handle {
 		respond "Not found" 404

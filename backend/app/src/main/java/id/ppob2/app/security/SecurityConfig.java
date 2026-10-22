@@ -127,6 +127,37 @@ public class SecurityConfig {
         return http.build();
     }
 
+    /**
+     * The backoffice UI's static files. No authentication here - the page itself holds nothing; every
+     * byte of data comes from {@code /admin/**}, which is authenticated - but the headers matter, because
+     * this is the page that can drive refunds:
+     * <ul>
+     *   <li>CSP with no inline script/style and {@code connect-src 'self'}: an injected element cannot
+     *       run script or send data to another origin, which is the containment for an XSS bug the UI
+     *       already tries not to have (it builds the DOM with {@code textContent}, never {@code innerHTML}).</li>
+     *   <li>{@code frame-ancestors 'none'} / X-Frame-Options DENY: no clickjacking a refund button.</li>
+     *   <li>{@code no-referrer}: order numbers in the URL fragment never leave the origin.</li>
+     * </ul>
+     * Everything is served from the app itself - no CDN script or font on a payment back-office.
+     */
+    @Bean
+    public SecurityFilterChain backofficeUiFilterChain(HttpSecurity http) throws Exception {
+        http
+                .securityMatcher("/backoffice/**", "/backoffice")
+                .csrf(csrf -> csrf.disable())
+                .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .headers(headers -> headers
+                        .contentSecurityPolicy(csp -> csp.policyDirectives("default-src 'none'; script-src 'self'; "
+                                + "style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; "
+                                + "form-action 'self'; frame-ancestors 'none'"))
+                        .frameOptions(frame -> frame.deny())
+                        .referrerPolicy(ref -> ref.policy(
+                                org.springframework.security.web.header.writers.ReferrerPolicyHeaderWriter
+                                        .ReferrerPolicy.NO_REFERRER)))
+                .authorizeHttpRequests(auth -> auth.anyRequest().permitAll());
+        return http.build();
+    }
+
     @Bean
     public PasswordEncoder passwordEncoder() {
         return new BCryptPasswordEncoder();

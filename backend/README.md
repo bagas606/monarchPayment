@@ -2576,9 +2576,52 @@ Known gaps to close before this is production-real:
   - **`V27`** adds `admin_session`, four `admin_user` columns and the `session:revoke` permission
     (SUPER_ADMIN only, explicit grant per V19).
   - **Verified**: 238 PPOB2 unit tests (was 213) incl. RFC 6238 vectors and a clock-driven session state
-    machine; new `run-admin-auth.sh` 89/89 on its own instance (Basic off, 6 s / 15 s / 8 s timeouts), run
-    twice; `run-core.sh` 178/178, `run-backoffice-read.sh` 95/95 and `run-routing-and-sweeps.sh` 15/15 on a
+    machine; new `run-admin-auth.sh` 98/98 on its own instance (Basic off, 6 s / 15 s / 8 s timeouts; 89 of
+    those are session/MFA, 9 the UI's headers and `/me`), run several times; `run-core.sh` 178/178, `run-backoffice-read.sh` 95/95 and `run-routing-and-sweeps.sh` 15/15 on a
     Basic-enabled boot.
+
+- **2026-10-22 - Backoffice UI.** Static files under `app/src/main/resources/static/backoffice/`, served
+  by the app itself at `/backoffice/`: sign-in (with MFA challenge and mandatory enrolment), orders (list,
+  filters, detail with payment / pattern / children / deliveries / derived timeline), refund and child retry
+  through dialogs that demand a reason, payments, webhook log (rejected callbacks), reconciliation
+  (investigate / resolve), audit log, and session revocation. Sections are shown only if the account holds
+  the permission, and the server checks again on every call.
+  - **No build step, no dependencies, nothing loaded from another origin.** Plain ES modules; a Java build
+    stays one JVM build and the Dockerfile did not change. A payment back-office should not execute a script
+    or load a font from a CDN, so there is none.
+  - **Same origin, so the cookie session just works** - and so the CSP can say `default-src 'none'; script-src
+    'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'`, with no inline script or style
+    anywhere. That header set (plus `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`) is applied by its
+    own security filter chain for `/backoffice/**` and asserted by `run-admin-auth.sh`.
+  - **It builds the DOM, never HTML.** `dom.js` has no `innerHTML` path; partner-controlled text (customer
+    reference, order metadata, callback host) goes in as `textContent`. `ui-smoke.cjs` plants
+    `<img src=x onerror=window.__xss=1>` as a customer reference and asserts it is shown as literal text, ran no
+    code, and created no element.
+  - **The session token never touches script.** It is an `HttpOnly` cookie. After a reload the page has no way
+    to compute its CSRF value, so `GET /admin/auth/me` now returns it (safe: a cross-site page can neither
+    send the cookie under `SameSite=Strict` nor read the response).
+  - **Found by looking, not by asserting:** a screenshot showed the literal text "null" under the delivery
+    table. The page used the DOM's native `append`, which renders a `null` argument as the string "null", for
+    every optional section (`cond ? node : null`); `dom.js` now has `put`, and `ui-smoke.cjs` asserts no stray
+    `null` / `undefined` / `[object` text on each screen. That assertion was shown to discriminate by
+    restoring the bug and watching it fail. A second bug the first browser run found: `login.js` called a
+    function that used a `const` declared further down (a temporal-dead-zone error) and rendered nothing at
+    all - invisible to every HTTP-level test.
+  - **Driven in a real browser**: `scripts/e2e/ui-smoke.cjs` (Playwright + the preinstalled Chromium), 42
+    assertions: sign-in failure, MFA enrolment with a TOTP computed in the test, filtering (state lives in the
+    URL), drill-down, reload keeps the session, a refund through its dialog (empty reason refused client-side,
+    one audit row with the typed reason against the right admin), investigate, the rejected-callback view,
+    the audit log, sign-out invalidating the cookie, and no console errors beyond the 401s the run causes
+    itself. Dark mode and a 390px viewport were looked at in screenshots, not asserted.
+  - **Not built, deliberately:** catalog / pricing / configuration editing (Sections 41.3-41.6, 41.11), the
+    dashboard (41.1), and reconciliation resolution notes. This is a console over the read APIs and the admin
+    actions that already existed, not the whole of Section 41.
+  - **Not verified:** the Docker image (Docker Hub rate-limited every pull in this environment) and Caddy's
+    handling of the `/backoffice` allow-list and the `redir / /backoffice/` line.
+  - **Verified, whole repository, from an empty database in the documented order**: 238 PPOB2 and 65 PPOB1
+    unit tests; `run-core.sh` 178/178, `run-backoffice-read.sh` 95/95, `run-routing-and-sweeps.sh` 15/15
+    (Basic-enabled boot); `ui-smoke.cjs` 42/42 and `run-admin-auth.sh` 98/98 (Basic off, packaged jar);
+    `run-refund-gateway.sh` 15/15 (own boot); `run-ppob1.sh` 126/126 (both systems live).
 
 ## Running locally
 

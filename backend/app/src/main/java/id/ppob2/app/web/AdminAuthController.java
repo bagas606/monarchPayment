@@ -110,7 +110,12 @@ public class AdminAuthController {
         if (resolved.session().getState() != SessionState.ACTIVE) {
             throw new ApiException(ErrorCode.SESSION_STATE_INVALID, "Finish signing in first.");
         }
-        return ResponseEntity.ok(new SessionResponse("AUTHENTICATED", null, null,
+        // The browser holds the session in an HttpOnly cookie it cannot read, so after a page reload it has
+        // no way to learn its CSRF value except by asking. Handing it out here is safe: a cross-site page
+        // can neither send the cookie (SameSite=Strict) nor read this response (same-origin policy).
+        Object token = request.getAttribute(AdminSessionAuthenticationFilter.TOKEN_ATTRIBUTE);
+        String csrf = token == null ? null : SessionTokens.csrf(token.toString());
+        return ResponseEntity.ok(new SessionResponse("AUTHENTICATED", null, csrf,
                 resolved.session().getAbsoluteExpiresAt(), props.session().idleTimeout().toSeconds(),
                 view(resolved.user(), true)));
     }

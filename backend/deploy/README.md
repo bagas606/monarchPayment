@@ -23,7 +23,7 @@ Internet :443 -> Caddy (TLS, path allow-list) -> app :8080 -> Postgres (not publ
 
 ## What is and is not exposed
 
-Caddy forwards only `/api/v1/*`, `/internal/webhooks/ayolinx` and `/admin/*`; everything else is a 404.
+Caddy forwards only `/api/v1/*`, `/internal/webhooks/ayolinx`, `/admin/*` and `/backoffice/*`; the bare domain redirects to `/backoffice/`, everything else is a 404.
 `/actuator/*` and `/internal/settlement/*` are not reachable from outside. Postgres has no published port.
 
 ## Operating

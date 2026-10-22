@@ -27,7 +27,7 @@ HTTP. That isolation is what makes it a conformance test of Section 23.
 |---|---|
 | Ayolinx | `AyolinxPaymentGateway` is real; `StubQrisPaymentGateway` is the default (`ppob2.payment.gateway=stub`) |
 | Game providers | **Stub only** (`StubGameProviderAdapter`, `@Profile("!prod")`); the `prod` profile refuses to start. The main go-live blocker |
-| Admin Web | REST slice only, no UI |
+| Admin Web | REST API plus a small static console at `/backoffice/` (transactions, payments, callbacks, reconciliation, audit log). Not all of Section 41: no catalog / pricing / configuration editing, no dashboard |
 
 ---
 
@@ -144,20 +144,45 @@ in `CREATED`, or a submit that never arrived, remains manual.
 
 ## 5. Security boundaries
 
-Three Spring Security filter chains, matched by path, plus the outbound signature. They share no
+Four Spring Security filter chains, matched by path, plus the outbound signature. They share no
 authentication scheme.
 
 | Surface | Path | Authentication | Notes |
 |---|---|---|---|
 | Open API | `/api/v1/**` | `HmacAuthenticationFilter`: HMAC, ±5 min timestamp window, nonce replay check | Spring Security is `permitAll`; auth happens in the filter. `ChannelContextResolver` builds the `ChannelContext` |
 | PG callback | `/internal/webhooks/**` | Ayolinx RSA signature, verified in `PaymentCallbackService` | The stub gateway has its own HMAC scheme, dev only |
-| Admin | `/admin/**`, `/internal/settlement/**` | HTTP Basic against `admin_user` | The chain only proves "authenticated admin"; permissions are enforced per method by `@PreAuthorize("hasAuthority('…')")` |
+| Admin API | `/admin/**`, `/internal/settlement/**` | `AdminSessionAuthenticationFilter`: opaque session token (HttpOnly cookie or `Authorization: Bearer`), Section 42.3 | Idle 30 min (slides) and absolute 8 h (never extended); TOTP MFA mandatory for SUPER_ADMIN / FINANCE / RECONCILIATION. HTTP Basic exists only behind `ppob2.admin.basic-auth-enabled` (default **off**) because it cannot carry a TOTP code |
+| Backoffice UI | `/backoffice/**` | none: static files, no data | CSP with no inline script and `connect-src 'self'`, `X-Frame-Options: DENY`, `no-referrer`; everything it shows comes from the authenticated Admin API |
 | Outbound webhook | PPOB2 → partner `callback_url` | Signed with `partner.webhook_secret`, with nonce | The sender uses its own bare `ObjectMapper`, so the body does not depend on Spring's Jackson settings |
 
-RBAC (V19, V21, V22, V24) seeds only permissions something enforces: `retry:execute`,
-`reconciliation:investigate`, `reconciliation:resolve`, `reconciliation:view`, `settlement:ingest`,
-`refund:initiate`, `order:view`, across roles `SUPER_ADMIN`, `OPERATIONS`, `CUSTOMER_SERVICE`, `FINANCE`,
-`RECONCILIATION`, `TECH_SUPPORT`, `VIEWER`. Failed admin logins are audited by `AdminSecurityAuditListener`.
+### Admin sessions
+
+```
+login(password ok) --+-- MFA enrolled ----------> PENDING_MFA    --verify--> ACTIVE
+                     +-- role needs MFA, none ---> PENDING_ENROLL --confirm--> ACTIVE
+                     +-- otherwise --------------> ACTIVE
+```
+
+- A pending session authenticates as `ROLE_PENDING_MFA` only: it may call the MFA endpoints and nothing
+  else. Promotion **rotates the token**, so the credential that existed before the second factor was proven
+  is never the one that outlives it.
+- Only the SHA-256 of a token is stored (`admin_session.token_hash`). TOTP secrets are AES-256-GCM encrypted
+  with a key from configuration; replay is blocked by `admin_user.mfa_last_step`; five wrong codes revoke
+  the session; five wrong passwords lock the account for 15 minutes.
+- A cookie is ambient, so cookie-authenticated state-changing requests need `X-CSRF-Token` (derived from the
+  token; `GET /admin/auth/me` returns it). `Authorization: Bearer` is not ambient and is exempt.
+- Admin service methods re-load the session and user inside their own transaction: the filter's entities
+  are detached by the time a controller runs, and with open-in-view off a change to a detached entity is
+  silently dropped (this lost an MFA secret on the first live run).
+
+### RBAC
+
+Permissions are seeded only when something enforces them: `retry:execute`, `reconciliation:investigate`,
+`reconciliation:resolve`, `reconciliation:view`, `settlement:ingest`, `refund:initiate`, `order:view`,
+`payment:view`, `audit:view`, `session:revoke`, across roles `SUPER_ADMIN`, `OPERATIONS`,
+`CUSTOMER_SERVICE`, `FINANCE`, `RECONCILIATION`, `TECH_SUPPORT`, `VIEWER` (V19, V21, V22, V24, V26, V27; each
+migration argues its grants). Audited: failed logins, login success, MFA challenges and enrolment, logout,
+session revocation, permission denials. Passwords, TOTP secrets and codes are asserted absent from `audit_log`.
 
 `CorrelationIdFilter` tags every request. `GlobalExceptionHandler` is the single place that shapes error
 bodies (`error_code`, `message`, `details`) and must not echo internals such as Java types or raw input.
@@ -167,7 +192,7 @@ bodies (`error_code`, `message`, `details`) and must not echo internals such as 
 ## 6. Data conventions
 
 One PostgreSQL schema, managed only by Flyway (`ddl-auto: validate`, so a missing column fails at boot).
-25 migrations in `app/src/main/resources/db/migration`; PPOB1 has its own database.
+27 migrations in `app/src/main/resources/db/migration`; PPOB1 has its own database.
 
 - **Money is `Money` in Java and `NUMERIC(18,0)` in SQL.** Never `float` / `double` (Section 21.1).
 - **JSONB needs `@JdbcTypeCode(SqlTypes.JSON)`.** `columnDefinition = "jsonb"` alone binds as `varchar`.
@@ -208,5 +233,6 @@ Neither has leader election.
 - **No pattern-generation engine** (Section 29): `decomposition_pattern` rows are hand-seeded.
 - **No CI workflow**: the unit and e2e suites run only when someone runs them.
 - **Reconciliation `resolve`** records who and when, not why (Section 41.9 resolution notes).
+- **MFA reset** for a locked-out admin is a database operation; there is no UI or endpoint for it.
 
 Product-level blockers: [`../README.md`](../README.md#go-live-blockers).
