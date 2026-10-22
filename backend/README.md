@@ -2473,6 +2473,53 @@ Known gaps to close before this is production-real:
     `run-routing-and-sweeps.sh` 15/15 (was 13), `run-ppob1.sh` 126/126 (was 113),
     `run-refund-gateway.sh` 15/15.
 
+- **2026-10-22 - Backoffice read APIs (Sections 41.2, 41.7, 41.12).** `GET /admin/parent-orders`
+  (+ `/{id}`), `/admin/child-orders`, `/admin/payments` (+ `/{id}`), `/admin/payment-events`,
+  `/admin/webhook-events`, `/admin/audit-logs`. All in `app/web`, reading through `app/admin`.
+  - **Plain SQL with explicit column lists, not the JPA entities.** The entities these views span carry
+    columns that must never reach a screen - `payment.qr_payload`, `provider_transaction.request_payload /
+    response_payload`, `payment_event.raw_payload`, `webhook_event.payload`. A `SELECT` that never names
+    them cannot leak them whatever a later edit adds to a DTO; it is also one statement per view rather
+    than lazy-association N+1. Optional filters go through `SqlFilter`, which has no method that accepts a
+    column or operator from a request - values are bind parameters only.
+  - **`has_more` instead of a total.** Lists fetch `size + 1` rows; there is no `count(*)`. `size` is
+    clamped to 100 and the clamped value is echoed.
+  - **The timeline is derived, and says so (`"derived": true`).** There is no state-history table, so
+    automatic transitions (`PAID -> FULFILLING -> SUCCESS`) are not individually timestamped anywhere.
+    What is shown is what was actually recorded: creation, each payment callback, paid/refunded times,
+    each webhook delivery attempt, every admin action in `audit_log` against the order or a child, and the
+    last update. `ORDER_CREATED` is pinned first because `payment.paid_at` is stored to the second and on
+    a fast payment sorts a few hundred ms *before* the order it paid for.
+  - **Rejected callbacks are in `webhook_event`, not `payment_event`.** A first draft read
+    `payment_event.signature_valid = false` for Section 41.7's "rejected / invalid-signature attempts" and
+    the live data showed 22 rows, all valid: a callback whose signature fails never reaches
+    `payment_event`; Section 22.24 logs it only in `webhook_event` with status `FAILED`. The security
+    view is `/admin/webhook-events?status=FAILED`. Found by looking at the rows before trusting the column name.
+  - **`actor_type` is `ADMIN_USER`, not `ADMIN`.** The username join used the wrong literal and would have
+    returned a null `actor_username` for every row; caught by reading `audit_log` before writing the join.
+  - **Redaction is a backstop.** `JsonRedactor` masks secret-looking keys (`*secret*`, `*password*`,
+    `*hash*`, `*token*`, `*signature*`, `*api_key*`, `*otp*`) at any depth in audit states, order metadata
+    and pattern components; unparseable JSON is replaced by `[unparseable]` rather than echoed. The order's
+    `callback_url` is reduced to scheme://host:port, because a path or query can carry a token.
+  - **`V26`** adds `payment:view` and `audit:view`, and grants `order:view` to FINANCE and RECONCILIATION -
+    the grant `V24` said to make "the moment the parent/child drilldown exists". `payment:view` goes to
+    OPERATIONS/FINANCE/RECONCILIATION (narrower than `order:view`: callback history is money-and-security
+    data); `audit:view` is SUPER_ADMIN only (no Section 42.1 scope names the audit log). TECH_SUPPORT still
+    has none of the three. `run-core.sh`'s "FINANCE lacks order:view" assertion encoded V24 and was
+    inverted deliberately; the boundary it guarded is now TECH_SUPPORT.
+  - **Type-mismatch leak closed.** `handleBadRequest` echoed `ex.getMessage()`, which for a bad typed
+    filter is `Failed to convert value of type 'java.lang.String' to required type 'java.lang.Long'; For input
+    string: "abc"` and for a missing parameter names `method parameter type String`. Split into three
+    handlers with fixed wording; `GlobalExceptionHandlerBadRequestTest` asserts on the real exception
+    objects (their `getMessage()` is what used to be sent). Admin list endpoints made this easy to reach,
+    which is why it was fixed here rather than left as the known-pre-existing item.
+  - **Closes** `TC-ADM-006` (search by `customer_reference`) and `TC-ADM-007` (parent -> payment ->
+    pattern -> child orders -> provider transactions in one response).
+  - **Verified**: 213 PPOB2 unit tests (was 203); `run-core.sh` 177/177; new `run-backoffice-read.sh`
+    95/95 - RBAC matrix over five roles, paging/clamp/`has_more`, every filter against the database,
+    bad-parameter 400s with an absence check for Java types, and planted secrets (callback URL token,
+    metadata api key, audit `password_hash`) asserted *absent* from the response.
+
 ## Running locally
 
 The short version is in the [root README's quickstart](../README.md#quickstart); this section adds

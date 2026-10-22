@@ -31,7 +31,7 @@ Be suspicious of any claim here that is not tagged **R**.
 | **U** | Covered by a unit test only. No end-to-end path exists to drive it |
 | **X** | **Not implemented.** There is nothing to test |
 
-Counts: **R 31 · R\* 5 · P 1 · U 1 · X 16** — 54 total.
+Counts: **R 33 · R\* 5 · P 1 · U 1 · X 14** — 54 total.
 
 Only `TC-BE-011` is still **P**, and it stays there for a reason no test pass can remove: it needs
 the real gateway's RSA path. The 2026-10-03 pass cleared the other three (`TC-BE-034`,
@@ -104,8 +104,8 @@ the `/admin/**` REST endpoints and Section 42's RBAC.
 | TC-ADM-003 | RBAC: VIEWER attempts a mutating action | **R** | `403 PERMISSION_DENIED` — asserted by `run-core.sh`, which drives a seeded VIEWER against a `retry:execute`-gated endpoint |
 | TC-ADM-004 | RBAC: FINANCE reaches reconciliation | **R** | **Moved R\* → R on 2026-10-10**: `run-core.sh` now seeds `finance1` inline (exactly as it already did `viewer1` — the fixture seeding no FINANCE user was the only reason this was hand-driven) and asserts the grant over real HTTP: `200` on `GET /admin/reconciliations`, `200` on a detail read, `200` on `investigate` with the record verified as actually moved to `INVESTIGATING` — **and** `403` on the `retry:execute`-gated endpoint. The boundary matters as much as the grant: a role that reached everything would answer `200` there too, and then the three `200`s would prove nothing about RBAC. This is also what exercises `V22`'s FINANCE `reconciliation:view` grant over HTTP rather than only reading it back out of SQL |
 | TC-ADM-005 | Permission: no `retry:execute`, attempts retry | **R** | `403` **and** an `ADMIN_PERMISSION_DENIED` row carrying the real `actor_id`. Previously unrecorded |
-| TC-ADM-006 | Transaction search | **X** | No implementation — and it stays **X** despite `GET /admin/orders` landing on 2026-10-10, which is deliberately *not* this test case: one filter, required, no paging, no result grid. It takes that path because extending it later beats replacing it. Search is many filters over the fields Section 41.2 names; what exists is a reverse lookup by `metadata.reseller_txn_id` (`order:view`, `V24`) built to close a specific cross-company investigation gap |
-| TC-ADM-007 | Parent/child drilldown | **X** | No implementation. Note for whoever builds it: `FINANCE` and `RECONCILIATION` are deliberately withheld `order:view` (`V24`), and a reconciliation row points at an order through `reference_id` with nothing to open it — so this is the point at which those two roles need that grant |
+| TC-ADM-006 | Transaction search | **R** | `GET /admin/parent-orders?customer_reference=` (also `state`, `partner_code`, `product_code`, `order_no`, `from`/`to`, paged). `run-backoffice-read.sh` asserts the result against the database for a known reference, an unknown one, and every other filter. `GET /admin/orders` (reseller id) remains the narrow support lookup |
+| TC-ADM-007 | Parent/child drilldown | **R** | `GET /admin/parent-orders/{id}`: payment (QR as a flag only), decomposition pattern with components, child orders, provider transactions, webhook deliveries, and a timeline that is explicitly *derived* (no state-history table exists). `V26` grants `order:view` to FINANCE and RECONCILIATION, as `V24` said to once this existed |
 | TC-ADM-008 | Pricing update | **X** | No implementation |
 | TC-ADM-009 | Configuration update | **X** | No implementation |
 | TC-ADM-010 | Pattern viewing | **X** | No implementation |

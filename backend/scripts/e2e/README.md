@@ -27,6 +27,8 @@ scripts/e2e/run-core.sh                  # 177 assertions
 scripts/e2e/run-routing-and-sweeps.sh    # 15 assertions, ~2 min (waits on the 60s sweep tick)
 ```
 
+`run-backoffice-read.sh` (95 assertions) is the odd one out: it does **not** want a fresh database. It reads what `run-core.sh` left behind (orders in every state, the rejected callback, the admin audit rows) and restores the three rows it temporarily edits. Run it right after `run-core.sh`; run alone against an empty database most of its cases would fail for want of data, not because anything is wrong.
+
 `run-refund-gateway.sh` (15 assertions) is separate because it needs the app booted with a *fourth*
 knob, `PPOB2_PAYMENT_STUBGATEWAY_SUPPORTSREFUND=true` — see its own header. It asserts that mode is
 active before testing anything, since against a normally-booted app every case would pass for the

@@ -539,8 +539,13 @@ chk "lookup: unauthenticated -> 401"            "$(curl -s -o /dev/null -w '%{ht
 # this endpoint IS a transaction lookup, the phrase Section 42.1 uses for CUSTOMER_SERVICE, and it
 # resolves one id the partner already holds into the order it already placed.
 chk "lookup: VIEWER holds order:view -> 200"    "$(curl -s -o /dev/null -w '%{http_code}' -u viewer1:admin123 "$AL?reseller_txn_id=$MD1")" 200
-# And withheld from FINANCE, which is the boundary that makes the grant above mean anything.
-chk "lookup: FINANCE lacks order:view -> 403"   "$(curl -s -o /dev/null -w '%{http_code}' -u finance1:admin123 "$AL?reseller_txn_id=$MD1")" 403
+# FINANCE was withheld here until V26: V24 said "revisit when the parent/child drilldown is built",
+# and V26 granted it once that existed. The boundary that still makes the grants mean anything is
+# TECH_SUPPORT, whose Section 42.1 scope names config and generation monitoring, not transactions.
+chk "lookup: FINANCE holds order:view since V26 -> 200" "$(curl -s -o /dev/null -w '%{http_code}' -u finance1:admin123 "$AL?reseller_txn_id=$MD1")" 200
+$Q "insert into admin_user (username,password_hash) values ('techsupport1','\$2a\$10\$sumJVTdd5Bhn4p0xeaYwxu5thzoF7Ok5S2NUE19rm5gB2iwE6KgtS') on conflict do nothing" -q >/dev/null 2>&1
+$Q "insert into admin_user_role (admin_user_id, role_id) select u.id, r.id from admin_user u, role r where u.username='techsupport1' and r.code='TECH_SUPPORT' on conflict do nothing" >/dev/null 2>&1
+chk "lookup: TECH_SUPPORT lacks order:view -> 403"      "$(curl -s -o /dev/null -w '%{http_code}' -u techsupport1:admin123 "$AL?reseller_txn_id=$MD1")" 403
 
 echo ""
 echo "================================"

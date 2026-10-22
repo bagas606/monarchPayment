@@ -73,10 +73,11 @@ payment callback, and the dev-only failure-injection knobs.
 
 ```bash
 cd backend
-./gradlew build                          # 38 unit / slice test classes + ArchUnit (203 tests)
+./gradlew build                          # 38 unit / slice test classes + ArchUnit (213 tests)
 scripts/e2e/run-core.sh                  # 177 assertions against a running app + real Postgres
 scripts/e2e/run-routing-and-sweeps.sh    # 15 assertions (waits on the 60s expiry-sweep tick)
 scripts/e2e/run-refund-gateway.sh        # 15 assertions; needs its own boot flag, see its header
+scripts/e2e/run-backoffice-read.sh       # 95 assertions; run after run-core.sh, it reads what that left behind
 
 cd ../ppob1-sim
 ./gradlew test                           # 65 unit tests for the PPOB1 side
