@@ -82,8 +82,8 @@ scripts/e2e/run-core.sh                  # 178 assertions against a running app 
 scripts/e2e/run-routing-and-sweeps.sh    # 15 assertions (waits on the 60s expiry-sweep tick)
 scripts/e2e/run-refund-gateway.sh        # 15 assertions; needs its own boot flag, see its header
 scripts/e2e/run-backoffice-read.sh       # 95 assertions; run after run-core.sh, it reads what that left behind
-scripts/e2e/run-admin-auth.sh            # 98 assertions; boots its own app on :8081 (sessions, MFA, timeouts, UI headers)
-NODE_PATH=<dir with playwright> node scripts/e2e/ui-smoke.cjs   # 42 assertions in a real browser; see scripts/e2e/README.md
+scripts/e2e/run-admin-auth.sh            # 101 assertions; boots its own app on :8081 (sessions, MFA, timeouts, UI headers)
+NODE_PATH=<dir with playwright> node scripts/e2e/ui-smoke.cjs   # 46 assertions in a real browser; see scripts/e2e/README.md
 
 cd ../ppob1-sim
 ./gradlew test                           # 65 unit tests for the PPOB1 side

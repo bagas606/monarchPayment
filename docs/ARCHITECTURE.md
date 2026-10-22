@@ -114,7 +114,7 @@ sequenceDiagram
 
 A synchronous send would run up to 200 HTTP calls on the expiry thread; against an unreachable partner
 that is 200 × the 5 s timeout, about 17 minutes in which no further order expires, and partner outages
-are exactly when a backlog of unpaid orders is likely. `spring.task.scheduling.pool.size: 2` exists for
+are exactly when a backlog of unpaid orders is likely. `spring.task.scheduling.pool.size` (one thread per job) exists for
 the same reason. The fulfillment path, by contrast, makes one synchronous attempt and schedules a retry
 only on failure (`scheduleFirstRetry`, `attempt_count = 1`). Both origins reach the same 5 total attempts.
 
@@ -212,15 +212,16 @@ One PostgreSQL schema, managed only by Flyway (`ddl-auto: validate`, so a missin
 
 ## 7. Background jobs
 
-Two `@Scheduled(fixedDelay…)` jobs in the same JVM, on a scheduler pool of **2** threads
-(`spring.task.scheduling.pool.size`) so a slow webhook batch cannot delay expiry.
+Three `@Scheduled(fixedDelay…)` jobs in the same JVM, on a scheduler pool of **3** threads
+(`spring.task.scheduling.pool.size`, one per job) so a slow webhook batch cannot delay expiry.
 
 | Job | Module | Interval | Does |
 |---|---|---|---|
 | `QrExpirySweepJob` | `order` | 60 s (`ppob2.order.expiry-sweep-interval-ms`) | Expires up to 200 `PAYMENT_PENDING` orders past `expires_at`, one transaction each |
 | `WebhookRetrySweepJob` | `app` | 60 s (`ppob2.webhook.retry-sweep-interval-ms`) | Makes every attempt for due `webhook_delivery` rows; each result is recorded in its own `REQUIRES_NEW` transaction so no connection is held across an HTTP call |
+| `AdminSecurityStartupCheck.purge` | `app` | 1 h | Deletes admin sessions that died more than a day ago |
 
-Neither has leader election.
+None has leader election.
 
 ---
 

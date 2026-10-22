@@ -13,8 +13,9 @@ import java.time.Instant;
  * ({@code role}, {@code permission}, {@code admin_user_role}, {@code role_permission}) are a
  * separate slice, not columns on this entity — see {@code AdminUserRepository
  * .findPermissionCodes} and {@code AdminPrincipal} for how an admin_user's granted permission
- * codes are resolved. Section 42.3 (MFA, JWT/session idle+absolute timeout) remains out of scope;
- * flagged in the README.
+ * codes are resolved. Section 42.3's MFA and sessions live in {@code id.ppob2.admin.session}
+ * ({@code AdminSessionService}); this entity only carries the per-account state they need - the encrypted
+ * TOTP secret, the last accepted time-step, and the login-failure / lockout counters (V27).
  */
 @Entity
 @Table(name = "admin_user")

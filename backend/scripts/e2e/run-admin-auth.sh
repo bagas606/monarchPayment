@@ -162,6 +162,17 @@ chk "...the new token reaches data"                   "$(get /admin/parent-order
 chk "...and holds SUPER_ADMIN's permissions"          "$(get /admin/audit-logs "$ADM")" 200
 chk "re-enrolling an enrolled account -> 409"         "$(code_of "$(post /admin/auth/mfa/enroll "$ADM" "")")" 409
 
+echo "== Re-login while a pending cookie is still live (the reload-at-the-MFA-step case) =="
+# A password-only cookie is live; the page that held its CSRF value is gone. Signing in again must still work.
+JAR_P=$(mktemp)
+curl -s -c $JAR_P -X POST $B/admin/auth/login -H 'Content-Type: application/json' -d '{"username":"superadmin","password":"admin123"}' >/dev/null
+R=$(curl -s -b $JAR_P -c $JAR_P -w ' HTTP%{http_code}' -X POST $B/admin/auth/login -H 'Content-Type: application/json' -d '{"username":"superadmin","password":"admin123"}')
+chk "login with a live pending cookie and NO CSRF header -> 200" "$(code_of "$R")" 200
+chk "...and reports the right state again"            "$(py "$(body_of "$R")" "d['status']")" MFA_REQUIRED
+R=$(curl -s -b $JAR_P -w ' HTTP%{http_code}' -X POST $B/admin/auth/login -H 'Content-Type: application/json' -H "Authorization: Bearer garbage" -d '{"username":"ops1","password":"admin123"}')
+chk "login ignores a garbage bearer token too"        "$(code_of "$R")" 200
+rm -f $JAR_P
+
 echo "== MFA challenge =="
 wait_past_step "$S1"
 R=$(login superadmin); P2=$(tok "$R")

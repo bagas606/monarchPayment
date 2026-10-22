@@ -2421,9 +2421,9 @@ Response:
 | TC-ADM-014 | Settlement display | Expected vs actual vs fee shown accurately for a given settlement_date |
 | TC-ADM-015 | Reconciliation handling | Discrepancy can be moved OPEN → INVESTIGATING → RESOLVED with resolver recorded |
 
-> **Implementation status is not kept here.** This codebase has no browser-based Admin Web — the
-> "Method" column above names Playwright/Cypress and none exists — so these cases are exercised as
-> HTTP Basic auth against the real `/admin/**` endpoints. Which of them pass, which are unbuilt, and
+> **Implementation status is not kept here.** The "Method" column above names Playwright/Cypress; the
+> codebase drives these cases through HTTP against the real `/admin/**` endpoints, plus a small
+> Playwright smoke test of the `/backoffice/` console. Which of them pass, which are unbuilt, and
 > the evidence for each: [`docs/TEST-STATUS.md`](TEST-STATUS.md) and
 > [`backend/README.md`](../backend/README.md).
 

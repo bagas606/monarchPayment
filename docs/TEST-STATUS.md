@@ -7,8 +7,8 @@ lives in [`../backend/README.md`](../backend/README.md); searching it for an ID 
 
 Last full pass: **2026-10-22**, each group starting from a wiped schema (all 27 Flyway migrations re-applied
 from zero), in the documented order: 238 + 65 unit tests, `run-core.sh` 178/178, `run-backoffice-read.sh` 95/95,
-`run-routing-and-sweeps.sh` 15/15, `run-refund-gateway.sh` 15/15, `run-ppob1.sh` 126/126, `run-admin-auth.sh` 98/98
-and `ui-smoke.cjs` 42/42. The pass below it, from **2026-10-10**, was against a wiped schema (all 25 migrations re-applied from
+`run-routing-and-sweeps.sh` 15/15, `run-refund-gateway.sh` 15/15, `run-ppob1.sh` 126/126, `run-admin-auth.sh` 101/101
+and `ui-smoke.cjs` 46/46. The pass below it, from **2026-10-10**, was against a wiped schema (all 25 migrations re-applied from
 zero) with the app booted on the default profile. Everything tagged **R** re-passed unchanged —
 177/177 core, 15/15 routing-and-sweeps, and 15/15 gateway-mode on its own clean boot. That pass
 moved two rows, both **R\*** → **R**, and for the same underlying reason — the reconciliation read
@@ -96,9 +96,10 @@ is validation of *stored* patterns, not a property test of a generator.
 
 ## Section 54 — Admin Web (`TC-ADM-*`)
 
-This codebase has no browser-based Admin Web; Section 54's own method column names
-Playwright/Cypress and none exists here. "Admin Web" in practice means real HTTP Basic auth against
-the `/admin/**` REST endpoints and Section 42's RBAC.
+Section 54's method column names Playwright/Cypress. Until 2026-10-22 none existed and these cases were driven
+as HTTP Basic requests against the `/admin/**` REST endpoints. There is now a small browser console
+(`/backoffice/`, driven by `backend/scripts/e2e/ui-smoke.cjs` in Chromium) and real sessions with MFA
+(`run-admin-auth.sh`); the rows below still cite the Basic-auth suites where those are what asserts them.
 
 | ID | Test case | Tag | Notes |
 |---|---|---|---|

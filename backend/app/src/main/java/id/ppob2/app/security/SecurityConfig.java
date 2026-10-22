@@ -63,9 +63,11 @@ public class SecurityConfig {
 
     /**
      * {@code /admin/**} (Section 41/42: Admin Web) and {@code /internal/settlement/**} (Section
-     * 37.1 report ingestion) — real HTTP Basic auth against the {@code admin_user} table via
-     * {@link AdminUserDetailsService}, unlike every chain above which deliberately has no Spring
-     * Security authentication mechanism at all. Settlement ingestion was previously its own
+     * 37.1 report ingestion) — authenticated by {@link AdminSessionAuthenticationFilter} (Section 42.3:
+     * opaque session token, idle + absolute timeout, TOTP MFA), unlike the Open API and PG-callback chains
+     * above, which deliberately have no Spring Security authentication mechanism at all. HTTP Basic against
+     * the {@code admin_user} table via {@link AdminUserDetailsService} is still available, but only when
+     * {@code ppob2.admin.basic-auth-enabled} is on (default off): it cannot carry a TOTP code, so it bypasses MFA. Settlement ingestion was previously its own
      * {@code permitAll} chain, flagged since that slice as needing "real authn/authz (or an
      * Admin-Web-gated trigger)" — now that Admin Web auth exists, gating it behind the same
      * mechanism is that fix, on the reasoning that triggering settlement ingestion is itself an
@@ -74,7 +76,7 @@ public class SecurityConfig {
      * <p>This chain still only checks "is an authenticated {@code ROLE_ADMIN}" at the URL level —
      * every {@link AdminPrincipal} always carries {@code ROLE_ADMIN}, so this check can never
      * itself deny an authenticated admin; it only rejects unauthenticated/wrong-credential
-     * requests (401, via Basic Auth). Section 42's fine-grained permission checks (retry:execute,
+     * requests (401). Section 42's fine-grained permission checks (retry:execute,
      * reconciliation:investigate, reconciliation:resolve, settlement:ingest) are enforced one
      * level deeper, via {@code @PreAuthorize} on the individual controller methods, using the
      * permission-code authorities {@code AdminPrincipal} carries. A {@code @PreAuthorize} denial
@@ -82,9 +84,11 @@ public class SecurityConfig {
      * {@code DispatcherServlet}'s own exception resolution resolves that via {@code
      * GlobalExceptionHandler}'s {@code @ExceptionHandler(AccessDeniedException.class)} before it
      * could ever reach a filter-level {@code AccessDeniedHandler} here, which is why the 403 is
-     * produced there and not in this class. Section 42.3's session management (JWT/idle+absolute
-     * timeout, revocation) and MFA are still not built; Basic Auth is stateless per-request, which
-     * sidesteps session-timeout semantics entirely rather than approximating them.
+     * produced there and not in this class.
+     *
+     * <p>{@code /admin/auth/login} is permitted without a session; {@code /admin/auth/mfa/**} and
+     * {@code /admin/auth/logout} are open to a password-only (pending) session as well, so it can finish
+     * signing in; everything else needs {@code ROLE_ADMIN}, which only a fully authenticated session carries.
      */
     @Bean
     public SecurityFilterChain adminFilterChain(HttpSecurity http, AdminUserDetailsService adminUserDetailsService,

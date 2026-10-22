@@ -41,7 +41,7 @@ import org.springframework.stereotype.Component;
  * finish before scheduling the next (of either job). A batch of up to {@code BATCH_SIZE} slow or
  * timing-out deliveries can occupy that one thread for a while, delaying the next
  * {@code QrExpirySweepJob} tick and, with it, unpaid orders past their QR TTL. Fixed by giving the
- * scheduler a second thread ({@code spring.task.scheduling.pool.size: 2} in application.yml) so
+ * scheduler a second thread ({@code spring.task.scheduling.pool.size} in application.yml, one thread per scheduled job) so
  * the two jobs don't contend — not by making either job's own transaction handling different,
  * which was never the actual constraint.
  *

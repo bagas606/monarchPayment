@@ -34,7 +34,11 @@ spring:
         # alongside QrExpirySweepJob, a single slow/timing-out webhook-delivery batch could occupy
         # that one thread long enough to delay the expiry sweep too. Two threads means the two jobs
         # no longer contend for the same slot.
-        size: 2
+        # Now 3: one thread per @Scheduled job (QrExpirySweepJob, WebhookRetrySweepJob and the hourly
+        # admin-session purge). The purge is one fast DELETE and would be fine on a shared thread, but the
+        # invariant "no job can be starved by another" is worth more than a thread, and it is simpler to
+        # keep true than to remember which job is the exception.
+        size: 3
 
 server:
   port: ${PORT:8080}

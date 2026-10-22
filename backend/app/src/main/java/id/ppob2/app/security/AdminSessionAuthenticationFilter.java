@@ -58,6 +58,20 @@ public class AdminSessionAuthenticationFilter extends OncePerRequestFilter {
         this.objectMapper = objectMapper;
     }
 
+    /**
+     * Sign-in must ignore whatever credential the browser happens to be carrying. {@code permitAll} only
+     * affects authorization - this filter still runs on the login URL, resolves a live cookie and then
+     * demands its CSRF header. A user who reloads at the MFA step has a live pending cookie and a fresh
+     * page that holds no CSRF value, so without this their next sign-in is refused with a 403 until the
+     * pending session times out. Login creates a session; it does not depend on one, and it is the one
+     * state-changing endpoint that is deliberately CSRF-exempt (SameSite=Strict, and a JSON body a
+     * cross-site form cannot send).
+     */
+    @Override
+    protected boolean shouldNotFilter(HttpServletRequest request) {
+        return "/admin/auth/login".equals(request.getRequestURI());
+    }
+
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {

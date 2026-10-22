@@ -86,7 +86,20 @@ function totp(base32, offset = 0) {
   await page.click('button[type=submit]');
   await page.waitForSelector('.notice.error');
   truthy('a wrong confirmation code is rejected on the same screen', await page.isVisible('.secret'));
-  await page.fill('input[name=code]', totp(secret));
+
+  // Reload in the middle of enrolment: the pending cookie survives, the page (and its CSRF value) does not.
+  // Signing in again must work, not be refused with a CSRF 403 until the pending session times out.
+  await page.reload();
+  await page.waitForSelector('input[name=username]');
+  truthy('after a reload mid-enrolment the login form is shown again', await page.isVisible('input[name=password]'));
+  await page.fill('input[name=username]', 'superadmin');
+  await page.fill('input[name=password]', 'admin123');
+  await page.click('button[type=submit]');
+  await page.waitForSelector('.secret, .notice.error');
+  truthy('...and signing in again reaches enrolment (not a CSRF refusal)', await page.isVisible('.secret'));
+  const secret2 = (await page.textContent('.secret')).replace(/\s+/g, '');
+  chk('...with the same key as before (enrolment restarts, it does not stack)', secret2 === secret, false);
+  await page.fill('input[name=code]', totp(secret2));
   await page.click('button[type=submit]');
   await page.waitForSelector('header.topbar');
   truthy('the right code lands in the console', await page.isVisible('nav.nav'));
@@ -194,10 +207,12 @@ function totp(base32, offset = 0) {
   truthy('a deep link while signed out goes to the login form, not data', !(await page.isVisible('table')));
 
   console.log('== Browser hygiene ==');
-  // The browser logs every non-2xx fetch as a console error. The 401s here are the run's own expected ones
-  // (wrong password, the pre-login /me probe, /me after sign-out); anything else - above all a CSP
-  // violation - must fail the run.
-  const unexpected = consoleErrors.filter((m) => !/status of 401/.test(m));
+  // The browser logs every non-2xx fetch as a console error. The ones here are the run's own expected ones:
+  // 401 (wrong password, the pre-login /me probe, /me after sign-out) and one 403 (the /me probe made by the
+  // reload during MFA enrolment, where the live cookie is a password-only session with no admin authority).
+  // Anything else - above all a CSP violation - must fail the run.
+  const unexpected = consoleErrors.filter((m) => !/status of (401|403)/.test(m));
+  chk('...exactly one 403 was logged (the pending-session /me probe)', consoleErrors.filter((m) => /status of 403/.test(m)).length, 1);
   chk('no console errors or CSP violations during the whole run (expected 401s aside)', unexpected, []);
   truthy('...and the expected 401s did occur (the filter is not hiding an empty set)', consoleErrors.length >= 3);
 

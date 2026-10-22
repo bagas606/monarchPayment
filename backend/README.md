@@ -575,8 +575,8 @@ database — see that slice's notes.
     22.26's columns) backs a `SecurityFilterChain` for `/admin/**` using HTTP Basic +
     `DaoAuthenticationProvider` + `BCryptPasswordEncoder` (`admin`'s new `AdminUserDetailsService`,
     `AdminPrincipal`). Section 42's RBAC (fine-grained permission checks) is now built — see
-    "Admin RBAC" below. **Still not built**: Section 42.3's session management (JWT/idle+absolute
-    timeout, revocation) — Basic Auth is stateless per-request instead; MFA.
+    "Admin RBAC" below. **Not built at the time of this slice, since built (2026-10-22, see below)**: Section 42.3's
+    session management (idle + absolute timeout, revocation) and MFA. HTTP Basic is now off by default.
     `admin_user.last_login_at` is mapped but never written — schema-only, not silently "maintained."
   - **`AdminReconciliationController`** (`app.web`, matching this codebase's established
     composition-root-owns-controllers convention) exposes `POST /admin/reconciliations/{id}
@@ -610,8 +610,8 @@ database — see that slice's notes.
 
 - **Admin RBAC** (Section 42.1 / 42.2) closes the RBAC gap the Admin Web slice above flagged:
   every `ACTIVE` admin_user could previously call every `/admin/**` action with no per-permission
-  check. Section 42.3 (MFA, JWT/idle+absolute session timeout) is explicitly still out of scope —
-  a separate, still-open gap, not silently folded into this one.
+  check. Section 42.3 (MFA, idle+absolute session timeout) was explicitly out of scope here — a separate gap, not
+  silently folded into this one; it was closed on 2026-10-22 (see the "Admin sessions and TOTP MFA" entry).
   - **New tables** (V19 migration): `role`, `permission`, `admin_user_role`, `role_permission`
     (Section 22.26). Seeded: all 7 Section 42.1 roles as reference data, but only the 4 permission
     codes this codebase actually gates something with today (`retry:execute`,
@@ -1452,7 +1452,7 @@ database — see that slice's notes.
 
 - **PRD Section 54 (`TC-ADM-*`) Admin Web test matrix, run for real** — this codebase has no
   browser-based Admin Web (Section 54's own "Method" column names Playwright/Cypress; none exists
-  here), so "Admin Web" in practice is real HTTP Basic Auth against the actual `/admin/**` REST
+  here), so "Admin Web" in practice was (until 2026-10-22: sessions + MFA, then a browser console) real HTTP Basic Auth against the actual `/admin/**` REST
   endpoints and RBAC (`SecurityConfig.adminFilterChain`, Section 42's permission model) — the same
   adaptation this README's own "Running locally" section already documents for exercising Admin Web
   manually. Seeded four throwaway `admin_user` rows (`e2e_viewer`/VIEWER, `e2e_ops`/OPERATIONS,
@@ -2570,14 +2570,24 @@ Known gaps to close before this is production-real:
     now re-loads it inside its own transaction. The mocked-repository unit tests could not have seen it:
     a mock returns the same instance. `V27` also first used `CHAR(64)`, which Hibernate's schema validation
     rejects against a `String` (the same trap `V8` documents); it is `VARCHAR(64)`.
+  - **A bug an adversarial review found after everything was green**: reloading during the MFA step locked
+    the user out of signing in again. `permitAll` only affects authorization - `AdminSessionAuthenticationFilter`
+    still ran on `/admin/auth/login`, resolved the live pending cookie and demanded its CSRF header, which a
+    freshly loaded page does not have; the user got a 403 until the pending session timed out (5 min).
+    Reproduced first (the new `run-admin-auth.sh` case answered 403 against the old jar), then fixed by
+    having the filter skip the login URL (login creates a session; it does not depend on one), and
+    asserted at both levels: over HTTP, and in the browser as a reload mid-enrolment.
   - **Not done, on purpose:** MFA reset for a locked-out user (a DB operation, by design), per-IP rate
     limiting at the edge, and `Secure`-cookie behaviour is covered by config only (the e2e boots with
     `cookie-secure=false` because it runs over plain HTTP).
+  - **Scheduler pool 2 -> 3.** `AdminSecurityStartupCheck.purge` (hourly `DELETE` of dead sessions) is a third
+    `@Scheduled` job; `spring.task.scheduling.pool.size` is documented as one thread per job so the expiry
+    sweep is never starved, so it was raised rather than left silently violated.
   - **`V27`** adds `admin_session`, four `admin_user` columns and the `session:revoke` permission
     (SUPER_ADMIN only, explicit grant per V19).
   - **Verified**: 238 PPOB2 unit tests (was 213) incl. RFC 6238 vectors and a clock-driven session state
-    machine; new `run-admin-auth.sh` 98/98 on its own instance (Basic off, 6 s / 15 s / 8 s timeouts; 89 of
-    those are session/MFA, 9 the UI's headers and `/me`), run several times; `run-core.sh` 178/178, `run-backoffice-read.sh` 95/95 and `run-routing-and-sweeps.sh` 15/15 on a
+    machine; new `run-admin-auth.sh` 101/101 on its own instance (Basic off, 6 s / 15 s / 8 s timeouts; 89 of
+    those are session/MFA, 9 the UI's headers and `/me`, 3 the re-login-with-a-live-pending-cookie regression), run several times; `run-core.sh` 178/178, `run-backoffice-read.sh` 95/95 and `run-routing-and-sweeps.sh` 15/15 on a
     Basic-enabled boot.
 
 - **2026-10-22 - Backoffice UI.** Static files under `app/src/main/resources/static/backoffice/`, served
@@ -2607,7 +2617,7 @@ Known gaps to close before this is production-real:
     restoring the bug and watching it fail. A second bug the first browser run found: `login.js` called a
     function that used a `const` declared further down (a temporal-dead-zone error) and rendered nothing at
     all - invisible to every HTTP-level test.
-  - **Driven in a real browser**: `scripts/e2e/ui-smoke.cjs` (Playwright + the preinstalled Chromium), 42
+  - **Driven in a real browser**: `scripts/e2e/ui-smoke.cjs` (Playwright + the preinstalled Chromium), 46
     assertions: sign-in failure, MFA enrolment with a TOTP computed in the test, filtering (state lives in the
     URL), drill-down, reload keeps the session, a refund through its dialog (empty reason refused client-side,
     one audit row with the typed reason against the right admin), investigate, the rejected-callback view,
@@ -2620,7 +2630,7 @@ Known gaps to close before this is production-real:
     handling of the `/backoffice` allow-list and the `redir / /backoffice/` line.
   - **Verified, whole repository, from an empty database in the documented order**: 238 PPOB2 and 65 PPOB1
     unit tests; `run-core.sh` 178/178, `run-backoffice-read.sh` 95/95, `run-routing-and-sweeps.sh` 15/15
-    (Basic-enabled boot); `ui-smoke.cjs` 42/42 and `run-admin-auth.sh` 98/98 (Basic off, packaged jar);
+    (Basic-enabled boot); `ui-smoke.cjs` 46/46 and `run-admin-auth.sh` 101/101 (Basic off, packaged jar);
     `run-refund-gateway.sh` 15/15 (own boot); `run-ppob1.sh` 126/126 (both systems live).
 
 ## Running locally

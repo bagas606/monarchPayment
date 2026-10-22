@@ -70,13 +70,13 @@ Basic is off by default because it carries no MFA, and these suites authenticate
 `run-core.sh`, `run-refund-gateway.sh` and `run-backoffice-read.sh` run a preflight that stops with this
 flag's name if it is missing, rather than failing dozens of assertions with 401.
 
-`run-admin-auth.sh` (98 assertions) is the opposite case: it boots **its own** instance on `:8081` with Basic
+`run-admin-auth.sh` (101 assertions) is the opposite case: it boots **its own** instance on `:8081` with Basic
 *off* and timeouts of a few seconds, because it is testing exactly that posture. Run it after `run-core.sh`
 (it adds audit rows, and `run-core.sh` asserts absolute audit counts). It needs the built jar
 (`./gradlew :app:bootJar`), `python3` for the TOTP codes, and takes ~3 minutes, most of it waiting for TOTP
 time-steps and the timeouts to elapse.
 
-`ui-smoke.cjs` (42 assertions) drives the backoffice UI in a real browser. It needs Node, the `playwright`
+`ui-smoke.cjs` (46 assertions) drives the backoffice UI in a real browser. It needs Node, the `playwright`
 package (`NODE_PATH` pointing at it) and Chromium; the app up with HTTP Basic **off**, an MFA key set
 (`PPOB2_ADMIN_MFA_ENCRYPTION_KEY`) and `PPOB2_ADMIN_COOKIE_SECURE=false` (plain HTTP), and a database
 populated by `run-core.sh`. It stages its own starting state (resets `superadmin`'s MFA, puts one paid order
