@@ -87,7 +87,20 @@ public enum ErrorCode {
     MFA_ALREADY_ENROLLED(409),
 
     /** The session is not in a state that allows the call (e.g. verifying MFA on an active session). */
-    SESSION_STATE_INVALID(409);
+    SESSION_STATE_INVALID(409),
+
+    /** A pattern generation is already running; one at a time (Section 40.2), the API never queues. */
+    GENERATION_IN_PROGRESS(409),
+
+    /** The generation cannot be activated in its current state (not built and validated, or already active). */
+    GENERATION_NOT_ACTIVATABLE(409),
+
+    /** Activating would leave some (product, amount) with no eligible pattern that the current generation serves.
+     * Refused unless the admin gives an explicit reason, because an uncovered amount cannot be fulfilled at all. */
+    COVERAGE_REGRESSION(409),
+
+    /** A catalog change that conflicts with existing data (duplicate code, a value that would break live patterns, ...). */
+    CATALOG_CONFLICT(409);
 
     private final int httpStatus;
 
