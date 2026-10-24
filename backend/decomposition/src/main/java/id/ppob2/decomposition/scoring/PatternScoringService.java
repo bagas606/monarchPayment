@@ -35,7 +35,17 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class PatternScoringService {
 
-    private static final String SCORE_SQL = """
+    private static final String SCORE_SQL = scoreSql("");
+
+    /** Same statement restricted to patterns that contain one of :skus (the reverse index of Section 30.4). */
+    private static final String AFFECTED_SQL = scoreSql(
+            " AND p.id IN (SELECT pattern_id FROM decomposition_component WHERE provider_sku_id IN (:skus))");
+
+    private static String scoreSql(String extraWhere) {
+        return SCORE_TEMPLATE.replace("/*EXTRA*/", extraWhere);
+    }
+
+    private static final String SCORE_TEMPLATE = """
             INSERT INTO pattern_economics (pattern_id, snapshot_date, provider_cost_total, gross_profit, gross_margin_pct,
                                            payment_fee, net_contribution, net_margin_pct, score, eligible)
             SELECT x.id, :day,
@@ -58,7 +68,7 @@ public class PatternScoringService {
                 FROM decomposition_pattern p
                 JOIN decomposition_component c ON c.pattern_id = p.id
                 LEFT JOIN provider_price pr ON pr.provider_sku_id = c.provider_sku_id AND pr.effective_until IS NULL
-                WHERE p.generation_id = :gen AND p.structural_status = 'VALID'
+                WHERE p.generation_id = :gen AND p.structural_status = 'VALID' /*EXTRA*/
                 GROUP BY p.id, p.parent_amount, p.component_count
             ) x
             """;
@@ -85,6 +95,18 @@ public class PatternScoringService {
     @Transactional
     public int rescore(long generationId, LocalDate day) {
         return jdbc.update(SCORE_SQL + UPSERT, params(generationId, day));
+    }
+
+    /**
+     * Re-prices only the patterns containing one of {@code skuIds} (Section 30.1: a cost change needs a re-score pass, not a
+     * regeneration, and Section 30.4's reverse index says which patterns that touches).
+     */
+    @Transactional
+    public int rescoreAffected(long generationId, LocalDate day, java.util.Collection<Long> skuIds) {
+        if (skuIds.isEmpty()) {
+            return 0;
+        }
+        return jdbc.update(AFFECTED_SQL + UPSERT, params(generationId, day).addValue("skus", skuIds));
     }
 
     /** Fill in only the patterns that have no row for {@code day}; never touches an existing one. */
