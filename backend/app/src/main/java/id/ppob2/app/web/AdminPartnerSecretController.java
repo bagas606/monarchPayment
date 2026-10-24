@@ -32,7 +32,7 @@ import org.springframework.web.bind.annotation.RestController;
  * <p>Both endpoints take an optional {@code secret}. Omitted, a 256-bit random one is generated and returned
  * <em>once</em> in the response; supplied (the partner chose it, or a dev fixture needs a known value), it is
  * stored and not echoed. Either way the audit row records that the secret changed, the key id it was written
- * under and a SHA-256 fingerprint prefix, never the secret or its ciphertext. The fingerprint lets an operator
+ * under and a keyed fingerprint (SecretVault.fingerprint), never the secret or its ciphertext. The fingerprint lets an operator
  * confirm which secret is live without being able to recover it.
  */
 @RestController
@@ -64,14 +64,14 @@ public class AdminPartnerSecretController {
                                              HttpServletRequest request) {
         ApiClient client = apiClients.findByClientId(clientId)
                 .orElseThrow(() -> new ApiException(ErrorCode.NOT_FOUND, "No such api client."));
-        boolean hadSecret = client.getSecretCiphertext() != null;
+        boolean wasProvisioned = client.getSecretCiphertext() != null;
         Chosen chosen = choose(body);
 
         client.setSecretCiphertext(vault.encrypt(chosen.secret(), HmacAuthenticationFilter.secretAad(clientId)));
         apiClients.save(client);
 
         auditService.recordAdminAction(principal.getAdminUserId(), "API_CLIENT_SECRET_SET", "API_CLIENT", client.getId(),
-                "{\"had_secret\":" + hadSecret + "}", afterState(chosen), request.getRemoteAddr());
+                "{\"was_provisioned\":" + wasProvisioned + "}", afterState(chosen), request.getRemoteAddr());
         return response(chosen, "client_id", clientId);
     }
 
@@ -84,14 +84,14 @@ public class AdminPartnerSecretController {
                                               HttpServletRequest request) {
         Partner partner = partners.findByCode(code)
                 .orElseThrow(() -> new ApiException(ErrorCode.NOT_FOUND, "No such partner."));
-        boolean hadSecret = partner.getWebhookSecretCiphertext() != null;
+        boolean wasProvisioned = partner.getWebhookSecretCiphertext() != null;
         Chosen chosen = choose(body);
 
         partner.setWebhookSecretCiphertext(vault.encrypt(chosen.secret(), WebhookDeliveryTargetResolver.secretAad(code)));
         partners.save(partner);
 
         auditService.recordAdminAction(principal.getAdminUserId(), "PARTNER_WEBHOOK_SECRET_SET", "PARTNER", partner.getId(),
-                "{\"had_secret\":" + hadSecret + "}", afterState(chosen), request.getRemoteAddr());
+                "{\"was_provisioned\":" + wasProvisioned + "}", afterState(chosen), request.getRemoteAddr());
         return response(chosen, "partner_code", code);
     }
 
@@ -112,24 +112,19 @@ public class AdminPartnerSecretController {
 
     private String afterState(Chosen chosen) {
         return "{\"generated\":" + chosen.generated() + ",\"key_id\":\"" + vault.activeKeyId()
-                + "\",\"fingerprint\":\"" + fingerprint(chosen.secret()) + "\"}";
+                + "\",\"fingerprint\":\"" + vault.fingerprint(chosen.secret()) + "\"}";
     }
 
     private ResponseEntity<?> response(Chosen chosen, String idField, String idValue) {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put(idField, idValue);
         out.put("key_id", vault.activeKeyId());
-        out.put("fingerprint", fingerprint(chosen.secret()));
+        out.put("fingerprint", vault.fingerprint(chosen.secret()));
         if (chosen.generated()) {
             out.put("secret", chosen.secret());
             out.put("note", "Shown once. It is stored encrypted and cannot be read back.");
         }
         return ResponseEntity.ok().header("Cache-Control", "no-store").body(out);
-    }
-
-    /** First 8 hex chars of SHA-256: enough to tell two secrets apart, useless for recovering one. */
-    private static String fingerprint(String secret) {
-        return id.ppob2.sharedkernel.security.HmacSigner.sha256Hex(secret).substring(0, 8);
     }
 
     public record SecretBody(String secret) {

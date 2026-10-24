@@ -81,6 +81,17 @@ public final class SecretVault {
         }
     }
 
+    /**
+     * Short tag that lets an operator tell which secret is live without being able to recover it. Keyed (HMAC under the
+     * active key), not a plain hash: an unkeyed prefix of SHA-256 written next to the ciphertext would let anyone holding
+     * a database dump test dictionary guesses against a weak, partner-chosen secret offline. It changes when the active
+     * key does, so compare it together with the key id.
+     */
+    public String fingerprint(String secret) {
+        byte[] key = keys.keyFor(keys.activeKeyId()).orElseThrow(() -> new SecretVaultException("active key is not available"));
+        return HmacSigner.sign(Base64.getEncoder().encodeToString(key), "fp:" + secret).substring(0, 8);
+    }
+
     /** Key id a stored value was written under, or null if it is not in the encrypted format. */
     public static String keyIdOf(String stored) {
         String[] parts = stored == null ? new String[0] : stored.split("\\.", 3);

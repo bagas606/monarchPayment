@@ -2958,10 +2958,10 @@ requests. Chosen design (envelope-at-keyring, not per-row data keys; the PRD nam
   existing plaintext (SQL cannot encrypt). Pre-release, so the migration path is "re-provision", not "convert".
 - Provisioning is `PUT /admin/api-clients/{clientId}/secret` and `PUT /admin/partners/{code}/webhook-secret`
   (permission `partner_secret:manage`, SUPER_ADMIN only). Omit the body to generate a secret, returned once; supply
-  one to store it unechoed. The audit row carries a SHA-256 fingerprint prefix and key id, never the secret.
+  one to store it unechoed. The audit row carries a keyed fingerprint (HMAC under the active key, so a dump cannot be used to test guesses) and the key id, never the secret.
 - Not done: key rotation tooling beyond "add key, switch active id, re-run the PUTs"; partner/api_client creation
   is still SQL (only the secret has an endpoint); Section 22.3's wording is unchanged.
-- Verified: `SecretVaultTest` (9), resolver tests for plaintext / foreign-row / unknown-key values, and
+- Verified: `SecretVaultTest` (10), resolver tests for plaintext / foreign-row / unknown-key values, and
   `run-partner-secrets.sh` (34 assertions: stored value is ciphertext, SQL-written plaintext / NULL / copied /
   forged / unknown-key values are all 401, generate + rotate + audit, 400/404/401/403, only SUPER_ADMIN holds the
   permission). `run-core.sh` 178/178 and `run-ppob1.sh` pass on top of it, i.e. the whole partner API and the

@@ -104,4 +104,15 @@ class SecretVaultTest {
         assertThatThrownBy(() -> new KeyringSecretKeyProvider("k1:" + shortKey, "k1")).hasMessageContaining("32 bytes");
         assertThatThrownBy(() -> new KeyringSecretKeyProvider("bad.id:" + good, "bad.id")).isInstanceOf(IllegalArgumentException.class);
     }
+
+    @Test
+    void fingerprintIsKeyedSoItCannotBeUsedToTestGuessesOffline() {
+        SecretVault a = vault("k1:" + randomKey(), "k1");
+        SecretVault b = vault("k1:" + randomKey(), "k1");
+        String plainPrefix = HmacSigner.sha256Hex("dev-secret").substring(0, 8);
+
+        assertThat(a.fingerprint("dev-secret")).hasSize(8).isEqualTo(a.fingerprint("dev-secret"))
+                .isNotEqualTo(plainPrefix).isNotEqualTo(a.fingerprint("dev-secreT"));
+        assertThat(a.fingerprint("dev-secret")).isNotEqualTo(b.fingerprint("dev-secret"));
+    }
 }
