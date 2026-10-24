@@ -1646,9 +1646,9 @@ Known gaps to close before this is production-real:
   for a parent one at a time regardless of provider.
 - **`api_client.secret_hash`** (Section 22.3) is documented as a one-way hash, but HMAC
   verification requires the server to reproduce the client's MAC, which a one-way hash can't do.
-  `HmacAuthenticationFilter` currently treats the stored value as the verification secret
-  directly — flagged inline with a `NOTE:` comment. This needs a decision from whoever owns the
-  PRD (reversible/KMS-backed encryption is the likely fix) before going further.
+  **Resolved 2026-10-24 (V28), partially:** the column is now `secret_ciphertext` and holds an
+  AES-256-GCM value under a config-held key ring (see the dated entry at the end of this file); what
+  remains open is KMS, and updating Section 22.3's wording.
 - **Nonce replay protection** (`NonceStore`) is in-memory. Section 19.1 designates Redis for
   this; an in-memory store does not protect against replay once there's more than one app
   instance.
@@ -2641,7 +2641,8 @@ dev-only failure-injection knobs.
 
 ```bash
 docker compose up -d          # starts Postgres on localhost:5432
-./gradlew :app:bootRun
+. ~/.ppob2-dev-keys           # PPOB2_SECRET_KEYS / PPOB2_SECRET_ACTIVE_KEY_ID: no default, the app will not boot without them
+./gradlew :app:bootRun        # (create that file as the root README's quickstart shows)
 ```
 
 The app validates its schema against Flyway migrations (`spring.jpa.hibernate.ddl-auto: validate`)
@@ -2656,7 +2657,11 @@ patterns with economics, and an Admin Web user:
 ```bash
 docker exec -i backend-postgres-1 psql -U ppob2 -d ppob2 -v ON_ERROR_STOP=1 -1 \
   < scripts/e2e/dev-seed.sql
+scripts/e2e/provision-secrets.sh    # needs PPOB2_ADMIN_BASIC_AUTH_ENABLED=true; sets PPOB1's two encrypted secrets
 ```
+
+The seed carries no secrets: since V28 they are ciphertext, which SQL cannot produce, so they are set through
+the admin API (`PUT /admin/api-clients/{clientId}/secret`, `PUT /admin/partners/{code}/webhook-secret`).
 
 It resolves every id by lookup instead of hardcoding, and it lives under `scripts/` rather than
 `src/main/resources/` on purpose — it briefly did live there, which packaged a `SUPER_ADMIN` row with
@@ -2931,3 +2936,33 @@ scripts/e2e/run-refund-gateway.sh        # 15 assertions; needs PPOB2_PAYMENT_ST
 See [`scripts/e2e/README.md`](scripts/e2e/README.md) for the prerequisites (fresh seed, the three
 injection knobs and their exact env-var spelling) and for what these deliberately do not cover, and
 [`docs/TEST-STATUS.md`](../docs/TEST-STATUS.md) for the per-ID status of all 54 PRD test cases.
+
+### 2026-10-24 — Partner secrets encrypted at rest (V28)
+
+Closes the longest-standing go-live blocker on this list: `api_client.secret_hash` (HMAC secret, Section 23.2)
+and `partner.webhook_secret` (Section 23.8) held the raw secret, so a database dump alone could forge any partner's
+requests. Chosen design (envelope-at-keyring, not per-row data keys; the PRD names no mechanism):
+
+- `shared-kernel`: `SecretVault` encrypts to `v1.<keyId>.<base64(iv||ct+tag)>` (AES-256-GCM, random IV), with the
+  row identity (`api_client:<client_id>`, `partner:<code>:webhook`) as GCM AAD, so a ciphertext copied onto another
+  row does not decrypt. `SecretKeyProvider` is the seam; `KeyringSecretKeyProvider` reads
+  `PPOB2_SECRET_KEYS=k1:<b64>[,k2:...]` + `PPOB2_SECRET_ACTIVE_KEY_ID`. A KMS implementation unwraps one stored data
+  key per id at boot and caches it, so nothing about the stored shape or the schema changes and no HMAC request
+  pays a network call. **That KMS provider is not built.**
+- Fail-fast: the app does not boot without the key ring (checked: exit 1 with the variable names in the message).
+  No default exists. Unlike the MFA key, this one gates every partner request, so warn-and-continue was wrong.
+- Fail-closed at use: `HmacAuthenticationFilter` and `WebhookDeliveryTargetResolver` refuse anything not in the
+  vault format (plaintext, NULL, forged, wrong row, unknown key id): 401 for the client, no outbound webhook, an
+  ERROR log naming the client/partner but never the value. There is no "accept plaintext" fallback.
+- V28 renames the columns (`secret_ciphertext`, `webhook_secret_ciphertext`), widens them to TEXT and **wipes**
+  existing plaintext (SQL cannot encrypt). Pre-release, so the migration path is "re-provision", not "convert".
+- Provisioning is `PUT /admin/api-clients/{clientId}/secret` and `PUT /admin/partners/{code}/webhook-secret`
+  (permission `partner_secret:manage`, SUPER_ADMIN only). Omit the body to generate a secret, returned once; supply
+  one to store it unechoed. The audit row carries a SHA-256 fingerprint prefix and key id, never the secret.
+- Not done: key rotation tooling beyond "add key, switch active id, re-run the PUTs"; partner/api_client creation
+  is still SQL (only the secret has an endpoint); Section 22.3's wording is unchanged.
+- Verified: `SecretVaultTest` (9), resolver tests for plaintext / foreign-row / unknown-key values, and
+  `run-partner-secrets.sh` (34 assertions: stored value is ciphertext, SQL-written plaintext / NULL / copied /
+  forged / unknown-key values are all 401, generate + rotate + audit, 400/404/401/403, only SUPER_ADMIN holds the
+  permission). `run-core.sh` 178/178 and `run-ppob1.sh` pass on top of it, i.e. the whole partner API and the
+  independently-verified outbound webhooks work with encrypted secrets.

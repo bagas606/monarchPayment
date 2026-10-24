@@ -15,7 +15,7 @@ import org.springframework.transaction.event.TransactionalEventListener;
  * unbuilt.
  *
  * <p>Lives here, not in `order`, for the reason {@code QrExpirySweepJob}'s Javadoc already gave:
- * sending needs the {@code parent_order.callback_url} / {@code partner.webhook_secret} join that
+ * sending needs the {@code parent_order.callback_url} / {@code partner.webhook_secret_ciphertext} join that
  * Section 20.2 grants `order` no edge for. {@code AFTER_COMMIT} because the order must be durably
  * {@code EXPIRED} before anyone is told it is.
  *

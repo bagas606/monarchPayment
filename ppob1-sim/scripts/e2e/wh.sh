@@ -9,7 +9,7 @@
 #
 # The signature deliberately mirrors OutboundWebhookSender exactly: HMAC-SHA256 hex over
 # "POST\n{callback path}\n{epoch ms}\n{nonce}\n{sha256 hex of body}", with the partner's
-# webhook_secret. Note the body carries an ISO-8601 `timestamp` while the header X-Timestamp is
+# webhook secret. Note the body carries an ISO-8601 `timestamp` while the header X-Timestamp is
 # epoch milliseconds -- two different formats of two slightly different instants, and the HEADER is
 # the one that is signed. Signing the body's value fails in a way that looks exactly like a wrong
 # secret, which is why wh.sh keeps them visibly separate.

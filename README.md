@@ -43,8 +43,8 @@ it — a separate Spring Boot application with its own Gradle build and its own 
 which can reach PPOB2 only over signed HTTP exactly as a real reseller does. That isolation is
 deliberate and is what makes it a conformance test of PRD Section 23 rather than a second front door
 onto PPOB2's internals; `ppob1-sim/README.md` explains why, and what running it revealed (starting
-with: PPOB2's outbound webhook had never been delivered to anything, because the dev seed leaves
-`partner.webhook_secret` NULL).
+with: PPOB2's outbound webhook had never been delivered to anything, because the dev seed left
+the partner's webhook secret unset).
 
 ## Quickstart
 
@@ -53,7 +53,10 @@ Needs Docker and a JDK 21.
 ```bash
 cd backend
 docker compose up -d        # Postgres 16 on localhost:5432
-./gradlew :app:bootRun      # foreground; Flyway migrates from zero, then the app blocks
+# The app refuses to boot without a key ring for partner secrets. Keep it: a new key later means re-provisioning.
+[ -f ~/.ppob2-dev-keys ] || echo "export PPOB2_SECRET_KEYS=k1:$(openssl rand -base64 32) PPOB2_SECRET_ACTIVE_KEY_ID=k1" > ~/.ppob2-dev-keys
+. ~/.ppob2-dev-keys
+PPOB2_ADMIN_BASIC_AUTH_ENABLED=true ./gradlew :app:bootRun   # foreground; Flyway migrates from zero, then the app blocks
 ```
 
 `bootRun` does not return. Once it logs `Started Ppob2Application`, seed from a **second terminal** —
@@ -63,6 +66,7 @@ not before, because Flyway creates the tables during that boot:
 cd backend
 docker exec -i backend-postgres-1 psql -U ppob2 -d ppob2 -v ON_ERROR_STOP=1 -1 \
   < scripts/e2e/dev-seed.sql
+scripts/e2e/provision-secrets.sh   # the partner's HMAC + webhook secrets: encrypted, so set via the admin API, not SQL
 ```
 
 There is no automatic seed. `scripts/e2e/dev-seed.sql` creates everything the test matrices need —
@@ -77,11 +81,12 @@ payment callback, and the dev-only failure-injection knobs.
 cd backend
 # The e2e suites authenticate to /admin/** with `curl -u`. HTTP Basic is OFF by default (it carries no MFA),
 # so boot the app for them with:  PPOB2_ADMIN_BASIC_AUTH_ENABLED=true
-./gradlew build                          # 38 unit / slice test classes + ArchUnit (238 tests)
+./gradlew build                          # unit / slice tests + ArchUnit (250 tests)
 scripts/e2e/run-core.sh                  # 178 assertions against a running app + real Postgres
 scripts/e2e/run-routing-and-sweeps.sh    # 15 assertions (waits on the 60s expiry-sweep tick)
 scripts/e2e/run-refund-gateway.sh        # 15 assertions; needs its own boot flag, see its header
 scripts/e2e/run-backoffice-read.sh       # 95 assertions; run after run-core.sh, it reads what that left behind
+scripts/e2e/run-partner-secrets.sh       # 34 assertions: secrets at rest, forged/plaintext values refused, provisioning API
 scripts/e2e/run-admin-auth.sh            # 101 assertions; boots its own app on :8081 (sessions, MFA, timeouts, UI headers)
 NODE_PATH=<dir with playwright> node scripts/e2e/ui-smoke.cjs   # 46 assertions in a real browser; see scripts/e2e/README.md
 
@@ -115,10 +120,10 @@ something a test pass can close.
 3. **Single instance only.** Nothing is Redis-backed: the replay-protection nonce store is an
    in-memory map and the QR expiry sweep has no leader election, so two app instances would not
    coordinate.
-4. **Partner API secrets are stored in plaintext.** Section 22.3 names the column `secret_hash` and
-   says the secret is never stored, but HMAC verification requires the server to reproduce the MAC
-   with the same secret. Needs a reversible-encryption (KMS) decision from the PRD owner —
-   Section 73.3's open-assumptions list.
+4. **Partner secrets are encrypted with a config-held key, not a KMS.** Since V28 the HMAC secret and the
+   webhook secret are AES-256-GCM ciphertext under `PPOB2_SECRET_KEYS` (Section 22.3 says "hash", but HMAC needs
+   the secret itself). Anyone who can read both the database and the app's environment can still decrypt;
+   a KMS-backed `SecretKeyProvider` is the follow-up, and Section 22.3 still needs updating to say so.
 5. **Most of Admin Web does not exist.** `TC-ADM-006..011` — transaction search, parent/child
    drilldown, pricing update, configuration update, pattern viewing, generation trigger — have no
    implementation to test. The reconciliation surface (Section 41.9) is the exception and is now

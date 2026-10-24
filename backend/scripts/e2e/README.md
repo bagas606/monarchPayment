@@ -27,6 +27,16 @@ scripts/e2e/run-core.sh                  # 178 assertions
 scripts/e2e/run-routing-and-sweeps.sh    # 15 assertions, ~2 min (waits on the 60s sweep tick)
 ```
 
+Every app boot for these suites also needs the partner-secret key ring (`PPOB2_SECRET_KEYS`, `PPOB2_SECRET_ACTIVE_KEY_ID`;
+any `k1:$(openssl rand -base64 32)` will do, the app refuses to start without it). The seed carries no partner secrets
+since V28; `provision-secrets.sh` sets them through the admin API and `run-core.sh`, `run-routing-and-sweeps.sh`,
+`run-refund-gateway.sh` and `run-partner-secrets.sh` call it themselves.
+
+`run-partner-secrets.sh` (34 assertions) covers secrets at rest: the stored value is ciphertext, and SQL-written
+plaintext, NULL, a ciphertext copied from another client, a forged one and one under an unknown key id are all refused;
+generate / rotate / audit through the provisioning endpoints, and their 400/401/403/404 guard rails. It provisions its
+own state, so it can run at any point against a seeded database.
+
 `run-backoffice-read.sh` (95 assertions) is the odd one out: it does **not** want a fresh database. It reads what `run-core.sh` left behind (orders in every state, the rejected callback, the admin audit rows) and restores the three rows it temporarily edits. Run it right after `run-core.sh`; run alone against an empty database most of its cases would fail for want of data, not because anything is wrong.
 
 `run-refund-gateway.sh` (15 assertions) is separate because it needs the app booted with a *fourth*

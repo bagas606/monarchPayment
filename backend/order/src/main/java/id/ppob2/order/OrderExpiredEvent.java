@@ -7,7 +7,7 @@ package id.ppob2.order;
  * <p>Exists so the partner can be told. Section 48.3's own diagram shows an
  * {@code ORDER_STATUS_CHANGED} webhook alongside this state change, and until now that half was
  * deliberately not built — {@code QrExpirySweepJob}'s Javadoc said so, on the correct grounds that
- * sending it needs the {@code parent_order.callback_url} / {@code partner.webhook_secret} join that
+ * sending it needs the {@code parent_order.callback_url} / {@code partner.webhook_secret_ciphertext} join that
  * Section 20.2 gives `order` no edge for. So this follows the pattern {@link
  * DecompositionExhaustedEvent} and {@link LatePaymentOnUntransitionableOrderEvent} already set:
  * `order` states the fact, the composition root acts on it.

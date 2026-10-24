@@ -15,7 +15,7 @@ import org.springframework.stereotype.Component;
 /**
  * PRD Section 23.8 / 40.4's "Webhook Retry Sweep" job. Lives in `app`, not `webhook` — same
  * reason {@link OutboundWebhookOrchestrator} does: retrying requires re-resolving the delivery
- * target ({@code parent_order.callback_url}, {@code partner.webhook_secret}), which needs the
+ * target ({@code parent_order.callback_url}, {@code partner.webhook_secret_ciphertext}), which needs the
  * `order`/`partner` join `webhook` has no Section 20.2 edge for. Same {@code @Scheduled} +
  * bounded-batch *shape* as {@code QrExpirySweepJob}, registered on the same
  * {@code SchedulingConfig}'s {@code @EnableScheduling} — but NOT the same safety claim; see the

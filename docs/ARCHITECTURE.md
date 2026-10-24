@@ -40,7 +40,7 @@ so the modules stay clean and the cross-module coupling is visible in one packag
 | `app` class | Joins | Why it cannot live in a module |
 |---|---|---|
 | `FulfillmentDispatchListener` | `order` event → `fulfillment` + `reconciliation` + `webhook` | `fulfillment → order` exists; the reverse and the rest do not |
-| `OutboundWebhookOrchestrator`, `WebhookDeliveryTargetResolver` | `order` + `partner` + `webhook` | The target is `parent_order.callback_url` joined to `partner.webhook_secret` |
+| `OutboundWebhookOrchestrator`, `WebhookDeliveryTargetResolver` | `order` + `partner` + `webhook` | The target is `parent_order.callback_url` joined to `partner.webhook_secret_ciphertext`, decrypted here with `SecretVault` |
 | `OrderExpiredWebhookListener` | `order` event → `webhook` | Same join |
 | `PaymentCallbackAnomalyOrchestrator`, `OrderFulfillmentReconciliationOrchestrator`, `MarginReconciliationOrchestrator` | `payment` / `order` events → `reconciliation` | `order` has no edge to `reconciliation` |
 | `AdminRefundOrchestrator`, `AdminChildOrderRetryOrchestrator`, `SettlementIngestionOrchestrator` | Admin actions spanning modules | Same |
@@ -153,7 +153,7 @@ authentication scheme.
 | PG callback | `/internal/webhooks/**` | Ayolinx RSA signature, verified in `PaymentCallbackService` | The stub gateway has its own HMAC scheme, dev only |
 | Admin API | `/admin/**`, `/internal/settlement/**` | `AdminSessionAuthenticationFilter`: opaque session token (HttpOnly cookie or `Authorization: Bearer`), Section 42.3 | Idle 30 min (slides) and absolute 8 h (never extended); TOTP MFA mandatory for SUPER_ADMIN / FINANCE / RECONCILIATION. HTTP Basic exists only behind `ppob2.admin.basic-auth-enabled` (default **off**) because it cannot carry a TOTP code |
 | Backoffice UI | `/backoffice/**` | none: static files, no data | CSP with no inline script and `connect-src 'self'`, `X-Frame-Options: DENY`, `no-referrer`; everything it shows comes from the authenticated Admin API |
-| Outbound webhook | PPOB2 → partner `callback_url` | Signed with `partner.webhook_secret`, with nonce | The sender uses its own bare `ObjectMapper`, so the body does not depend on Spring's Jackson settings |
+| Outbound webhook | PPOB2 → partner `callback_url` | Signed with the partner's webhook secret (stored encrypted), with nonce | The sender uses its own bare `ObjectMapper`, so the body does not depend on Spring's Jackson settings |
 
 ### Admin sessions
 
@@ -188,6 +188,16 @@ session revocation, permission denials. Passwords, TOTP secrets and codes are as
 bodies (`error_code`, `message`, `details`) and must not echo internals such as Java types or raw input.
 
 ---
+
+### Partner secrets at rest
+
+The HMAC secret (Section 23.2) and the webhook secret (Section 23.8) must be readable by the server, so Section 22.3's
+"hash" cannot hold; they are `SecretVault` ciphertext (`v1.<keyId>.<iv||ct+tag>`, AES-256-GCM, row identity as AAD) under
+`PPOB2_SECRET_KEYS`. The app does not boot without the key ring, and refuses (never falls back to) any stored value that
+is not valid ciphertext for its row. Secrets are set only through `PUT /admin/api-clients/{id}/secret` and
+`PUT /admin/partners/{code}/webhook-secret`. The key lives in configuration, not a KMS; a KMS-backed `SecretKeyProvider`
+is the intended swap and needs no schema change. The MFA key is a separate, older mechanism (`MfaSecretCipher`) with its
+own key and backup obligation.
 
 ## 6. Data conventions
 
@@ -232,6 +242,7 @@ None has leader election.
 - **Hikari `connection-timeout: 5s`**, so a database outage returns a prompt 503 instead of hanging 30 s.
 - **`prod` does not boot** until a real `GameProvider` bean exists.
 - **No pattern-generation engine** (Section 29): `decomposition_pattern` rows are hand-seeded.
+- **Partner secrets are config-key encrypted, not KMS** (above).
 - **No CI workflow**: the unit and e2e suites run only when someone runs them.
 - **Reconciliation `resolve`** records who and when, not why (Section 41.9 resolution notes).
 - **MFA reset** for a locked-out admin is a database operation; there is no UI or endpoint for it.

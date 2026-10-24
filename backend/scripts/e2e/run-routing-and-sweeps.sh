@@ -2,6 +2,7 @@
 # Second half of the e2e pass: routing eligibility (needs DB mutation) and the two cases that
 # depend on QrExpirySweepJob's 60s tick. Split from final_run.sh only because these are slow.
 SP="$(cd "$(dirname "$0")" && pwd)"
+"$SP/provision-secrets.sh" || exit 2
 CALL="$SP/call.sh"; CB="$SP/cb.sh"; Q="$SP/q.sh"
 pass=0; fail=0
 ok()  { echo "  PASS  $1"; pass=$((pass+1)); }

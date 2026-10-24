@@ -53,6 +53,10 @@ services:
       # Encrypts TOTP secrets at rest. Required: without it SUPER_ADMIN / FINANCE / RECONCILIATION cannot sign in.
       # Losing this key invalidates every enrolled authenticator - back it up with the database.
       PPOB2_ADMIN_MFA_ENCRYPTION_KEY: "${PPOB2_ADMIN_MFA_ENCRYPTION_KEY:?set PPOB2_ADMIN_MFA_ENCRYPTION_KEY in deploy/.env (openssl rand -base64 32)}"
+      # Key ring encrypting partner API / webhook secrets at rest (SecretVault). Required, no default: the app
+      # refuses to boot without it. Losing a listed key makes every secret written under it unrecoverable.
+      PPOB2_SECRET_KEYS: "${PPOB2_SECRET_KEYS:?set PPOB2_SECRET_KEYS in deploy/.env (k1:$(openssl rand -base64 32))}"
+      PPOB2_SECRET_ACTIVE_KEY_ID: "${PPOB2_SECRET_ACTIVE_KEY_ID:?set PPOB2_SECRET_ACTIVE_KEY_ID in deploy/.env (e.g. k1)}"
       # Behind Caddy the TCP peer is always Caddy; trust X-Forwarded-For so audit_log.ip_address is the admin's.
       # Safe only because the app is not published on the host - nothing else can reach it to forge the header.
       SERVER_FORWARD_HEADERS_STRATEGY: native

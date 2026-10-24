@@ -67,6 +67,11 @@ ppob2:
   business-zone: ${PPOB2_BUSINESS_ZONE:UTC}
   security:
     signature-window-ms: 300000 # 5 minutes, PRD Section 23.2
+    # Key ring encrypting partner HMAC secrets and webhook secrets at rest (SecretVault). REQUIRED, no default:
+    # `k1:<openssl rand -base64 32>[,k2:...]`. To rotate, add a key, point the active id at it, keep the old one
+    # listed until every secret has been re-provisioned. Losing a listed key makes its secrets unrecoverable.
+    secret-keys: ${PPOB2_SECRET_KEYS:}
+    active-secret-key-id: ${PPOB2_SECRET_ACTIVE_KEY_ID:}
   channel:
     default-application-id: PPOB1-DEFAULT
   payment:

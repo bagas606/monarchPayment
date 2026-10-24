@@ -5,6 +5,8 @@ import id.ppob2.order.domain.ParentOrder;
 import id.ppob2.order.repository.ParentOrderRepository;
 import id.ppob2.partner.domain.Partner;
 import id.ppob2.partner.repository.PartnerRepository;
+import id.ppob2.sharedkernel.security.SecretVault;
+import id.ppob2.sharedkernel.security.SecretVaultException;
 import java.util.EnumSet;
 import java.util.Optional;
 import java.util.Set;
@@ -58,10 +60,18 @@ public class WebhookDeliveryTargetResolver {
 
     private final ParentOrderRepository parentOrderRepository;
     private final PartnerRepository partnerRepository;
+    private final SecretVault secretVault;
 
-    public WebhookDeliveryTargetResolver(ParentOrderRepository parentOrderRepository, PartnerRepository partnerRepository) {
+    public WebhookDeliveryTargetResolver(ParentOrderRepository parentOrderRepository, PartnerRepository partnerRepository,
+                                         SecretVault secretVault) {
         this.parentOrderRepository = parentOrderRepository;
         this.partnerRepository = partnerRepository;
+        this.secretVault = secretVault;
+    }
+
+    /** AAD for a partner's webhook secret; the provisioning endpoint must use the same string. */
+    public static String secretAad(String partnerCode) {
+        return "partner:" + partnerCode + ":webhook";
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW, readOnly = true)
@@ -79,10 +89,18 @@ public class WebhookDeliveryTargetResolver {
         }
 
         Partner partner = order.getPartnerId() != null ? partnerRepository.findById(order.getPartnerId()).orElse(null) : null;
-        if (partner == null || partner.getWebhookSecret() == null || partner.getWebhookSecret().isBlank()) {
-            log.error("parent_order {} has callback_url set but no resolvable partner.webhook_secret "
+        if (partner == null || partner.getWebhookSecretCiphertext() == null || partner.getWebhookSecretCiphertext().isBlank()) {
+            log.error("parent_order {} has callback_url set but no resolvable partner webhook secret "
                     + "(partner_id={}) — cannot sign an outbound request, skipping delivery rather than sending unsigned",
                     parentOrderId, order.getPartnerId());
+            return Optional.empty();
+        }
+        String webhookSecret;
+        try {
+            webhookSecret = secretVault.decrypt(partner.getWebhookSecretCiphertext(), secretAad(partner.getCode()));
+        } catch (SecretVaultException e) {
+            log.error("parent_order {}: partner '{}' webhook secret cannot be decrypted ({}) — skipping delivery "
+                    + "rather than sending unsigned", parentOrderId, partner.getCode(), e.getMessage());
             return Optional.empty();
         }
 
@@ -93,7 +111,7 @@ public class WebhookDeliveryTargetResolver {
         // not tidiness.
         String resellerTxnId = parentOrderRepository.findResellerTxnIdByParentOrderId(parentOrderId);
 
-        return Optional.of(new WebhookDeliveryTarget(callbackUrl, partner.getWebhookSecret(),
+        return Optional.of(new WebhookDeliveryTarget(callbackUrl, webhookSecret,
                 partner.getCode(), order.getOrderNo(), order.getState().name(), resellerTxnId));
     }
 }

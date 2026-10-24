@@ -5,10 +5,11 @@ One table per matrix, covering every ID in [`PRD-PPOB2.md`](PRD-PPOB2.md) Sectio
 The *evidence* — the HTTP statuses, the row states, the reasoning behind each deliberate deviation —
 lives in [`../backend/README.md`](../backend/README.md); searching it for an ID finds the entry.
 
-Last full pass: **2026-10-22**, each group starting from a wiped schema (all 27 Flyway migrations re-applied
-from zero), in the documented order: 238 + 65 unit tests, `run-core.sh` 178/178, `run-backoffice-read.sh` 95/95,
-`run-routing-and-sweeps.sh` 15/15, `run-refund-gateway.sh` 15/15, `run-ppob1.sh` 126/126, `run-admin-auth.sh` 101/101
-and `ui-smoke.cjs` 46/46. The pass below it, from **2026-10-10**, was against a wiped schema (all 25 migrations re-applied from
+Last full pass: **2026-10-24** (V28, partner secrets encrypted), each group starting from a wiped schema (all 28
+Flyway migrations re-applied from zero), in the documented order: 250 + 65 unit tests, `run-core.sh` 178/178,
+`run-backoffice-read.sh` 95/95, `run-partner-secrets.sh` 34/34, `run-routing-and-sweeps.sh` 15/15,
+`run-refund-gateway.sh` 15/15, `run-ppob1.sh` 126/126, `run-admin-auth.sh` 101/101 and `ui-smoke.cjs` 46/46. The
+2026-10-22 pass before it had 27 migrations and 238 unit tests. The pass below it, from **2026-10-10**, was against a wiped schema (all 25 migrations re-applied from
 zero) with the app booted on the default profile. Everything tagged **R** re-passed unchanged —
 177/177 core, 15/15 routing-and-sweeps, and 15/15 gateway-mode on its own clean boot. That pass
 moved two rows, both **R\*** → **R**, and for the same underlying reason — the reconciliation read
