@@ -54,7 +54,11 @@ export function prompt({ title, intro, fields, confirmText, danger }) {
     const error = h('div', {});
     const form = h('form', { method: 'dialog' }, h('h2', {}, title), intro ? h('p', { class: 'muted' }, intro) : null, error);
     for (const f of fields) {
-      const el = f.multiline ? h('textarea', { name: f.name, rows: 3 }) : h('input', { name: f.name, autocomplete: 'off' });
+      let el;
+      if (f.options) el = h('select', { name: f.name }, f.options.map(o => h('option', { value: o }, o)));
+      else if (f.multiline) el = h('textarea', { name: f.name, rows: 3 });
+      else el = h('input', { name: f.name, autocomplete: 'off', inputmode: f.numeric ? 'numeric' : null });
+      if (f.value !== undefined && f.value !== null) el.value = String(f.value);
       inputs[f.name] = el;
       form.append(field(f.label + (f.required ? ' (required)' : ''), el));
     }

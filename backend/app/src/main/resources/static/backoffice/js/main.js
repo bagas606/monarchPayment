@@ -7,6 +7,10 @@ import { paymentsList, paymentDetail, callbacks } from './pages/payments.js';
 import { reconList, reconDetail } from './pages/recon.js';
 import { auditList } from './pages/audit.js';
 import { sessionsPage } from './pages/sessions.js';
+import { catalogPage } from './pages/catalog.js';
+import { generationsList, generationDetail } from './pages/generations.js';
+import { patternsList, patternDetail } from './pages/patterns.js';
+import { configPage } from './pages/config.js';
 
 const root = document.getElementById('app');
 let me = null;
@@ -21,6 +25,12 @@ const ROUTES = [
   { re: /^\/callbacks$/, perm: 'payment:view', page: callbacks, nav: 'Webhook log', href: '/callbacks' },
   { re: /^\/recon$/, perm: 'reconciliation:view', page: reconList, nav: 'Reconciliation', href: '/recon' },
   { re: /^\/recon\/(\d+)$/, perm: 'reconciliation:view', page: reconDetail, nav: 'Reconciliation' },
+  { re: /^\/catalog$/, perm: 'catalog:view', page: catalogPage, nav: 'Catalog', href: '/catalog' },
+  { re: /^\/generations$/, perm: 'pattern:view', page: generationsList, nav: 'Generations', href: '/generations' },
+  { re: /^\/generations\/(\d+)$/, perm: 'pattern:view', page: generationDetail, nav: 'Generations' },
+  { re: /^\/patterns$/, perm: 'pattern:view', page: patternsList, nav: 'Patterns', href: '/patterns' },
+  { re: /^\/patterns\/(\d+)$/, perm: 'pattern:view', page: patternDetail, nav: 'Patterns' },
+  { re: /^\/config$/, perm: 'catalog:view', page: configPage, nav: 'Configuration', href: '/config' },
   { re: /^\/audit$/, perm: 'audit:view', page: auditList, nav: 'Audit log', href: '/audit' },
   { re: /^\/sessions$/, perm: 'session:revoke', page: sessionsPage, nav: 'Sessions', href: '/sessions' },
 ];

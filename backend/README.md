@@ -2966,3 +2966,49 @@ requests. Chosen design (envelope-at-keyring, not per-row data keys; the PRD nam
   forged / unknown-key values are all 401, generate + rotate + audit, 400/404/401/403, only SUPER_ADMIN holds the
   permission). `run-core.sh` 178/178 and `run-ppob1.sh` pass on top of it, i.e. the whole partner API and the
   independently-verified outbound webhooks work with encrypted secrets.
+
+### 2026-10-24 — Pattern generator, scoring, configuration and catalog administration (V29)
+
+Closes go-live blocker 2 in part and most of the Section 41.3 / 41.4 / 41.11 gap. What was built, what was measured, what
+was decided and what is still open:
+
+- **Generator (`decomposition`).** `PatternGenerator` is a pure, deterministic function (SKUs + amount in, patterns out). Level by
+  level in increasing total quantity, fewer distinct SKUs first, then SKU id; a bounded search pruned by remaining-amount
+  reachability and the gcd test; a per-SKU cap from `quota_daily`; a node budget that is reported (`budget_exhausted`) rather
+  than hidden. **Java, not Rust:** Section 29.1 says "preferred", and a pure function is the seam a Rust binary would replace.
+  Verified by 60 random catalogs against an independent brute-force oracle (and one deliberate pruning bug, which the oracle
+  caught), determinism across SKU order, caps, limits, infeasible amounts and real SHA-256 hashes.
+- **Limits are relative.** First version capped total quantity at 12; a synthetic run left 43 of 118 amounts uncovered because
+  10,000,000 needs 20 units of a 500,000 SKU. Now: the fewest achievable units plus `generation.extra_quantity` (default 4), under
+  a hard ceiling (default 40). 118 amounts then covered; only one infeasible amount (the seed's 10,000) remained.
+- **Lifecycle.** BUILDING, VALIDATING (check in SQL against what was written: sums, counts, no component-less pattern, no
+  face-value drift), then scored for today, then **waits**. Activation is manual, atomic, one ACTIVE generation enforced by a unique
+  index, and refused with 409 `COVERAGE_REGRESSION` when a (product, amount) the current generation serves would lose every
+  eligible pattern, unless a reason is given and audited. Rollback is re-activation of a SUPERSEDED generation, re-scored first.
+  `VALIDATING` with `completed_at` null means "still running"; the API exposes `ready` so a client does not have to know that.
+- **Scoring (`PatternScoringService`).** Set-based SQL for a business day. `score = w_margin * net_margin_pct - w_childcount *
+  (child orders - 1)`; the other five 31.3 terms have no data source and no knob. Payment fee is 0 (no MDR known). A component with
+  no active price makes a pattern ineligible. **Why it came first:** routing reads economics for *today* only, so a generation
+  without rows serves nothing, and the seed's patterns would stop being routable at midnight. `dailyRescore` (00:05 business zone,
+  overwrites) and `ensureToday` (hourly, fills only missing rows, never overwrites) cover it; both can be switched off with
+  `ppob2.pattern.maintenance-enabled=false`. A price edit re-scores only the patterns containing that SKU (reverse index, 30.4).
+- **Catalog and configuration.** Products, providers, SKUs and supported amounts are created and switched off, never deleted. A SKU
+  face-value change invalidates the patterns that contain it in the same transaction (30.3) and returns the coverage lost; a new
+  amount or SKU is accepted at once but joins routing only after the next generation, and the API and UI say so. `configuration`
+  (22.25) holds overrides; keys, types, ranges and defaults are code (`ConfigKey`), unknown keys cannot be written.
+- **Permissions (interpretation of 42.1, as V19's was):** `catalog:view`, `catalog:edit`, `pricing:edit`, `config:edit`,
+  `pattern:view`, `pattern:generate`, `pattern:activate`. Activation, pricing and configuration are SUPER_ADMIN only; TECH_SUPPORT
+  may edit the catalog and start a generation but not activate it.
+- **Measured (synthetic catalog, 3 providers x 8 denominations x 118 amounts, plus the 6 seed amounts, one machine):**
+  985,777 patterns in 3 min 2 s, peak RSS about 500 MB, 1.6 GB of pattern + component + economics tables, 91 of 124 amounts at the
+  K = 10,000 limit, none budget-exhausted. A full re-score of that pool took 25 s. Orders through it: 0.67 s (100,000) and
+  1.4 s (5,000,000) from paid callback to SUCCESS, which includes loading up to 10,000 candidates per order. That is the limit to
+  watch: the PRD envisions a Redis candidate cache and this reads Postgres directly.
+- **Not done:** partial regeneration (30.3; a structural change invalidates and waits for the next full generation); provider
+  health / availability / capacity / load-balance / failure scoring terms; a component-count limit (TC-PROP-003 asks for one; the
+  limits here are on total quantity); the dashboard, margin and quota views; CRUD for admin users and roles; the real payment-fee
+  value; a real catalog (all numbers above are synthetic).
+- **Verified:** 268 PPOB2 unit tests; `run-pattern-admin.sh` 83, `run-catalog-admin.sh` 82 and `ui-smoke.cjs` 73 (new pages driven in
+  a real browser, including a hostile product name shown as text and the coverage-reason dialog), on top of every earlier suite
+  unchanged. Two things the first runs taught: a stale success notice made a browser assertion pass for the wrong reason (waits are
+  now on the notice's own text), and `scalar()` strips spaces, which had made an audit assertion compare against the wrong string.

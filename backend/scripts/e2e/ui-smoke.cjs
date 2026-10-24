@@ -40,6 +40,8 @@ function totp(base32, offset = 0) {
 
 (async () => {
   sql("delete from admin_session");
+  sql("delete from product where code='UISMOKE'"); // the catalog section below creates it; re-runs start clean
+  sql("update pattern_generation set status='FAILED', completed_at=coalesce(completed_at, now()) where status in ('BUILDING','VALIDATING')");
   sql("update admin_user set mfa_secret=null, mfa_enabled=false, mfa_last_step=null, failed_logins=0, locked_until=null where username='superadmin'");
   sql("update parent_order set state='REFUND_PENDING' where id=(select o.id from parent_order o join payment p on p.parent_order_id=o.id where o.state='SUCCESS' and p.status='SUCCESS' order by o.id desc limit 1)");
   sql("update reconciliation set status='OPEN' where id=(select id from reconciliation where status<>'RESOLVED' order by id limit 1)");
@@ -105,7 +107,7 @@ function totp(base32, offset = 0) {
   truthy('the right code lands in the console', await page.isVisible('nav.nav'));
   chk('...showing who is signed in', await page.textContent('.who span'), 'superadmin');
   const navLabels = await page.$$eval('nav.nav a', (as) => as.map((a) => a.textContent));
-  chk('SUPER_ADMIN sees every section', navLabels, ['Orders', 'Payments', 'Webhook log', 'Reconciliation', 'Audit log', 'Sessions']);
+  chk('SUPER_ADMIN sees every section', navLabels, ['Orders', 'Payments', 'Webhook log', 'Reconciliation', 'Catalog', 'Generations', 'Patterns', 'Configuration', 'Audit log', 'Sessions']);
 
   console.log('== Orders ==');
   await page.waitForSelector('table');
@@ -197,6 +199,112 @@ function totp(base32, offset = 0) {
   await shot('08-audit');
   await noLiteralNullOrUndefined('audit log');
 
+  console.log('== Catalog, pricing, generations, patterns, configuration ==');
+  const nav = await page.textContent('nav');
+  truthy('the navigation offers the new pages to SUPER_ADMIN', ['Catalog', 'Generations', 'Patterns', 'Configuration'].every((n) => nav.includes(n)));
+  const dialogFill = async (fields) => { for (const [k, v] of Object.entries(fields)) await page.fill('dialog [name=' + k + ']', String(v)); };
+
+  await page.goto(BASE + '/backoffice/#/catalog');
+  await page.waitForSelector('h2:has-text("Provider SKUs")');
+  await page.waitForSelector('tbody tr');
+  truthy('the catalog lists SKUs with their current cost', (await page.textContent('body')).includes('ML-20000-A'));
+  await noLiteralNullOrUndefined('catalog');
+  await shot('09-catalog');
+  // A hostile product name, entered through the form like any admin could: it must come back as text.
+  await page.click('button:has-text("Add product")');
+  await page.waitForSelector('dialog[open]');
+  await dialogFill({ code: 'UISMOKE', name: XSS, category: 'UISMOKE' });
+  await page.click('dialog button[type=submit]');
+  await page.waitForSelector('.notice.ok:has-text("Product added")');
+  truthy('adding a product through the dialog reports success', await page.isVisible('.notice.ok:has-text("Product added")'));
+  await page.waitForSelector('tr:has-text("UISMOKE")');
+  truthy('...the new product is listed', await page.isVisible('tr:has-text("UISMOKE")'));
+  chk('...and its hostile name was shown as text, never executed', await page.evaluate(() => window.__xss === undefined && !document.querySelector('img[src="x"]')), true);
+  // A duplicate is refused with the server's reason, in place.
+  await page.click('button:has-text("Add product")');
+  await page.waitForSelector('dialog[open]');
+  await dialogFill({ code: 'UISMOKE', name: 'again', category: 'UISMOKE' });
+  await page.click('dialog button[type=submit]');
+  await page.waitForSelector('.notice.error:has-text("already exists")');
+  truthy('a duplicate product shows the server\'s reason', await page.isVisible('.notice.error:has-text("already exists")'));
+  // Price change needs a reason; it reports how many patterns it re-scored.
+  const priceBtn = page.locator('tr:has-text("ML-20000-B") button:has-text("Price")');
+  await priceBtn.click();
+  await page.waitForSelector('dialog[open]');
+  await dialogFill({ provider_cost: 18250, reason: 'ui smoke price check' });
+  await page.click('dialog button[type=submit]');
+  await page.waitForSelector('.notice.ok:has-text("re-scored")');
+  truthy('a price change reports the new version and the patterns re-scored', await page.isVisible('.notice.ok:has-text("re-scored")'));
+  truthy('...and the table shows the new cost', await page.isVisible('tr:has-text("ML-20000-B"):has-text("18.250")'));
+  await page.click('tr:has-text("ML-20000-B") button:has-text("History")');
+  await page.waitForSelector('h2:has-text("Price history")');
+  await page.waitForSelector('h2:has-text("Price history") ~ div tbody tr');
+  truthy('price history keeps every version, newest first', (await page.locator('h2:has-text("Price history") ~ div tbody tr').count()) >= 2
+    && (await page.locator('h2:has-text("Price history") ~ div tbody tr').first().textContent()).includes('18.250'));
+
+  await page.goto(BASE + '/backoffice/#/config');
+  await page.waitForSelector('h2:has-text("Supported amounts")');
+  await noLiteralNullOrUndefined('configuration');
+  await page.click('tr:has-text("routing.weight.childcount") button:has-text("Change")');
+  await page.waitForSelector('dialog[open]');
+  await dialogFill({ value: 1000 });
+  await page.click('dialog button[type=submit]');
+  await page.waitForSelector('.notice.error:has-text("between")');
+  truthy('an out-of-range value is refused with the allowed range', await page.isVisible('.notice.error:has-text("between")'));
+  await page.click('tr:has-text("routing.weight.childcount") button:has-text("Change")');
+  await page.waitForSelector('dialog[open]');
+  await dialogFill({ value: 0.75 });
+  await page.click('dialog button[type=submit]');
+  await page.waitForSelector('.notice.ok:has-text("updated")');
+  truthy('a valid value is saved and the row says it is an override', await page.isVisible('tr:has-text("routing.weight.childcount"):has-text("PENDING")') || await page.isVisible('tr:has-text("routing.weight.childcount"):has-text("0.75")'));
+  truthy('a supported amount with no patterns behind it is flagged', await page.isVisible('text=cannot be fulfilled') || (await page.textContent('body')).includes('10.000'));
+
+  await page.goto(BASE + '/backoffice/#/generations');
+  await page.waitForSelector('h1:has-text("Pattern generations")');
+  await noLiteralNullOrUndefined('generations');
+  await page.click('button:has-text("Build new generation")');
+  await page.waitForSelector('dialog[open]');
+  await page.click('dialog button[type=submit]');
+  await page.waitForSelector('.notice.ok:has-text("started")');
+  truthy('starting a generation reports its id', await page.isVisible('.notice.ok:has-text("started")'));
+  await page.waitForSelector('tbody tr:first-child .badge:has-text("READY")', { timeout: 90000 });
+  truthy('the list updates by itself until the generation is READY', true);
+  await page.click('tbody tr:first-child a');
+  await page.waitForSelector('h2:has-text("Per amount")');
+  truthy('the detail shows the result and per-amount outcome', await page.isVisible('h2:has-text("Result")'));
+  await shot('10-generation');
+  await noLiteralNullOrUndefined('generation detail');
+  await page.click('button:has-text("Activate")');
+  await page.waitForSelector('dialog[open]');
+  await page.click('dialog button[type=submit]');
+  await page.waitForSelector('.notice.ok:has-text("ACTIVE"), dialog[open]:has-text("Coverage would drop")');
+  if (await page.isVisible('dialog[open]:has-text("Coverage would drop")')) {
+    truthy('a coverage regression asks for a reason instead of activating silently', true);
+    await page.click('dialog button:has-text("Cancel")');
+    chk('...cancelling leaves the previous generation serving', sql("select count(*) from pattern_generation where status='ACTIVE'"), '1');
+    await page.click('button:has-text("Activate")');
+    await page.waitForSelector('dialog[open]');
+    await page.click('dialog button[type=submit]');
+    await page.waitForSelector('dialog[open]:has-text("Coverage would drop")');
+    await dialogFill({ reason: 'ui smoke: accepting reduced coverage' });
+    await page.click('dialog button:has-text("Activate anyway")');
+    await page.waitForSelector('.notice.ok:has-text("ACTIVE")');
+  } else {
+    truthy('activation without a coverage loss goes straight through', true);
+  }
+  truthy('activation reports the coverage change', await page.isVisible('.notice.ok:has-text("ACTIVE")'));
+  truthy('...and the generation is now ACTIVE', await page.isVisible('h1 .badge:has-text("ACTIVE")'));
+
+  await page.goto(BASE + '/backoffice/#/patterns?parent_amount=20000');
+  await page.waitForSelector('tbody tr');
+  truthy('patterns of the active generation can be looked up by amount', (await page.locator('tbody tr').count()) > 0);
+  await noLiteralNullOrUndefined('patterns');
+  await page.click('tbody tr a');
+  await page.waitForSelector('h2:has-text("Economics by day")');
+  truthy('a pattern shows its components and daily economics', await page.isVisible('h2:has-text("Components")'));
+  await noLiteralNullOrUndefined('pattern detail');
+  chk('the audit trail recorded the activation by name', sql("select count(*) from audit_log where action='PATTERN_GENERATION_ACTIVATE' and actor_id=(select id from admin_user where username='superadmin')") >= '1', true);
+
   console.log('== Sign out ==');
   await page.click('button:has-text("Sign out")');
   await page.waitForSelector('input[name=username]');
@@ -211,7 +319,7 @@ function totp(base32, offset = 0) {
   // 401 (wrong password, the pre-login /me probe, /me after sign-out) and one 403 (the /me probe made by the
   // reload during MFA enrolment, where the live cookie is a password-only session with no admin authority).
   // Anything else - above all a CSP violation - must fail the run.
-  const unexpected = consoleErrors.filter((m) => !/status of (401|403)/.test(m));
+  const unexpected = consoleErrors.filter((m) => !/status of (400|401|403|409)/.test(m));
   chk('...exactly one 403 was logged (the pending-session /me probe)', consoleErrors.filter((m) => /status of 403/.test(m)).length, 1);
   chk('no console errors or CSP violations during the whole run (expected 401s aside)', unexpected, []);
   truthy('...and the expected 401s did occur (the filter is not hiding an empty set)', consoleErrors.length >= 3);

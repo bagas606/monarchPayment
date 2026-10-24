@@ -5,11 +5,13 @@ One table per matrix, covering every ID in [`PRD-PPOB2.md`](PRD-PPOB2.md) Sectio
 The *evidence* — the HTTP statuses, the row states, the reasoning behind each deliberate deviation —
 lives in [`../backend/README.md`](../backend/README.md); searching it for an ID finds the entry.
 
-Last full pass: **2026-10-24** (V28, partner secrets encrypted), each group starting from a wiped schema (all 28
-Flyway migrations re-applied from zero), in the documented order: 251 + 65 unit tests, `run-core.sh` 178/178,
-`run-backoffice-read.sh` 95/95, `run-partner-secrets.sh` 34/34, `run-routing-and-sweeps.sh` 15/15,
-`run-refund-gateway.sh` 15/15, `run-ppob1.sh` 126/126, `run-admin-auth.sh` 101/101 and `ui-smoke.cjs` 46/46. The
-2026-10-22 pass before it had 27 migrations and 238 unit tests. The pass below it, from **2026-10-10**, was against a wiped schema (all 25 migrations re-applied from
+Last full pass: **2026-10-24** (V29: partner secrets encrypted, pattern generator, catalog and configuration
+administration), each group starting from a wiped schema (all 29 Flyway migrations re-applied from zero), in the
+documented order: 268 + 65 unit tests, `run-core.sh` 178/178, `run-backoffice-read.sh` 95/95,
+`run-partner-secrets.sh` 34/34, `run-routing-and-sweeps.sh` 15/15, `run-refund-gateway.sh` 15/15, `run-ppob1.sh` 126/126,
+`run-admin-auth.sh` 101/101, `run-pattern-admin.sh` 83/83, `run-catalog-admin.sh` 82/82 and `ui-smoke.cjs` 73/73.
+(The 65 PPOB1 unit tests were last run on 2026-10-22; nothing in `ppob1-sim/` changed except comments and a script.)
+The 2026-10-22 pass before it had 27 migrations and 238 unit tests. The pass below it, from **2026-10-10**, was against a wiped schema (all 25 migrations re-applied from
 zero) with the app booted on the default profile. Everything tagged **R** re-passed unchanged —
 177/177 core, 15/15 routing-and-sweeps, and 15/15 gateway-mode on its own clean boot. That pass
 moved two rows, both **R\*** → **R**, and for the same underlying reason — the reconciliation read
@@ -35,7 +37,7 @@ Be suspicious of any claim here that is not tagged **R**.
 | **U** | Covered by a unit test only. No end-to-end path exists to drive it |
 | **X** | **Not implemented.** There is nothing to test |
 
-Counts: **R 33 · R\* 5 · P 1 · U 1 · X 14** — 54 total.
+Counts: **R 40 · R\* 5 · P 1 · U 2 · X 6** — 54 total (recounted 2026-10-24; the earlier line had not kept up).
 
 Only `TC-BE-011` is still **P**, and it stays there for a reason no test pass can remove: it needs
 the real gateway's RSA path. The 2026-10-03 pass cleared the other three (`TC-BE-034`,
@@ -66,7 +68,7 @@ the real gateway's RSA path. The 2026-10-03 pass cleared the other three (`TC-BE
 | TC-BE-019 | Pattern quota exhausted | **X** | `RoutingService` enforces **SKU** quota only. Nothing reads `pattern_usage` for eligibility, and `decomposition_pattern` has no quota column |
 | TC-BE-020 | SKU quota exhausted | **R** | `quota_daily=1` against `daily_usage=4`: the higher-scored pattern became ineligible and routing picked the alternate |
 | TC-BE-021 | Negative-margin pattern | **R** | `eligible=false` → excluded, alternate selected |
-| TC-BE-022 | Provider price changed, no denomination change | **U** | `ProviderPriceServiceTest`. No e2e path: there is no endpoint to change a price (TC-ADM-008 is unbuilt), and "no structural regeneration" is vacuously true because no generator exists |
+| TC-BE-022 | Provider price changed, no denomination change | **R** | `ProviderPriceServiceTest`, and now end to end: `run-catalog-admin.sh` changes a price through the API and asserts the new version, the re-score of only affected patterns, and that no generation was needed |
 | TC-BE-023 | SKU disabled | **R** (partial) | Routing **does** exclude every pattern containing the disabled SKU. The Section 30.3 *invalidation* half is a gap: `structural_status` is only ever read, so the pattern stays `VALID`. The harness asserts that gap explicitly, so it flips the day someone implements it |
 | TC-BE-024 | Generation validation failure | **X** | No pattern-generation engine |
 | TC-BE-025 | Generation rollback | **X** | No pattern-generation engine |
@@ -84,11 +86,11 @@ the real gateway's RSA path. The 2026-10-03 pass cleared the other three (`TC-BE
 
 | ID | Property | Tag |
 |---|---|---|
-| TC-PROP-001 | Invariant across random `parent_amount`s | **X** |
-| TC-PROP-002 | Invariant across random SKU denomination sets | **X** |
-| TC-PROP-003 | `component_count <= configured_max` | **X** |
-| TC-PROP-004 | Determinism for identical input + seed | **X** |
-| TC-PROP-005 | No duplicate `pattern_hash` per generation | **X** |
+| TC-PROP-001 | Invariant across random `parent_amount`s | **U** | `PatternGeneratorTest.matchesBruteForceOnRandomSmallCatalogs` (60 random catalogs/amounts compared with an independent brute force) plus `run-pattern-admin.sh`, which re-checks the sum in SQL over every generated pattern. Amounts are sampled in 1..30 in the unit test, not across 10,000..10,000,000 |
+| TC-PROP-002 | Invariant across random SKU denomination sets | **U** | Same test: random face values, caps and counts; an infeasible set yields zero patterns and `infeasible=true`, never an error |
+| TC-PROP-003 | `component_count <= configured_max` | **X** | Not the same property: the configured limits bound **total quantity** (hard ceiling and fewest-plus-extra), not distinct components. `PatternGeneratorTest` asserts the quantity bounds. The PRD row needs rewording or a component-count limit needs adding |
+| TC-PROP-004 | Determinism for identical input + seed | **R** | `PatternGeneratorTest.sameInputGivesIdenticalOutputAndHashes` (also with the SKUs given in a different order) and `run-pattern-admin.sh`: two generations over the same catalog have identical pattern-hash sets and fingerprint. There is no seed: the algorithm uses no randomness |
+| TC-PROP-005 | No duplicate `pattern_hash` per generation | **R** | `generation_id, pattern_hash` is unique in the schema, the generator never emits a duplicate (unit), and `run-pattern-admin.sh` asserts 64-hex hashes unique per generation |
 
 All five require the Rust offline pattern-generation engine, which does not exist. The
 runtime-enforced half of the mandatory invariant (`SUM(face_value × quantity) == parent_amount`) is
@@ -111,10 +113,10 @@ as HTTP Basic requests against the `/admin/**` REST endpoints. There is now a sm
 | TC-ADM-005 | Permission: no `retry:execute`, attempts retry | **R** | `403` **and** an `ADMIN_PERMISSION_DENIED` row carrying the real `actor_id`. Previously unrecorded |
 | TC-ADM-006 | Transaction search | **R** | `GET /admin/parent-orders?customer_reference=` (also `state`, `partner_code`, `product_code`, `order_no`, `from`/`to`, paged). `run-backoffice-read.sh` asserts the result against the database for a known reference, an unknown one, and every other filter. `GET /admin/orders` (reseller id) remains the narrow support lookup |
 | TC-ADM-007 | Parent/child drilldown | **R** | `GET /admin/parent-orders/{id}`: payment (QR as a flag only), decomposition pattern with components, child orders, provider transactions, webhook deliveries, and a timeline that is explicitly *derived* (no state-history table exists). `V26` grants `order:view` to FINANCE and RECONCILIATION, as `V24` said to once this existed |
-| TC-ADM-008 | Pricing update | **X** | No implementation |
-| TC-ADM-009 | Configuration update | **X** | No implementation |
-| TC-ADM-010 | Pattern viewing | **X** | No implementation |
-| TC-ADM-011 | Generation trigger | **X** | No implementation |
+| TC-ADM-008 | Pricing update | **R** | `POST /admin/provider-skus/{id}/prices`: new `provider_price` version, previous `effective_until` set, exactly one active row, mandatory reason, audited before/after, then a re-score of exactly the patterns containing the SKU (a pattern without it keeps a hand-set score). `run-catalog-admin.sh` |
+| TC-ADM-009 | Configuration update | **R** | Supported amounts (`POST/PATCH /admin/supported-amounts`, visible in the partner API at once) and typed configuration values (`PUT /admin/configuration/{key}`, range-checked, unknown key 404), audited with before/after. `run-catalog-admin.sh`, `run-pattern-admin.sh`. An amount is accepted before any pattern serves it; the response and the UI say so |
+| TC-ADM-010 | Pattern viewing | **R** | `GET /admin/patterns` (by amount, product, generation, structure, eligibility) and `/{id}` with components, SKU codes and 90 days of economics. `run-pattern-admin.sh` |
+| TC-ADM-011 | Generation trigger / activation | **R** | `POST /admin/pattern-generations` builds in the background; activation is one transaction (old SUPERSEDED, not deleted; one ACTIVE enforced by a unique index), refused with 409 on a coverage loss unless a reason is given, rollback is re-activation, and each step is audited. `run-pattern-admin.sh` (83 assertions), `ui-smoke.cjs` |
 | TC-ADM-012 | Retry authorization + reason text | **R** | Permission enforced, and `reason` now required: `400 VALIDATION_ERROR` when absent **or blank**, recorded in `audit_log.after_state`. The endpoint previously took no body, so the log said *that* a retry happened and by whom, never *why* |
 | TC-ADM-013 | Audit log completeness | **R\*** | Re-checked 2026-10-03 across the whole `audit_log` after a full pass: exactly one row per admin action with the correct `actor_id`, 1:1 on the **denied** side too (which used to be 0) — including two `ADMIN_PERMISSION_DENIED` rows from two *different* actors, and three `CHILD_ORDER_RETRY` rows for three authorized retries even though TC-BE-015's concurrent pair collapsed to one execution. The only rows without an `actor_id` are `ADMIN_LOGIN_FAILED`, by design: there is no authenticated actor, so the attempted username is recorded instead |
 | TC-ADM-014 | Settlement display | **R\*** | Re-driven live on 2026-10-03: `GET /admin/settlements/{id}/allocations` returned the real per-partner breakdown for the TC-BE-034 settlement — `gross_amount`, `fee_allocated`, a derived `net_amount`, `allocation_method` and `computed_at` per partner, plus a `reconciling_gross_total` matching `actual_amount`. Section 41.8's literal per-payment expected/actual/fee view is still not built |

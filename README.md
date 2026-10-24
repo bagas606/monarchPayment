@@ -87,8 +87,10 @@ scripts/e2e/run-routing-and-sweeps.sh    # 15 assertions (waits on the 60s expir
 scripts/e2e/run-refund-gateway.sh        # 15 assertions; needs its own boot flag, see its header
 scripts/e2e/run-backoffice-read.sh       # 95 assertions; run after run-core.sh, it reads what that left behind
 scripts/e2e/run-partner-secrets.sh       # 34 assertions: secrets at rest, forged/plaintext values refused, provisioning API
+scripts/e2e/run-pattern-admin.sh         # 83 assertions: generate, activate, roll back, score, configure; own fresh database, runs after run-core
+scripts/e2e/run-catalog-admin.sh         # 82 assertions: catalog, pricing, supported amounts; own fresh database
 scripts/e2e/run-admin-auth.sh            # 101 assertions; boots its own app on :8081 (sessions, MFA, timeouts, UI headers)
-NODE_PATH=<dir with playwright> node scripts/e2e/ui-smoke.cjs   # 46 assertions in a real browser; see scripts/e2e/README.md
+NODE_PATH=<dir with playwright> node scripts/e2e/ui-smoke.cjs   # 73 assertions in a real browser; see scripts/e2e/README.md
 
 cd ../ppob1-sim
 ./gradlew test                           # 65 unit tests for the PPOB1 side
@@ -114,9 +116,12 @@ something a test pass can close.
    and is `@Profile("!prod")`, so booting with `SPRING_PROFILES_ACTIVE=prod` fails at context
    startup with no such bean. That is deliberate — failing loudly beats silently issuing top-ups
    nobody fulfils — but it means the platform cannot serve production traffic in any form.
-2. **No pattern-generation engine.** Section 29's Rust offline generator (DP + K-Best + B&B) does
-   not exist, so `decomposition_pattern` rows must be hand-seeded and `TC-PROP-001..005` cannot be
-   run at all.
+2. **Pattern generation is Java, not Rust, and unproven against a real catalog.** Section 29's engine now
+   exists as a pure, deterministic Java function (verified against brute force) behind a build / validate /
+   activate / roll-back lifecycle with a coverage gate. Measured on a synthetic catalog (3 providers x 8
+   denominations x 118 amounts): 985,777 patterns in 3 min 2 s, ~500 MB peak RSS, 1.6 GB of tables. It has not
+   seen a real provider catalog, and routing still loads up to K=10,000 patterns per order (about 0.7 to 1.4 s from
+   callback to SUCCESS at that size) where the PRD envisions a Redis-backed candidate cache.
 3. **Single instance only.** Nothing is Redis-backed: the replay-protection nonce store is an
    in-memory map and the QR expiry sweep has no leader election, so two app instances would not
    coordinate.
@@ -124,10 +129,11 @@ something a test pass can close.
    webhook secret are AES-256-GCM ciphertext under `PPOB2_SECRET_KEYS` (Section 22.3 says "hash", but HMAC needs
    the secret itself). Anyone who can read both the database and the app's environment can still decrypt;
    a KMS-backed `SecretKeyProvider` is the follow-up, and Section 22.3 still needs updating to say so.
-5. **Most of Admin Web does not exist.** `TC-ADM-006..011` — transaction search, parent/child
-   drilldown, pricing update, configuration update, pattern viewing, generation trigger — have no
-   implementation to test. The reconciliation surface (Section 41.9) is the exception and is now
-   complete enough to work a queue from: `GET /admin/reconciliations` lists and filters
+5. **Parts of Admin Web are still missing.** Built: transactions, payments, audit, sessions + MFA,
+   reconciliation, and (2026-10-24) catalog, pricing, supported amounts, configuration values, pattern
+   generation / activation / rollback and pattern lookup. Not built: the dashboard (41.1), margin and quota
+   views (41.5, 41.6), provider balance / settlement screens, and editing of user accounts and roles (done in
+   SQL). The reconciliation surface (Section 41.9) can be worked from a queue: `GET /admin/reconciliations` lists and filters
    discrepancies, `GET /admin/reconciliations/{id}` drills into one, and the
    `investigate`/`resolve` actions move them. What is still missing there is Section 41.9's
    resolution **notes** — `resolve` records who and when, but not why, so a resolved discrepancy
