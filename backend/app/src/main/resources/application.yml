@@ -34,7 +34,11 @@ spring:
         # alongside QrExpirySweepJob, a single slow/timing-out webhook-delivery batch could occupy
         # that one thread long enough to delay the expiry sweep too. Two threads means the two jobs
         # no longer contend for the same slot.
-        size: 2
+        # Now 3: one thread per @Scheduled job (QrExpirySweepJob, WebhookRetrySweepJob and the hourly
+        # admin-session purge). The purge is one fast DELETE and would be fine on a shared thread, but the
+        # invariant "no job can be starved by another" is worth more than a thread, and it is simpler to
+        # keep true than to remember which job is the exception.
+        size: 3
 
 server:
   port: ${PORT:8080}
@@ -91,6 +95,23 @@ ppob2:
       # AyolinxPaymentGateway's Javadoc / backend/README.md's "Inbound callback path" entry.
       callback-route: ${PPOB2_AYOLINX_CALLBACK_ROUTE:/internal/webhooks/ayolinx}
       timezone: ${PPOB2_AYOLINX_TIMEZONE:Asia/Jakarta}
+  admin:
+    # Section 42.3. HTTP Basic carries no TOTP, so while it is on, MFA is bypassed for whoever uses it.
+    # OFF by default; the dev seed and the e2e suites (which authenticate with `curl -u`) need it ON.
+    basic-auth-enabled: ${PPOB2_ADMIN_BASIC_AUTH_ENABLED:false}
+    session:
+      idle-timeout: ${PPOB2_ADMIN_SESSION_IDLE_TIMEOUT:PT30M}
+      absolute-timeout: ${PPOB2_ADMIN_SESSION_ABSOLUTE_TIMEOUT:PT8H}
+      pending-timeout: ${PPOB2_ADMIN_SESSION_PENDING_TIMEOUT:PT5M}
+      # Browsers only keep a Secure cookie over HTTPS (localhost excepted). False only for plain-HTTP runs.
+      cookie-secure: ${PPOB2_ADMIN_COOKIE_SECURE:true}
+    mfa:
+      # base64 of 32 random bytes: `openssl rand -base64 32`. Blank = MFA enrolment unavailable.
+      encryption-key: ${PPOB2_ADMIN_MFA_ENCRYPTION_KEY:}
+      max-attempts: ${PPOB2_ADMIN_MFA_MAX_ATTEMPTS:5}
+    login:
+      max-failures: ${PPOB2_ADMIN_LOGIN_MAX_FAILURES:5}
+      lockout: ${PPOB2_ADMIN_LOGIN_LOCKOUT:PT15M}
   webhook:
     # Section 23.8: how often WebhookRetrySweepJob checks for due webhook_delivery rows.
     retry-sweep-interval-ms: ${PPOB2_WEBHOOK_RETRY_SWEEP_INTERVAL_MS:60000}

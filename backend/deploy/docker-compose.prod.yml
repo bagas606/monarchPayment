@@ -1,0 +1,89 @@
+# Single-host deployment: Caddy (TLS) -> app -> Postgres.
+#
+#   cp deploy/.env.example deploy/.env      # then fill it in
+#   docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env up -d --build
+#
+# STAGING ONLY until a real GameProvider exists. The `prod` Spring profile refuses to start without
+# one (README "Go-live blockers"), so this file does NOT set it; the app runs the stub provider,
+# which issues no real top-ups. Do not point real money at this stack.
+#
+# One app replica only: the nonce store is in memory and the sweep jobs have no leader election.
+name: ppob2
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ppob2
+      POSTGRES_USER: ppob2
+      POSTGRES_PASSWORD: ${PPOB2_DB_PASSWORD:?set PPOB2_DB_PASSWORD in deploy/.env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    # No `ports:` on purpose: only the app, on the internal network, can reach the database.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ppob2 -d ppob2"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    mem_limit: 1g
+
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PPOB2_DB_URL: jdbc:postgresql://postgres:5432/ppob2
+      PPOB2_DB_USER: ppob2
+      PPOB2_DB_PASSWORD: ${PPOB2_DB_PASSWORD}
+      PPOB2_PAYMENT_GATEWAY: ${PPOB2_PAYMENT_GATEWAY:-stub}
+      PPOB2_AYOLINX_BASE_URL: ${PPOB2_AYOLINX_BASE_URL:-https://sandbox.ayolinx.id}
+      PPOB2_AYOLINX_CLIENT_KEY: ${PPOB2_AYOLINX_CLIENT_KEY:-}
+      PPOB2_AYOLINX_CLIENT_SECRET: ${PPOB2_AYOLINX_CLIENT_SECRET:-}
+      PPOB2_AYOLINX_NOTIFICATION_URL: ${PPOB2_AYOLINX_NOTIFICATION_URL:-}
+      PPOB2_AYOLINX_PRIVATE_KEY_PEM: ${PPOB2_AYOLINX_PRIVATE_KEY_PEM:-}
+      PPOB2_AYOLINX_PUBLIC_KEY_PEM: ${PPOB2_AYOLINX_PUBLIC_KEY_PEM:-}
+      PPOB2_BUSINESS_ZONE: ${PPOB2_BUSINESS_ZONE:-UTC}
+      # Section 42.3. Basic auth carries no MFA, so it is pinned OFF here whatever the host environment says.
+      PPOB2_ADMIN_BASIC_AUTH_ENABLED: "false"
+      # Encrypts TOTP secrets at rest. Required: without it SUPER_ADMIN / FINANCE / RECONCILIATION cannot sign in.
+      # Losing this key invalidates every enrolled authenticator - back it up with the database.
+      PPOB2_ADMIN_MFA_ENCRYPTION_KEY: "${PPOB2_ADMIN_MFA_ENCRYPTION_KEY:?set PPOB2_ADMIN_MFA_ENCRYPTION_KEY in deploy/.env (openssl rand -base64 32)}"
+      # Behind Caddy the TCP peer is always Caddy; trust X-Forwarded-For so audit_log.ip_address is the admin's.
+      # Safe only because the app is not published on the host - nothing else can reach it to forge the header.
+      SERVER_FORWARD_HEADERS_STRATEGY: native
+    # Only reachable from Caddy, never published on the host.
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s  # Flyway migrates from zero on first boot
+    mem_limit: 1g
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      PPOB2_DOMAIN: ${PPOB2_DOMAIN:?set PPOB2_DOMAIN in deploy/.env}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  postgres-data:
+  caddy-data:
+  caddy-config:

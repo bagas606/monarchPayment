@@ -575,8 +575,8 @@ database — see that slice's notes.
     22.26's columns) backs a `SecurityFilterChain` for `/admin/**` using HTTP Basic +
     `DaoAuthenticationProvider` + `BCryptPasswordEncoder` (`admin`'s new `AdminUserDetailsService`,
     `AdminPrincipal`). Section 42's RBAC (fine-grained permission checks) is now built — see
-    "Admin RBAC" below. **Still not built**: Section 42.3's session management (JWT/idle+absolute
-    timeout, revocation) — Basic Auth is stateless per-request instead; MFA.
+    "Admin RBAC" below. **Not built at the time of this slice, since built (2026-10-22, see below)**: Section 42.3's
+    session management (idle + absolute timeout, revocation) and MFA. HTTP Basic is now off by default.
     `admin_user.last_login_at` is mapped but never written — schema-only, not silently "maintained."
   - **`AdminReconciliationController`** (`app.web`, matching this codebase's established
     composition-root-owns-controllers convention) exposes `POST /admin/reconciliations/{id}
@@ -610,8 +610,8 @@ database — see that slice's notes.
 
 - **Admin RBAC** (Section 42.1 / 42.2) closes the RBAC gap the Admin Web slice above flagged:
   every `ACTIVE` admin_user could previously call every `/admin/**` action with no per-permission
-  check. Section 42.3 (MFA, JWT/idle+absolute session timeout) is explicitly still out of scope —
-  a separate, still-open gap, not silently folded into this one.
+  check. Section 42.3 (MFA, idle+absolute session timeout) was explicitly out of scope here — a separate gap, not
+  silently folded into this one; it was closed on 2026-10-22 (see the "Admin sessions and TOTP MFA" entry).
   - **New tables** (V19 migration): `role`, `permission`, `admin_user_role`, `role_permission`
     (Section 22.26). Seeded: all 7 Section 42.1 roles as reference data, but only the 4 permission
     codes this codebase actually gates something with today (`retry:execute`,
@@ -1452,7 +1452,7 @@ database — see that slice's notes.
 
 - **PRD Section 54 (`TC-ADM-*`) Admin Web test matrix, run for real** — this codebase has no
   browser-based Admin Web (Section 54's own "Method" column names Playwright/Cypress; none exists
-  here), so "Admin Web" in practice is real HTTP Basic Auth against the actual `/admin/**` REST
+  here), so "Admin Web" in practice was (until 2026-10-22: sessions + MFA, then a browser console) real HTTP Basic Auth against the actual `/admin/**` REST
   endpoints and RBAC (`SecurityConfig.adminFilterChain`, Section 42's permission model) — the same
   adaptation this README's own "Running locally" section already documents for exercising Admin Web
   manually. Seeded four throwaway `admin_user` rows (`e2e_viewer`/VIEWER, `e2e_ops`/OPERATIONS,
@@ -2473,6 +2473,166 @@ Known gaps to close before this is production-real:
     `run-routing-and-sweeps.sh` 15/15 (was 13), `run-ppob1.sh` 126/126 (was 113),
     `run-refund-gateway.sh` 15/15.
 
+- **2026-10-22 - Backoffice read APIs (Sections 41.2, 41.7, 41.12).** `GET /admin/parent-orders`
+  (+ `/{id}`), `/admin/child-orders`, `/admin/payments` (+ `/{id}`), `/admin/payment-events`,
+  `/admin/webhook-events`, `/admin/audit-logs`. All in `app/web`, reading through `app/admin`.
+  - **Plain SQL with explicit column lists, not the JPA entities.** The entities these views span carry
+    columns that must never reach a screen - `payment.qr_payload`, `provider_transaction.request_payload /
+    response_payload`, `payment_event.raw_payload`, `webhook_event.payload`. A `SELECT` that never names
+    them cannot leak them whatever a later edit adds to a DTO; it is also one statement per view rather
+    than lazy-association N+1. Optional filters go through `SqlFilter`, which has no method that accepts a
+    column or operator from a request - values are bind parameters only.
+  - **`has_more` instead of a total.** Lists fetch `size + 1` rows; there is no `count(*)`. `size` is
+    clamped to 100 and the clamped value is echoed.
+  - **The timeline is derived, and says so (`"derived": true`).** There is no state-history table, so
+    automatic transitions (`PAID -> FULFILLING -> SUCCESS`) are not individually timestamped anywhere.
+    What is shown is what was actually recorded: creation, each payment callback, paid/refunded times,
+    each webhook delivery attempt, every admin action in `audit_log` against the order or a child, and the
+    last update. `ORDER_CREATED` is pinned first because `payment.paid_at` is stored to the second and on
+    a fast payment sorts a few hundred ms *before* the order it paid for.
+  - **Rejected callbacks are in `webhook_event`, not `payment_event`.** A first draft read
+    `payment_event.signature_valid = false` for Section 41.7's "rejected / invalid-signature attempts" and
+    the live data showed 22 rows, all valid: a callback whose signature fails never reaches
+    `payment_event`; Section 22.24 logs it only in `webhook_event` with status `FAILED`. The security
+    view is `/admin/webhook-events?status=FAILED`. Found by looking at the rows before trusting the column name.
+  - **`actor_type` is `ADMIN_USER`, not `ADMIN`.** The username join used the wrong literal and would have
+    returned a null `actor_username` for every row; caught by reading `audit_log` before writing the join.
+  - **Redaction is a backstop.** `JsonRedactor` masks secret-looking keys (`*secret*`, `*password*`,
+    `*hash*`, `*token*`, `*signature*`, `*api_key*`, `*otp*`) at any depth in audit states, order metadata
+    and pattern components; unparseable JSON is replaced by `[unparseable]` rather than echoed. The order's
+    `callback_url` is reduced to scheme://host:port, because a path or query can carry a token.
+  - **`V26`** adds `payment:view` and `audit:view`, and grants `order:view` to FINANCE and RECONCILIATION -
+    the grant `V24` said to make "the moment the parent/child drilldown exists". `payment:view` goes to
+    OPERATIONS/FINANCE/RECONCILIATION (narrower than `order:view`: callback history is money-and-security
+    data); `audit:view` is SUPER_ADMIN only (no Section 42.1 scope names the audit log). TECH_SUPPORT still
+    has none of the three. `run-core.sh`'s "FINANCE lacks order:view" assertion encoded V24 and was
+    inverted deliberately; the boundary it guarded is now TECH_SUPPORT.
+  - **Type-mismatch leak closed.** `handleBadRequest` echoed `ex.getMessage()`, which for a bad typed
+    filter is `Failed to convert value of type 'java.lang.String' to required type 'java.lang.Long'; For input
+    string: "abc"` and for a missing parameter names `method parameter type String`. Split into three
+    handlers with fixed wording; `GlobalExceptionHandlerBadRequestTest` asserts on the real exception
+    objects (their `getMessage()` is what used to be sent). Admin list endpoints made this easy to reach,
+    which is why it was fixed here rather than left as the known-pre-existing item.
+  - **Closes** `TC-ADM-006` (search by `customer_reference`) and `TC-ADM-007` (parent -> payment ->
+    pattern -> child orders -> provider transactions in one response).
+  - **Verified**: 213 PPOB2 unit tests (was 203); `run-core.sh` 178/178 (177 + the TECH_SUPPORT boundary assertion that replaced the FINANCE one); new `run-backoffice-read.sh`
+    95/95 - RBAC matrix over five roles, paging/clamp/`has_more`, every filter against the database,
+    bad-parameter 400s with an absence check for Java types, and planted secrets (callback URL token,
+    metadata api key, audit `password_hash`) asserted *absent* from the response.
+
+- **2026-10-22 - Admin sessions and TOTP MFA (Section 42.3).** `POST /admin/auth/login`,
+  `/admin/auth/mfa/verify`, `/admin/auth/mfa/enroll`, `/admin/auth/mfa/confirm`, `/admin/auth/logout`,
+  `GET /admin/auth/me`, `POST /admin/auth/sessions/revoke`. Logic in `admin/.../session`, HTTP in `app`.
+  - **HTTP Basic is now OFF by default - and that is the point, not a side effect.** Basic carries no
+    TOTP, so while it is accepted MFA is bypassed for whoever uses it, including the SUPER_ADMIN /
+    FINANCE / RECONCILIATION accounts Section 42.3 makes MFA mandatory for. `ppob2.admin.basic-auth-enabled`
+    (env `PPOB2_ADMIN_BASIC_AUTH_ENABLED`) turns it back on for the dev seed and the suites that
+    authenticate with `curl -u`; booting with it on logs a WARN. `deploy/docker-compose.prod.yml` pins it
+    `false`. `run-core.sh`, `run-refund-gateway.sh` and `run-backoffice-read.sh` now source
+    `preflight-basic.sh`, which stops with the flag's name instead of letting a default boot produce dozens
+    of unrelated-looking 401 failures.
+  - **Opaque tokens in a table, not JWTs.** Section 42.3 requires sessions "revocable on logout /
+    administrative action"; a JWT cannot be revoked without a server-side list, and then the list is the
+    session store. Only the SHA-256 of a token is stored (`admin_session.token_hash`), so a database read
+    yields nothing usable. Asserted: no row contains the raw token, one contains its hash.
+  - **Idle (30 min) slides; absolute (8 h) never does.** Both are properties so `run-admin-auth.sh` can
+    set 6 s / 15 s and watch them fire: a session used every 4 s for 12 s survives the idle limit, then
+    dies at 15 s with `revoked_reason = EXPIRED_ABSOLUTE`. A password-only session lives 5 minutes.
+  - **A pending session authenticates as `ROLE_PENDING_MFA` and nothing else**, carrying the account's
+    identity but none of its permissions, so no URL rule can accidentally open data to it. **Promotion
+    rotates the token** (old row revoked as `PROMOTED`): the credential that existed before the second
+    factor was proven must not be the one that outlives it.
+  - **TOTP is hand-written (RFC 6238, HMAC-SHA1)** and checked against the RFC's Appendix B vectors, all six.
+    Replay: `admin_user.mfa_last_step` must be strictly exceeded, so a code seen once is dead for its
+    whole window (asserted over HTTP: the same code on a second login -> 401). Attempts: five wrong codes
+    revoke the session, after which even the right code is refused. The secret is AES-256-GCM encrypted at
+    rest with a key from configuration (`ppob2.admin.mfa.encryption-key`), never stored plain; with no key,
+    enrolment is refused (503) rather than falling back to plaintext.
+  - **Mandatory MFA is a login state, not a flag.** A SUPER_ADMIN/FINANCE/RECONCILIATION account with no
+    enrolment gets `MFA_ENROLLMENT_REQUIRED`: the session may enrol and nothing else, and `mfa_enabled` is set
+    only after a confirming code. Re-enrolling an enrolled account is a 409: replacing the second factor
+    from a live session would let a hijacked session lock the real owner out.
+  - **Cookie vs Bearer.** The browser UI gets an `HttpOnly; SameSite=Strict` cookie and the token is not in
+    the body unless `return_token: true`. A cookie is ambient, so state-changing requests carrying one need
+    `X-CSRF-Token` equal to a value derived from the token; `Authorization: Bearer` is not ambient and is
+    exempt. Spring's own CSRF filter stays off (it is session-based).
+  - **Brute force.** Five wrong passwords lock the account for 15 minutes; a locked account answers the
+    same generic 401 for the *right* password, so lockout is not an oracle. Unknown user and wrong
+    password return the identical message and cost the same (a dummy BCrypt check).
+  - **Audited**, per 42.3: failures still flow through Spring's failure event to the existing
+    `AdminSecurityAuditListener`; new rows for `ADMIN_LOGIN_SUCCESS`, `ADMIN_MFA_CHALLENGE_SUCCESS/FAILED`,
+    `ADMIN_MFA_ENROLLMENT_STARTED/FAILED`, `ADMIN_MFA_ENROLLED`, `ADMIN_LOGOUT`, `ADMIN_SESSIONS_REVOKED`.
+    The submitted password, the TOTP secret and codes are asserted absent from `audit_log`.
+  - **Found only by running it:** the first live enrolment answered "Start enrolment first" right after
+    starting one. `Resolved` carries entities from the filter's transaction; with open-in-view off they
+    are detached by the time a controller calls the service, and a change to a detached entity is silently
+    not saved - the audit row was written, the secret was not. Every service method taking a `Resolved`
+    now re-loads it inside its own transaction. The mocked-repository unit tests could not have seen it:
+    a mock returns the same instance. `V27` also first used `CHAR(64)`, which Hibernate's schema validation
+    rejects against a `String` (the same trap `V8` documents); it is `VARCHAR(64)`.
+  - **A bug an adversarial review found after everything was green**: reloading during the MFA step locked
+    the user out of signing in again. `permitAll` only affects authorization - `AdminSessionAuthenticationFilter`
+    still ran on `/admin/auth/login`, resolved the live pending cookie and demanded its CSRF header, which a
+    freshly loaded page does not have; the user got a 403 until the pending session timed out (5 min).
+    Reproduced first (the new `run-admin-auth.sh` case answered 403 against the old jar), then fixed by
+    having the filter skip the login URL (login creates a session; it does not depend on one), and
+    asserted at both levels: over HTTP, and in the browser as a reload mid-enrolment.
+  - **Not done, on purpose:** MFA reset for a locked-out user (a DB operation, by design), per-IP rate
+    limiting at the edge, and `Secure`-cookie behaviour is covered by config only (the e2e boots with
+    `cookie-secure=false` because it runs over plain HTTP).
+  - **Scheduler pool 2 -> 3.** `AdminSecurityStartupCheck.purge` (hourly `DELETE` of dead sessions) is a third
+    `@Scheduled` job; `spring.task.scheduling.pool.size` is documented as one thread per job so the expiry
+    sweep is never starved, so it was raised rather than left silently violated.
+  - **`V27`** adds `admin_session`, four `admin_user` columns and the `session:revoke` permission
+    (SUPER_ADMIN only, explicit grant per V19).
+  - **Verified**: 238 PPOB2 unit tests (was 213) incl. RFC 6238 vectors and a clock-driven session state
+    machine; new `run-admin-auth.sh` 101/101 on its own instance (Basic off, 6 s / 15 s / 8 s timeouts; 89 of
+    those are session/MFA, 9 the UI's headers and `/me`, 3 the re-login-with-a-live-pending-cookie regression), run several times; `run-core.sh` 178/178, `run-backoffice-read.sh` 95/95 and `run-routing-and-sweeps.sh` 15/15 on a
+    Basic-enabled boot.
+
+- **2026-10-22 - Backoffice UI.** Static files under `app/src/main/resources/static/backoffice/`, served
+  by the app itself at `/backoffice/`: sign-in (with MFA challenge and mandatory enrolment), orders (list,
+  filters, detail with payment / pattern / children / deliveries / derived timeline), refund and child retry
+  through dialogs that demand a reason, payments, webhook log (rejected callbacks), reconciliation
+  (investigate / resolve), audit log, and session revocation. Sections are shown only if the account holds
+  the permission, and the server checks again on every call.
+  - **No build step, no dependencies, nothing loaded from another origin.** Plain ES modules; a Java build
+    stays one JVM build and the Dockerfile did not change. A payment back-office should not execute a script
+    or load a font from a CDN, so there is none.
+  - **Same origin, so the cookie session just works** - and so the CSP can say `default-src 'none'; script-src
+    'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'`, with no inline script or style
+    anywhere. That header set (plus `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`) is applied by its
+    own security filter chain for `/backoffice/**` and asserted by `run-admin-auth.sh`.
+  - **It builds the DOM, never HTML.** `dom.js` has no `innerHTML` path; partner-controlled text (customer
+    reference, order metadata, callback host) goes in as `textContent`. `ui-smoke.cjs` plants
+    `<img src=x onerror=window.__xss=1>` as a customer reference and asserts it is shown as literal text, ran no
+    code, and created no element.
+  - **The session token never touches script.** It is an `HttpOnly` cookie. After a reload the page has no way
+    to compute its CSRF value, so `GET /admin/auth/me` now returns it (safe: a cross-site page can neither
+    send the cookie under `SameSite=Strict` nor read the response).
+  - **Found by looking, not by asserting:** a screenshot showed the literal text "null" under the delivery
+    table. The page used the DOM's native `append`, which renders a `null` argument as the string "null", for
+    every optional section (`cond ? node : null`); `dom.js` now has `put`, and `ui-smoke.cjs` asserts no stray
+    `null` / `undefined` / `[object` text on each screen. That assertion was shown to discriminate by
+    restoring the bug and watching it fail. A second bug the first browser run found: `login.js` called a
+    function that used a `const` declared further down (a temporal-dead-zone error) and rendered nothing at
+    all - invisible to every HTTP-level test.
+  - **Driven in a real browser**: `scripts/e2e/ui-smoke.cjs` (Playwright + the preinstalled Chromium), 46
+    assertions: sign-in failure, MFA enrolment with a TOTP computed in the test, filtering (state lives in the
+    URL), drill-down, reload keeps the session, a refund through its dialog (empty reason refused client-side,
+    one audit row with the typed reason against the right admin), investigate, the rejected-callback view,
+    the audit log, sign-out invalidating the cookie, and no console errors beyond the 401s the run causes
+    itself. Dark mode and a 390px viewport were looked at in screenshots, not asserted.
+  - **Not built, deliberately:** catalog / pricing / configuration editing (Sections 41.3-41.6, 41.11), the
+    dashboard (41.1), and reconciliation resolution notes. This is a console over the read APIs and the admin
+    actions that already existed, not the whole of Section 41.
+  - **Not verified:** the Docker image (Docker Hub rate-limited every pull in this environment) and Caddy's
+    handling of the `/backoffice` allow-list and the `redir / /backoffice/` line.
+  - **Verified, whole repository, from an empty database in the documented order**: 238 PPOB2 and 65 PPOB1
+    unit tests; `run-core.sh` 178/178, `run-backoffice-read.sh` 95/95, `run-routing-and-sweeps.sh` 15/15
+    (Basic-enabled boot); `ui-smoke.cjs` 46/46 and `run-admin-auth.sh` 101/101 (Basic off, packaged jar);
+    `run-refund-gateway.sh` 15/15 (own boot); `run-ppob1.sh` 126/126 (both systems live).
+
 ## Running locally
 
 The short version is in the [root README's quickstart](../README.md#quickstart); this section adds
@@ -2702,6 +2862,10 @@ python -c "import bcrypt; print(bcrypt.hashpw(b'<your-password>', bcrypt.gensalt
 ```sql
 INSERT INTO admin_user (username, password_hash) VALUES ('admin1', '<paste hash here>');
 ```
+
+> **HTTP Basic is off by default** since Section 42.3's sessions landed (see the 2026-10-22 entry below).
+> The `curl -u` examples here need the app booted with `PPOB2_ADMIN_BASIC_AUTH_ENABLED=true`, which also
+> bypasses MFA - local development only. The real login is `POST /admin/auth/login`.
 
 ```bash
 curl -X POST -u admin1:<your-password> http://localhost:8080/admin/reconciliations/1/investigate

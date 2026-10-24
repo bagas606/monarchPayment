@@ -33,7 +33,7 @@ import org.springframework.transaction.event.TransactionalEventListener;
  * the harm: a partner being down is exactly when a backlog of unpaid orders is most likely.
  *
  * <p>That contention is not hypothetical — {@code application.yml} sets
- * {@code spring.task.scheduling.pool.size: 2} specifically so a slow webhook batch in
+ * {@code spring.task.scheduling.pool.size} (one thread per scheduled job) specifically so a slow webhook batch in
  * {@code WebhookRetrySweepJob} cannot delay {@code QrExpirySweepJob}. Sending from inside the expiry
  * sweep would move the same problem inside the thread that mitigation protects, where a second
  * thread does not help.

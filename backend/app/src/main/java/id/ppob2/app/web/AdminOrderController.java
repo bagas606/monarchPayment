@@ -29,7 +29,8 @@ import org.springframework.web.bind.annotation.RestController;
  * operational sense, visible."
  *
  * <p><b>This is not TC-ADM-006.</b> That test case is Admin Web transaction search — many filters,
- * paging, a result grid — and it is still {@code X}. This endpoint has exactly one filter and
+ * paging, a result grid. That now exists, as {@link AdminTransactionController} ({@code
+ * /admin/parent-orders}); this endpoint stays the narrow support lookup. It has exactly one filter and
  * requires it. It takes the {@code /admin/orders} path because that is where transaction search
  * belongs and extending it later is better than replacing it, but the required parameter is what
  * keeps today's version honest: without it, {@code GET /admin/orders} would mean "every order on

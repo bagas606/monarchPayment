@@ -30,6 +30,10 @@ public class AdminPrincipal implements UserDetails {
         return adminUser.getId();
     }
 
+    public boolean isMfaEnabled() {
+        return adminUser.isMfaEnabled();
+    }
+
     @Override
     public List<GrantedAuthority> getAuthorities() {
         List<GrantedAuthority> authorities = new ArrayList<>();

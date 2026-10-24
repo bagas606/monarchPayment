@@ -23,9 +23,11 @@ Bring up Postgres, the app and the seed fixture as described in the
 injection knobs below rather than a bare `bootRun`. Then, from `backend/`:
 
 ```bash
-scripts/e2e/run-core.sh                  # 177 assertions
+scripts/e2e/run-core.sh                  # 178 assertions
 scripts/e2e/run-routing-and-sweeps.sh    # 15 assertions, ~2 min (waits on the 60s sweep tick)
 ```
+
+`run-backoffice-read.sh` (95 assertions) is the odd one out: it does **not** want a fresh database. It reads what `run-core.sh` left behind (orders in every state, the rejected callback, the admin audit rows) and restores the three rows it temporarily edits. Run it right after `run-core.sh`; run alone against an empty database most of its cases would fail for want of data, not because anything is wrong.
 
 `run-refund-gateway.sh` (15 assertions) is separate because it needs the app booted with a *fourth*
 knob, `PPOB2_PAYMENT_STUBGATEWAY_SUPPORTSREFUND=true` — see its own header. It asserts that mode is
@@ -56,11 +58,29 @@ binding strips hyphens *within* a property segment but not underscores *between*
 naive all-underscores name silently does not bind.
 
 ```bash
+PPOB2_ADMIN_BASIC_AUTH_ENABLED=true \
 PPOB2_FULFILLMENT_STUBPROVIDER_FAILPROVIDERSKUIDS=2 \
 PPOB2_FULFILLMENT_STUBPROVIDER_AMBIGUOUSPROVIDERSKUIDS=3 \
 PPOB2_FULFILLMENT_STUBPROVIDER_TIMEOUTPROVIDERSKUIDS=4 \
 ./gradlew :app:bootRun
 ```
+
+`PPOB2_ADMIN_BASIC_AUTH_ENABLED=true` is the fourth requirement, added with Section 42.3's sessions: HTTP
+Basic is off by default because it carries no MFA, and these suites authenticate with `curl -u`.
+`run-core.sh`, `run-refund-gateway.sh` and `run-backoffice-read.sh` run a preflight that stops with this
+flag's name if it is missing, rather than failing dozens of assertions with 401.
+
+`run-admin-auth.sh` (101 assertions) is the opposite case: it boots **its own** instance on `:8081` with Basic
+*off* and timeouts of a few seconds, because it is testing exactly that posture. Run it after `run-core.sh`
+(it adds audit rows, and `run-core.sh` asserts absolute audit counts). It needs the built jar
+(`./gradlew :app:bootJar`), `python3` for the TOTP codes, and takes ~3 minutes, most of it waiting for TOTP
+time-steps and the timeouts to elapse.
+
+`ui-smoke.cjs` (46 assertions) drives the backoffice UI in a real browser. It needs Node, the `playwright`
+package (`NODE_PATH` pointing at it) and Chromium; the app up with HTTP Basic **off**, an MFA key set
+(`PPOB2_ADMIN_MFA_ENCRYPTION_KEY`) and `PPOB2_ADMIN_COOKIE_SECURE=false` (plain HTTP), and a database
+populated by `run-core.sh`. It stages its own starting state (resets `superadmin`'s MFA, puts one paid order
+in `REFUND_PENDING` and one record back to `OPEN`), so it can be re-run; `SHOTS=<dir>` also writes screenshots.
 
 ## The pieces
 

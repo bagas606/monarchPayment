@@ -175,15 +175,38 @@ public class GlobalExceptionHandler {
         return envelope(ErrorCode.VALIDATION_ERROR, "Request body is missing or is not valid JSON.", request);
     }
 
-    @ExceptionHandler({MissingRequestHeaderException.class, MissingServletRequestParameterException.class,
-            MethodArgumentTypeMismatchException.class})
-    public ResponseEntity<ErrorResponse> handleBadRequest(Exception ex, HttpServletRequest request) {
+    /**
+     * Messages are written here, not taken from {@code ex.getMessage()}. Spring's own wording names
+     * Java types ("for method parameter type String", "Failed to convert value of type
+     * 'java.lang.String' to required type 'java.lang.Long'") and, for a conversion failure, echoes the
+     * rejected input. Both are the leak {@link #handleBodyValidation} documents; this handler was the
+     * remaining instance of it, and it became easy to reach once admin list endpoints started taking
+     * typed filters.
+     */
+    @ExceptionHandler(MissingRequestHeaderException.class)
+    public ResponseEntity<ErrorResponse> handleMissingHeader(MissingRequestHeaderException ex,
+                                                              HttpServletRequest request) {
         log.debug("Rejected {} {}: {}", request.getMethod(), request.getRequestURI(), ex.getMessage());
-        return envelope(ErrorCode.VALIDATION_ERROR, ex.getMessage(), request);
+        return envelope(ErrorCode.VALIDATION_ERROR, "Required header '" + ex.getHeaderName() + "' is missing.", request);
+    }
+
+    @ExceptionHandler(MissingServletRequestParameterException.class)
+    public ResponseEntity<ErrorResponse> handleMissingParameter(MissingServletRequestParameterException ex,
+                                                                 HttpServletRequest request) {
+        log.debug("Rejected {} {}: {}", request.getMethod(), request.getRequestURI(), ex.getMessage());
+        return envelope(ErrorCode.VALIDATION_ERROR,
+                "Required request parameter '" + ex.getParameterName() + "' is missing.", request);
+    }
+
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ErrorResponse> handleTypeMismatch(MethodArgumentTypeMismatchException ex,
+                                                             HttpServletRequest request) {
+        log.debug("Rejected {} {}: {}", request.getMethod(), request.getRequestURI(), ex.getMessage());
+        return envelope(ErrorCode.VALIDATION_ERROR, "Parameter '" + ex.getName() + "' has an invalid value.", request);
     }
 
     /**
-     * Bean validation on a request body. Split out of {@link #handleBadRequest} — which it used to
+     * Bean validation on a request body. Split out of the generic bad-request handling — which it used to
      * share — because that handler echoes {@code ex.getMessage()}, and this exception's message is
      * not fit to send a partner.
      *

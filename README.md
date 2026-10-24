@@ -5,8 +5,10 @@ dynamic QRIS code through Ayolinx, and the paid amount is decomposed into one or
 that are purchased upstream and reconciled afterwards.
 
 This repository currently contains the **backend** — a Java 21 / Spring Boot 3.3 modular monolith
-(Gradle Kotlin DSL, PostgreSQL, Flyway). There is no frontend, and no Admin Web UI beyond a REST
-slice.
+(Gradle Kotlin DSL, PostgreSQL, Flyway) — and a small **backoffice console** served by that same app at
+`/backoffice/` (plain JavaScript, no build step). The console covers transactions, payments, callbacks,
+reconciliation and the audit log; it is not the whole of Section 41 (no catalog, pricing or configuration
+editing, no dashboard).
 
 > **Status: not ready for production.** Several vertical slices are real and verified end-to-end
 > against a live Postgres, but the platform cannot serve live traffic yet — most importantly there
@@ -73,10 +75,15 @@ payment callback, and the dev-only failure-injection knobs.
 
 ```bash
 cd backend
-./gradlew build                          # 38 unit / slice test classes + ArchUnit (203 tests)
-scripts/e2e/run-core.sh                  # 177 assertions against a running app + real Postgres
+# The e2e suites authenticate to /admin/** with `curl -u`. HTTP Basic is OFF by default (it carries no MFA),
+# so boot the app for them with:  PPOB2_ADMIN_BASIC_AUTH_ENABLED=true
+./gradlew build                          # 38 unit / slice test classes + ArchUnit (238 tests)
+scripts/e2e/run-core.sh                  # 178 assertions against a running app + real Postgres
 scripts/e2e/run-routing-and-sweeps.sh    # 15 assertions (waits on the 60s expiry-sweep tick)
 scripts/e2e/run-refund-gateway.sh        # 15 assertions; needs its own boot flag, see its header
+scripts/e2e/run-backoffice-read.sh       # 95 assertions; run after run-core.sh, it reads what that left behind
+scripts/e2e/run-admin-auth.sh            # 101 assertions; boots its own app on :8081 (sessions, MFA, timeouts, UI headers)
+NODE_PATH=<dir with playwright> node scripts/e2e/ui-smoke.cjs   # 46 assertions in a real browser; see scripts/e2e/README.md
 
 cd ../ppob1-sim
 ./gradlew test                           # 65 unit tests for the PPOB1 side

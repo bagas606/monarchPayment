@@ -72,7 +72,22 @@ public enum ErrorCode {
      * {@code AccessDeniedHandler}, not {@code GlobalExceptionHandler}, since Spring Security's
      * {@code ExceptionTranslationFilter} intercepts {@code AccessDeniedException} before it can
      * ever reach a {@code @RestControllerAdvice}. */
-    PERMISSION_DENIED(403);
+    PERMISSION_DENIED(403),
+
+    /** Admin Web login or session (Section 42.3). One code for "wrong username", "wrong password",
+     * "account locked" and "session expired" on purpose - distinguishing them tells an attacker which
+     * usernames exist and which are under lockout. */
+    AUTHENTICATION_FAILED(401),
+
+    /** A TOTP code that did not verify, was already used, or arrived after the session ran out of attempts. */
+    MFA_CODE_INVALID(401),
+
+    /** Enrolment attempted for an account that already has MFA. Replacing a second factor from a live
+     * session would let a hijacked session lock the real owner out, so it is refused. */
+    MFA_ALREADY_ENROLLED(409),
+
+    /** The session is not in a state that allows the call (e.g. verifying MFA on an active session). */
+    SESSION_STATE_INVALID(409);
 
     private final int httpStatus;
 
