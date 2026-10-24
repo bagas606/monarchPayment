@@ -33,7 +33,7 @@ export async function configPage({ params, can, reload, navigate }) {
     h('section', { class: 'card' }, h('h2', {}, 'Scoring, fee and generation limits'),
       h('p', { class: 'muted' }, 'The payment fee is 0 until the real gateway fee is confirmed, so net margin equals gross margin until then.'),
       table([{ title: 'Key', cell: c => h('span', { class: 'mono' }, c.key) }, { title: 'Value', num: true, cell: c => c.value }, { title: 'Default', num: true, cell: c => c.default },
-        { title: 'Source', cell: c => c.is_default ? 'default' : badge('PENDING') }, { title: 'What it does', cell: c => c.description },
+        { title: 'Source', cell: c => c.is_default ? 'default' : badge('OVERRIDE') }, { title: 'What it does', cell: c => c.description },
         { title: '', cell: c => edit ? h('button', { type: 'button', onclick: () => change(c) }, 'Change') : '' }], cfg.items)),
     h('section', { class: 'card' }, h('h2', {}, 'Supported amounts'),
       filterForm([{ name: 'product_category', label: 'Category' }], params, (v) => navigate('/config', v)),

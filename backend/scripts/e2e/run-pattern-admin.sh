@@ -109,6 +109,8 @@ echo "== Activation, coverage, rollback (Section 40.2) =="
 chk "activate a never-built id: 404" "$(adm -X POST $B/admin/pattern-generations/999999/activate)" 404
 chk "activate G2: 200" "$(adm -X POST $B/admin/pattern-generations/$G2/activate)" 200
 chk "...it is now the single ACTIVE generation" "$(scalar "select string_agg(id::text, ',') from pattern_generation where status='ACTIVE'")" "$G2"
+chk "...tomorrow's economics were written too (routing reads today only, so the day must not start with a gap)" \
+    "$(scalar "select count(*) from decomposition_pattern p where generation_id=$G2 and not exists (select 1 from pattern_economics e where e.pattern_id=p.id and e.snapshot_date=current_date+1)")" 0
 chk "...the seeded one is SUPERSEDED, not deleted" "$(scalar "select status from pattern_generation where id=$SEEDGEN")" SUPERSEDED
 chk "...coverage gained 10000" "$(echo "$(body)" | grep -c '"gained_coverage":\[\[[0-9]*,10000\]\]')" 1
 chk "...audited" "$(scalar "select count(*) from audit_log where action='PATTERN_GENERATION_ACTIVATE' and target_id=$G2")" 1

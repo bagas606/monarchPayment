@@ -2989,8 +2989,13 @@ was decided and what is still open:
 - **Scoring (`PatternScoringService`).** Set-based SQL for a business day. `score = w_margin * net_margin_pct - w_childcount *
   (child orders - 1)`; the other five 31.3 terms have no data source and no knob. Payment fee is 0 (no MDR known). A component with
   no active price makes a pattern ineligible. **Why it came first:** routing reads economics for *today* only, so a generation
-  without rows serves nothing, and the seed's patterns would stop being routable at midnight. `dailyRescore` (00:05 business zone,
-  overwrites) and `ensureToday` (hourly, fills only missing rows, never overwrites) cover it; both can be switched off with
+  without rows serves nothing, and the seed's patterns would stop being routable at midnight. **Tomorrow is scored before it
+  starts** (`scoreTomorrow`, 23:30 business zone; activation and a price edit score both days too): a first version that only
+  rescored at 00:05 left a gap from midnight until a 25 s transaction committed, in which every paid order would have gone to
+  REFUND_PENDING, and no suite could see it because none crosses midnight. It is now pinned by `PatternMaintenanceJobsTest`
+  (fixed clock at 23:59 Jakarta; a deliberate off-by-one in the job fails it) and by e2e assertions that tomorrow's rows exist
+  after activation and after a price edit. `dailyRescore` (00:05, overwrites today, ensures the new tomorrow, prunes) and
+  `ensureUpcoming` (hourly, fills only missing rows, never overwrites) complete it; all can be switched off with
   `ppob2.pattern.maintenance-enabled=false`. A price edit re-scores only the patterns containing that SKU (reverse index, 30.4).
 - **Catalog and configuration.** Products, providers, SKUs and supported amounts are created and switched off, never deleted. A SKU
   face-value change invalidates the patterns that contain it in the same transaction (30.3) and returns the coverage lost; a new
@@ -3000,15 +3005,25 @@ was decided and what is still open:
   `pattern:view`, `pattern:generate`, `pattern:activate`. Activation, pricing and configuration are SUPER_ADMIN only; TECH_SUPPORT
   may edit the catalog and start a generation but not activate it.
 - **Measured (synthetic catalog, 3 providers x 8 denominations x 118 amounts, plus the 6 seed amounts, one machine):**
-  985,777 patterns in 3 min 2 s, peak RSS about 500 MB, 1.6 GB of pattern + component + economics tables, 91 of 124 amounts at the
-  K = 10,000 limit, none budget-exhausted. A full re-score of that pool took 25 s. Orders through it: 0.67 s (100,000) and
+  985,777 patterns in 3 min 2 s, peak RSS about 500 MB, 91 of 124 amounts at the
+  K = 10,000 limit, none budget-exhausted. **Storage, per generation:** patterns 782 MB, components 629 MB; **per scored day:**
+  `pattern_economics` about 280 MB (563 MB for the two days written at activation). A full re-score of that pool took 25 s, and
+  activation (two days scored, coverage computed) took 67 s, so it is a long request.
+  **Growth, and what bounds it:** ~280 MB a day at this size would be ~25 GB over 90 days, so economics older than
+  `ppob2.pattern.economics-retention-days` (default 30, minimum 7) are deleted nightly, and so are the patterns of FAILED
+  generations (never served). SUPERSEDED generations (rollback targets) are **not** pruned: each is ~1.4 GB at this size, so
+  a small disk needs them removed by hand until a retention rule exists. Retention was tested by planting old rows and a dead
+  generation and letting the job run: old rows and dead patterns gone, a 5-day-old row and the generation row kept.
+  **Known limitation:** `MarginReconciliationOrchestrator` compares an order with the snapshot on or before its date, and a
+  mid-day price edit overwrites today's row, so same-day orders routed at the old cost are compared against the new one and can
+  raise a spurious margin discrepancy. Fixing it needs intra-day economics versions. Orders through it: 0.67 s (100,000) and
   1.4 s (5,000,000) from paid callback to SUCCESS, which includes loading up to 10,000 candidates per order. That is the limit to
   watch: the PRD envisions a Redis candidate cache and this reads Postgres directly.
 - **Not done:** partial regeneration (30.3; a structural change invalidates and waits for the next full generation); provider
   health / availability / capacity / load-balance / failure scoring terms; a component-count limit (TC-PROP-003 asks for one; the
   limits here are on total quantity); the dashboard, margin and quota views; CRUD for admin users and roles; the real payment-fee
   value; a real catalog (all numbers above are synthetic).
-- **Verified:** 268 PPOB2 unit tests; `run-pattern-admin.sh` 83, `run-catalog-admin.sh` 82 and `ui-smoke.cjs` 73 (new pages driven in
+- **Verified:** 272 PPOB2 unit tests; `run-pattern-admin.sh` 84, `run-catalog-admin.sh` 83 and `ui-smoke.cjs` 74 (new pages driven in
   a real browser, including a hostile product name shown as text and the coverage-reason dialog), on top of every earlier suite
   unchanged. Two things the first runs taught: a stale success notice made a browser assertion pass for the wrong reason (waits are
   now on the notice's own text), and `scalar()` strips spaces, which had made an audit assertion compare against the wrong string.

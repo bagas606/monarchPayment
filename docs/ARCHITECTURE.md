@@ -242,7 +242,7 @@ One PostgreSQL schema, managed only by Flyway (`ddl-auto: validate`, so a missin
 
 ## 7. Background jobs
 
-Five `@Scheduled` jobs in the same JVM, on a scheduler pool of **5** threads
+Six `@Scheduled` jobs in the same JVM, on a scheduler pool of **6** threads
 (`spring.task.scheduling.pool.size`, one per job) so a slow webhook batch cannot delay expiry.
 
 | Job | Module | Interval | Does |
@@ -250,8 +250,9 @@ Five `@Scheduled` jobs in the same JVM, on a scheduler pool of **5** threads
 | `QrExpirySweepJob` | `order` | 60 s (`ppob2.order.expiry-sweep-interval-ms`) | Expires up to 200 `PAYMENT_PENDING` orders past `expires_at`, one transaction each |
 | `WebhookRetrySweepJob` | `app` | 60 s (`ppob2.webhook.retry-sweep-interval-ms`) | Makes every attempt for due `webhook_delivery` rows; each result is recorded in its own `REQUIRES_NEW` transaction so no connection is held across an HTTP call |
 | `AdminSecurityStartupCheck.purge` | `app` | 1 h | Deletes admin sessions that died more than a day ago |
-| `PatternMaintenanceJobs.dailyRescore` | `app` | 00:05 business zone (`ppob2.pattern.rescore-cron`) | Re-prices and re-scores every pattern of the ACTIVE generation for the new day, overwriting. Routing reads economics for *today* only, so a day with none serves no orders |
-| `PatternMaintenanceJobs.ensureToday` | `app` | 1 h | Fills in patterns that have no economics for today, never overwriting: the safety net for downtime across midnight |
+| `PatternMaintenanceJobs.scoreTomorrow` | `app` | 23:30 business zone (`ppob2.pattern.score-tomorrow-cron`) | Scores *tomorrow* for the ACTIVE generation, so the new day starts fully scored. Routing reads economics for the current day only; a job that waited for midnight would leave a gap in which every paid order is refused |
+| `PatternMaintenanceJobs.dailyRescore` | `app` | 00:05 business zone (`ppob2.pattern.rescore-cron`) | Refreshes today with the latest prices (readers see the old rows until the commit), makes sure the new tomorrow exists, and prunes: economics older than `ppob2.pattern.economics-retention-days` (default 30) and the patterns of FAILED generations |
+| `PatternMaintenanceJobs.ensureUpcoming` | `app` | 1 h | Fills in today's and tomorrow's missing economics and never overwrites: the safety net for downtime across midnight |
 
 None has leader election.
 

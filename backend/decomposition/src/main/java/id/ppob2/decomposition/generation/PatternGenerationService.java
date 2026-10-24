@@ -309,6 +309,8 @@ public class PatternGenerationService {
 
         LocalDate today = LocalDate.now(businessClock);
         scoring.rescore(id, today);
+        // Tomorrow too: a generation activated at 23:50 must not start the next day with no economics (routing reads today only).
+        scoring.rescore(id, today.plusDays(1));
         if (current != null) {
             scoring.ensure(current, today);
         }

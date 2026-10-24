@@ -87,10 +87,10 @@ scripts/e2e/run-routing-and-sweeps.sh    # 15 assertions (waits on the 60s expir
 scripts/e2e/run-refund-gateway.sh        # 15 assertions; needs its own boot flag, see its header
 scripts/e2e/run-backoffice-read.sh       # 95 assertions; run after run-core.sh, it reads what that left behind
 scripts/e2e/run-partner-secrets.sh       # 34 assertions: secrets at rest, forged/plaintext values refused, provisioning API
-scripts/e2e/run-pattern-admin.sh         # 83 assertions: generate, activate, roll back, score, configure; own fresh database, runs after run-core
-scripts/e2e/run-catalog-admin.sh         # 82 assertions: catalog, pricing, supported amounts; own fresh database
+scripts/e2e/run-pattern-admin.sh         # 84 assertions: generate, activate, roll back, score, configure; own fresh database, runs after run-core
+scripts/e2e/run-catalog-admin.sh         # 83 assertions: catalog, pricing, supported amounts; own fresh database
 scripts/e2e/run-admin-auth.sh            # 101 assertions; boots its own app on :8081 (sessions, MFA, timeouts, UI headers)
-NODE_PATH=<dir with playwright> node scripts/e2e/ui-smoke.cjs   # 73 assertions in a real browser; see scripts/e2e/README.md
+NODE_PATH=<dir with playwright> node scripts/e2e/ui-smoke.cjs   # 74 assertions in a real browser; see scripts/e2e/README.md
 
 cd ../ppob1-sim
 ./gradlew test                           # 65 unit tests for the PPOB1 side

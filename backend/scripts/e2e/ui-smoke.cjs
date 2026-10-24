@@ -256,7 +256,7 @@ function totp(base32, offset = 0) {
   await dialogFill({ value: 0.75 });
   await page.click('dialog button[type=submit]');
   await page.waitForSelector('.notice.ok:has-text("updated")');
-  truthy('a valid value is saved and the row says it is an override', await page.isVisible('tr:has-text("routing.weight.childcount"):has-text("PENDING")') || await page.isVisible('tr:has-text("routing.weight.childcount"):has-text("0.75")'));
+  truthy('a valid value is saved and the row says it is an override', await page.isVisible('tr:has-text("routing.weight.childcount"):has-text("OVERRIDE")'));
   truthy('a supported amount with no patterns behind it is flagged', await page.isVisible('text=cannot be fulfilled') || (await page.textContent('body')).includes('10.000'));
 
   await page.goto(BASE + '/backoffice/#/generations');
@@ -298,6 +298,7 @@ function totp(base32, offset = 0) {
   await page.goto(BASE + '/backoffice/#/patterns?parent_amount=20000');
   await page.waitForSelector('tbody tr');
   truthy('patterns of the active generation can be looked up by amount', (await page.locator('tbody tr').count()) > 0);
+  truthy('...eligibility is labelled ELIGIBLE / INELIGIBLE, not with generation states', await page.isVisible('tbody .badge:has-text("ELIGIBLE")') && !(await page.isVisible('tbody .badge:has-text("FAILED")')));
   await noLiteralNullOrUndefined('patterns');
   await page.click('tbody tr a');
   await page.waitForSelector('h2:has-text("Economics by day")');

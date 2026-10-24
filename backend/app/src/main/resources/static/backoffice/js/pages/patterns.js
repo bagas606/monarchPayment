@@ -20,15 +20,15 @@ export async function patternsList({ params, navigate }) {
       { title: 'Cost', num: true, cell: p => p.economics_today ? money(p.economics_today.provider_cost_total) : '' },
       { title: 'Net margin', num: true, cell: p => p.economics_today ? pct(p.economics_today.net_margin_pct) : '' },
       { title: 'Score', num: true, cell: p => p.economics_today ? Number(p.economics_today.score).toFixed(2) : '' },
-      { title: 'Eligible', cell: p => p.economics_today ? badge(p.economics_today.eligible ? 'ACTIVE' : 'FAILED') : badge('NO ECONOMICS') },
-      { title: 'Structure', cell: p => p.structural_status === 'VALID' ? '' : badge('FAILED') }], data.items, 'No patterns match.'),
+      { title: 'Eligible', cell: p => p.economics_today ? badge(p.economics_today.eligible ? 'ELIGIBLE' : 'INELIGIBLE') : badge('NO ECONOMICS') },
+      { title: 'Structure', cell: p => p.structural_status === 'VALID' ? '' : badge(p.structural_status) }], data.items, 'No patterns match.'),
       pager(data, (n) => navigate('/patterns', { ...Object.fromEntries(params), page: n }))));
 }
 
 export async function patternDetail({ id }) {
   const d = await api('GET', '/admin/patterns/' + id);
   const p = d.pattern;
-  return h('div', {}, h('h1', {}, 'Pattern #' + id, ' ', p.structural_status === 'VALID' ? null : badge('FAILED')),
+  return h('div', {}, h('h1', {}, 'Pattern #' + id, ' ', p.structural_status === 'VALID' ? null : badge(p.structural_status)),
     section('Pattern', kv([['Generation', h('a', { href: '#/generations/' + p.generation_id }, '#' + p.generation_id)], ['Amount', money(p.parent_amount)],
       ['Child orders', p.component_count], ['Units', p.total_quantity], ['Structure', p.structural_status], ['Hash', h('span', { class: 'mono' }, p.pattern_hash)]])),
     section('Components', table([{ title: 'SKU', cell: c => c.provider_sku_code }, { title: 'Quantity', num: true, cell: c => c.quantity },
@@ -37,6 +37,6 @@ export async function patternDetail({ id }) {
       { title: 'Day', cell: e => e.snapshot_date }, { title: 'Provider cost', num: true, cell: e => money(e.provider_cost_total) },
       { title: 'Gross profit', num: true, cell: e => money(e.gross_profit) }, { title: 'Payment fee', num: true, cell: e => money(e.payment_fee) },
       { title: 'Net', num: true, cell: e => money(e.net_contribution) }, { title: 'Net margin', num: true, cell: e => pct(e.net_margin_pct) },
-      { title: 'Score', num: true, cell: e => Number(e.score).toFixed(2) }, { title: 'Eligible', cell: e => badge(e.eligible ? 'ACTIVE' : 'FAILED') }],
+      { title: 'Score', num: true, cell: e => Number(e.score).toFixed(2) }, { title: 'Eligible', cell: e => badge(e.eligible ? 'ELIGIBLE' : 'INELIGIBLE') }],
       d.economics_history, 'No economics yet.')));
 }

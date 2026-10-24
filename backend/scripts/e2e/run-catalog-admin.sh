@@ -79,6 +79,8 @@ chk "...patterns WITHOUT the SKU were left alone (hand-set score survives)" \
     "$(scalar "select count(*) from pattern_economics where score=555 and snapshot_date=current_date")" "$(scalar "select count(*) from pattern_economics e join decomposition_pattern p on p.id=e.pattern_id where p.generation_id=$G and e.snapshot_date=current_date and not exists (select 1 from decomposition_component c where c.pattern_id=p.id and c.provider_sku_id=$S1)")"
 chk "...the cost now reflects the new price" \
     "$(scalar "select e.provider_cost_total from pattern_economics e join decomposition_pattern p on p.id=e.pattern_id join decomposition_component c on c.pattern_id=p.id where p.generation_id=$G and p.parent_amount=20000 and c.provider_sku_id=$S1 and c.quantity=1 and p.component_count=1 and e.snapshot_date=current_date")" 19500
+chk "...tomorrow's rows carry the new price as well" \
+    "$(scalar "select e.provider_cost_total from pattern_economics e join decomposition_pattern p on p.id=e.pattern_id join decomposition_component c on c.pattern_id=p.id where p.generation_id=$G and p.parent_amount=20000 and c.provider_sku_id=$S1 and c.quantity=1 and p.component_count=1 and e.snapshot_date=current_date+1")" 19500
 chk "price history lists both versions" "$(adm $B/admin/provider-skus/$S1/prices >/dev/null; echo "$(body)" | grep -o '"pricing_version"' | wc -l | tr -d ' ')" 2
 chk "...audited with before and after" \
     "$(scalar "select (before_state->>'provider_cost')||'>'||(after_state->>'provider_cost') from audit_log where action='PROVIDER_PRICE_SET' and target_id=$S1 order by id desc limit 1")" "18000>19500"

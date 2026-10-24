@@ -288,7 +288,11 @@ public class AdminCatalogService {
         var saved = prices.setPrice(skuId, id.ppob2.sharedkernel.money.Money.of(cost), java.time.Instant.now());
         Long gen = jdbc.queryForList("SELECT id FROM pattern_generation WHERE status = 'ACTIVE'", Map.of(), Long.class)
                 .stream().findFirst().orElse(null);
-        int rescored = gen == null ? 0 : scoring.rescoreAffected(gen, LocalDate.now(businessClock), List.of(skuId));
+        LocalDate today = LocalDate.now(businessClock);
+        int rescored = gen == null ? 0 : scoring.rescoreAffected(gen, today, List.of(skuId));
+        if (gen != null) {
+            scoring.rescoreAffected(gen, today.plusDays(1), List.of(skuId)); // so the next day starts with the new price too
+        }
         Map<String, Object> beforeState = new LinkedHashMap<>();
         beforeState.put("provider_cost", previous);
         Map<String, Object> afterState = new LinkedHashMap<>();
