@@ -99,6 +99,17 @@ package (`NODE_PATH` pointing at it) and Chromium; the app up with HTTP Basic **
 populated by `run-core.sh`. It stages its own starting state (resets `superadmin`'s MFA, puts one paid order
 in `REFUND_PENDING` and one record back to `OPEN`), so it can be re-run; `SHOTS=<dir>` also writes screenshots.
 
+## Running everything: `run-all.sh`
+
+`run-all.sh` runs every suite in the one order they support, each group on a freshly wiped and re-seeded database, starting and
+stopping the apps itself (PPOB2 on :8080, ppob1-sim on :8081 for its suite, a second PPOB2 on :8081 for `run-admin-auth.sh`, and a
+Basic-off PPOB2 for `ui-smoke.cjs`). It generates a throwaway secret key ring for the run and prints a summary table; the exit
+status is 0 only if every suite that ran reported `FAIL: 0` (it checks the printed count, not just each script's exit status).
+Per-suite and per-boot logs go to `LOG_DIR` (default `/tmp/ppob2-e2e`). `E2E_SKIP="ppob1 ui-smoke"` leaves suites out; `ui-smoke` is
+skipped with a notice if node and playwright are not available. It needs the two jars built and a reachable Postgres (see `q.sh`).
+`.github/workflows/ci.yml` calls exactly this script; the groups, in order, are: core + backoffice-read + partner-secrets + routing,
+refund-gateway, ppob1, admin-auth, pattern-admin, catalog-admin, ui-smoke. Allow about 15 to 20 minutes.
+
 ## The pieces
 
 | Script | What it does |

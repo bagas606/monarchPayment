@@ -268,7 +268,7 @@ None has leader election.
   regeneration (30.3), so a structural change invalidates the affected patterns until the next full generation.
 - **Routing loads every candidate for an amount** (up to K = 10,000) per order; there is no candidate cache.
 - **Partner secrets are config-key encrypted, not KMS** (above).
-- **No CI workflow**: the unit and e2e suites run only when someone runs them.
+- **CI exists but has not yet run on GitHub**: `.github/workflows/ci.yml` was exercised only through its driver script (`run-all.sh`) on a development machine. The first real run may need adjustments (runner image, Playwright system packages).
 - **Reconciliation `resolve`** records who and when, not why (Section 41.9 resolution notes).
 - **MFA reset** for a locked-out admin is a database operation; there is no UI or endpoint for it.
 

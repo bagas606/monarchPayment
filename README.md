@@ -77,11 +77,23 @@ payment callback, and the dev-only failure-injection knobs.
 
 ## Testing
 
+**CI** (`.github/workflows/ci.yml`) runs on every push to `main` and every pull request: a `unit` job (both builds, every
+unit / slice / ArchUnit test) and an `e2e` job that runs the whole pass below with `backend/scripts/e2e/run-all.sh`
+against a Postgres service container, the real jars and a real browser. That one script is also what to run locally before
+a release, because it knows the order the suites need and re-seeds between groups:
+
+```bash
+(cd backend && ./gradlew :app:bootJar) && (cd ppob1-sim && ./gradlew bootJar)
+NODE_PATH=<dir with playwright> backend/scripts/e2e/run-all.sh      # E2E_SKIP="ppob1 ui-smoke" to leave suites out
+```
+
+The suites individually:
+
 ```bash
 cd backend
 # The e2e suites authenticate to /admin/** with `curl -u`. HTTP Basic is OFF by default (it carries no MFA),
 # so boot the app for them with:  PPOB2_ADMIN_BASIC_AUTH_ENABLED=true
-./gradlew build                          # unit / slice tests + ArchUnit (251 tests)
+./gradlew build                          # unit / slice tests + ArchUnit (272 tests)
 scripts/e2e/run-core.sh                  # 178 assertions against a running app + real Postgres
 scripts/e2e/run-routing-and-sweeps.sh    # 15 assertions (waits on the 60s expiry-sweep tick)
 scripts/e2e/run-refund-gateway.sh        # 15 assertions; needs its own boot flag, see its header
