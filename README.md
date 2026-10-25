@@ -80,7 +80,8 @@ payment callback, and the dev-only failure-injection knobs.
 **CI** (`.github/workflows/ci.yml`) runs on every push to `main` and every pull request: a `unit` job (both builds, every
 unit / slice / ArchUnit test) and an `e2e` job that runs the whole pass below with `backend/scripts/e2e/run-all.sh`
 against a Postgres service container, the real jars and a real browser. That one script is also what to run locally before
-a release, because it knows the order the suites need and re-seeds between groups:
+a release, because it knows the order the suites need and re-seeds between groups. The workflow's first GitHub run
+(PR #11, 2026-10-25) passed both jobs:
 
 ```bash
 (cd backend && ./gradlew :app:bootJar) && (cd ppob1-sim && ./gradlew bootJar)
