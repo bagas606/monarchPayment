@@ -56,6 +56,14 @@ public class WebhookEvent {
     @Column(name = "received_at", nullable = false)
     private Instant receivedAt;
 
+    /** Exact request body as received; {@code payload} is JSONB and cannot reproduce signed bytes. */
+    @Column(name = "raw_body")
+    private String rawBody;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "raw_headers", columnDefinition = "jsonb")
+    private String rawHeaders;
+
     protected WebhookEvent() {
     }
 
@@ -68,6 +76,12 @@ public class WebhookEvent {
         this.status = status;
         this.dedupKey = dedupKey;
         this.receivedAt = receivedAt;
+    }
+
+    public WebhookEvent withRawCapture(String rawBody, String rawHeaders) {
+        this.rawBody = rawBody;
+        this.rawHeaders = rawHeaders;
+        return this;
     }
 
     public Long getId() {

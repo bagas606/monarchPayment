@@ -95,7 +95,7 @@ cd backend
 # The e2e suites authenticate to /admin/** with `curl -u`. HTTP Basic is OFF by default (it carries no MFA),
 # so boot the app for them with:  PPOB2_ADMIN_BASIC_AUTH_ENABLED=true
 ./gradlew build                          # unit / slice tests + ArchUnit (272 tests)
-scripts/e2e/run-core.sh                  # 178 assertions against a running app + real Postgres
+scripts/e2e/run-core.sh                  # 184 assertions against a running app + real Postgres
 scripts/e2e/run-routing-and-sweeps.sh    # 15 assertions (waits on the 60s expiry-sweep tick)
 scripts/e2e/run-refund-gateway.sh        # 15 assertions; needs its own boot flag, see its header
 scripts/e2e/run-backoffice-read.sh       # 95 assertions; run after run-core.sh, it reads what that left behind

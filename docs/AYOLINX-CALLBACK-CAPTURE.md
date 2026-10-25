@@ -3,16 +3,12 @@
 Goal: obtain evidence to close README go-live blocker 9 (inbound `amount` format) and to prove
 `X-SIGNATURE` verification against a genuine signature. Nothing here touches production.
 
-## What `webhook_event` can and cannot give you
+## What `webhook_event` holds
 
-| Need | In `webhook_event`? |
-|---|---|
-| Field values, incl. the `amount.value` string | Yes. `payload` is `jsonb`, and string values are kept exactly. |
-| Exact raw body bytes | **No.** `jsonb` drops whitespace and reorders keys. |
-| `X-SIGNATURE`, `X-TIMESTAMP` headers | **No.** Headers are not stored. Only a *rejected* callback logs those two (`log.warn`). |
-
-So the table is enough for the `amount` format but **not** for signature verification. Signature
-needs the raw bytes and headers, captured outside the database (step 3).
+Since V30 each inbound callback row also has `raw_body` (the exact bytes received) and `raw_headers` (JSONB, minus
+`Authorization`/`Cookie`), for accepted and rejected callbacks alike. `payload` stays JSONB and cannot reproduce the signed
+bytes, so use `raw_body` for signature work. Rows from before V30 have neither. The raw body may contain payer data and
+`webhook_event` has no retention job yet.
 
 ## 1. Prepare the order (sandbox only)
 
@@ -44,20 +40,18 @@ or parsing; `RECEIVED` rows passed.
 Also look at whether the payment became `SUCCESS` or an `AMOUNT_UNVERIFIED` /
 `AMOUNT_MISMATCH` anomaly was opened. `AMOUNT_UNVERIFIED` means the format was not parseable.
 
-## 3. Capture raw body and headers for the signature check
+## 3. Read the raw body and headers
 
-Pick one:
+```sql
+SELECT id, received_at, status, raw_body, raw_headers
+FROM webhook_event
+WHERE source = 'AYOLINX' AND direction = 'INBOUND' AND raw_body IS NOT NULL
+ORDER BY id DESC LIMIT 5;
+```
 
-- **Reverse proxy log (no code change).** Temporarily log the request for
-  `/internal/webhooks/ayolinx` at the proxy in front of the app, with method, the exact path,
-  the `X-SIGNATURE` and `X-TIMESTAMP` headers and the raw body. Remove it afterwards.
-- **A rejected callback.** While the public key is unset or wrong, the app logs
-  `Ayolinx callback signature verification failed. X-SIGNATURE=... X-TIMESTAMP=...` and stores
-  the body. That gives headers but still not the exact raw bytes.
-- **Ayolinx dashboard / support.** If the sandbox portal shows the delivered request, copy it
-  from there.
-
-Keep the body exactly as received, with no pretty-printing.
+Copy `raw_body` exactly. `raw_headers` should contain `X-SIGNATURE` and `X-TIMESTAMP` (names are stored as the app saw
+them). If a row is missing, the callback never reached the app; check the proxy and the notification URL registered with
+Ayolinx.
 
 ## 4. What to hand over
 

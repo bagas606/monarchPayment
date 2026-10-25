@@ -12,7 +12,6 @@ import id.ppob2.payment.gateway.PaymentGateway;
 import id.ppob2.payment.repository.PaymentRepository;
 import id.ppob2.sharedkernel.money.Money;
 import id.ppob2.webhook.WebhookEventRecorder;
-import id.ppob2.webhook.domain.WebhookDirection;
 import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
@@ -75,7 +74,8 @@ public class PaymentCallbackService {
             // genuine rejected callback is captured.
             log.warn("Ayolinx callback signature verification failed. X-SIGNATURE={} X-TIMESTAMP={}",
                     headers.get("X-SIGNATURE"), headers.get("X-TIMESTAMP"));
-            webhookEventRecorder.record(WebhookDirection.INBOUND, SOURCE, "CALLBACK", recordablePayload(rawBody), "FAILED", null);
+            webhookEventRecorder.recordInbound(SOURCE, "CALLBACK", recordablePayload(rawBody), "FAILED", null,
+                    capturedBody(rawBody), capturedHeaders(headers));
             return PaymentCallbackOutcome.SIGNATURE_INVALID;
         }
 
@@ -83,11 +83,13 @@ public class PaymentCallbackService {
         try {
             payload = objectMapper.readValue(rawBody, AyolinxCallbackPayload.class);
         } catch (Exception e) {
-            webhookEventRecorder.record(WebhookDirection.INBOUND, SOURCE, "CALLBACK", recordablePayload(rawBody), "FAILED", null);
+            webhookEventRecorder.recordInbound(SOURCE, "CALLBACK", recordablePayload(rawBody), "FAILED", null,
+                    capturedBody(rawBody), capturedHeaders(headers));
             return PaymentCallbackOutcome.MALFORMED;
         }
 
-        webhookEventRecorder.record(WebhookDirection.INBOUND, SOURCE, "CALLBACK", rawBody, "RECEIVED", payload.dedupKey());
+        webhookEventRecorder.recordInbound(SOURCE, "CALLBACK", rawBody, "RECEIVED", payload.dedupKey(),
+                capturedBody(rawBody), capturedHeaders(headers));
 
         Optional<Payment> maybePayment = paymentRepository.findByPgReference(payload.pgReference());
         if (maybePayment.isEmpty()) {
@@ -235,6 +237,31 @@ public class PaymentCallbackService {
      * Wrapping non-JSON input as a JSON string literal keeps the exact bytes recoverable while
      * guaranteeing the insert succeeds regardless of what was sent.
      */
+    /** Upper bound on a stored raw body; a legitimate callback is a few hundred bytes. */
+    static final int MAX_CAPTURED_BODY_CHARS = 65_536;
+
+    /** Headers that carry credentials of ours or of a proxy, never needed to re-verify a callback signature. */
+    private static final java.util.Set<String> UNCAPTURED_HEADERS =
+            java.util.Set.of("authorization", "proxy-authorization", "cookie", "set-cookie");
+
+    private String capturedBody(String rawBody) {
+        return rawBody != null && rawBody.length() <= MAX_CAPTURED_BODY_CHARS ? rawBody : null;
+    }
+
+    private String capturedHeaders(Map<String, String> headers) {
+        java.util.Map<String, String> kept = new java.util.TreeMap<>();
+        headers.forEach((name, value) -> {
+            if (!UNCAPTURED_HEADERS.contains(name.toLowerCase(java.util.Locale.ROOT))) {
+                kept.put(name, value);
+            }
+        });
+        try {
+            return objectMapper.writeValueAsString(kept);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     private String recordablePayload(String rawBody) {
         try {
             objectMapper.readTree(rawBody);
