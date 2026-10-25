@@ -8,6 +8,8 @@ import id.ppob2.sharedkernel.channel.ChannelContextHolder;
 import id.ppob2.sharedkernel.error.ErrorCode;
 import id.ppob2.sharedkernel.error.ErrorResponse;
 import id.ppob2.sharedkernel.security.HmacSigner;
+import id.ppob2.sharedkernel.security.SecretVault;
+import id.ppob2.sharedkernel.security.SecretVaultException;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -38,6 +40,7 @@ public class HmacAuthenticationFilter extends OncePerRequestFilter {
     private final ChannelContextResolver channelContextResolver;
     private final NonceStore nonceStore;
     private final ObjectMapper objectMapper;
+    private final SecretVault secretVault;
 
     /**
      * {@code signature-window-ms} was already declared in {@code application.yml} as "5 minutes,
@@ -50,6 +53,7 @@ public class HmacAuthenticationFilter extends OncePerRequestFilter {
                                      ChannelContextResolver channelContextResolver,
                                      NonceStore nonceStore,
                                      ObjectMapper objectMapper,
+                                     SecretVault secretVault,
                                      @org.springframework.beans.factory.annotation.Value(
                                              "${ppob2.security.signature-window-ms:300000}") long signatureWindowMs) {
         this.signatureWindow = Duration.ofMillis(signatureWindowMs);
@@ -57,6 +61,7 @@ public class HmacAuthenticationFilter extends OncePerRequestFilter {
         this.channelContextResolver = channelContextResolver;
         this.nonceStore = nonceStore;
         this.objectMapper = objectMapper;
+        this.secretVault = secretVault;
     }
 
     @Override
@@ -114,13 +119,13 @@ public class HmacAuthenticationFilter extends OncePerRequestFilter {
         String stringToSign = HmacSigner.buildStringToSign(
                 request.getMethod(), request.getRequestURI(), timestamp, nonce, bodyHash);
 
-        // NOTE: PRD Section 22.3 names this column `secret_hash` and says the plaintext secret
-        // is "never stored", but HMAC verification requires the server to reproduce the MAC with
-        // the same secret the client used — a one-way hash cannot do that. Treating the stored
-        // value as the verification secret here is a placeholder; production must clarify with
-        // the PRD owner whether this is reversibly encrypted (e.g. via KMS) rather than hashed,
-        // per Section 73.3's open-assumptions list.
-        if (!HmacSigner.matches(apiClient.getSecretHash(), stringToSign, signature)) {
+        // PRD Section 22.3 calls this column a hash, but HMAC verification needs the secret itself, so it
+        // is reversibly encrypted (SecretVault) rather than hashed. The row identity is the AAD, so a
+        // ciphertext copied from another client does not decrypt here. An unprovisioned, plaintext or
+        // undecryptable value is never used as a secret: the request is refused like any bad signature
+        // (the partner is not told which), and the cause is logged for the operator.
+        String secret = clientSecret(apiClient);
+        if (secret == null || !HmacSigner.matches(secret, stringToSign, signature)) {
             throw new AuthRejected(ErrorCode.SIGNATURE_INVALID, "HMAC signature verification failed.");
         }
 
@@ -133,6 +138,26 @@ public class HmacAuthenticationFilter extends OncePerRequestFilter {
 
         ChannelContext context = channelContextResolver.resolve(apiClient);
         ChannelContextHolder.set(context);
+    }
+
+    /** AAD for a client secret; the provisioning endpoint must use the same string. */
+    public static String secretAad(String clientId) {
+        return "api_client:" + clientId;
+    }
+
+    private String clientSecret(ApiClient apiClient) {
+        String stored = apiClient.getSecretCiphertext();
+        if (stored == null || stored.isBlank()) {
+            log.error("api_client '{}' has no provisioned secret; refusing its requests", apiClient.getClientId());
+            return null;
+        }
+        try {
+            return secretVault.decrypt(stored, secretAad(apiClient.getClientId()));
+        } catch (SecretVaultException e) {
+            log.error("api_client '{}' secret cannot be decrypted ({}); refusing its requests",
+                    apiClient.getClientId(), e.getMessage());
+            return null;
+        }
     }
 
     private void checkTimestampWindow(String timestampHeader) {

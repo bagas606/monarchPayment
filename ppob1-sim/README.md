@@ -51,11 +51,14 @@ Needs PPOB2 up first. From the repository root:
 ```bash
 # 1. PPOB2 on :8080, seeded, with the injection knobs (see backend/scripts/e2e/README.md)
 cd backend
+. ~/.ppob2-dev-keys    # partner-secret key ring; see the root README's quickstart. Basic auth on for provision-secrets.sh
+PPOB2_ADMIN_BASIC_AUTH_ENABLED=true \
 PPOB2_FULFILLMENT_STUBPROVIDER_FAILPROVIDERSKUIDS=2 \
 PPOB2_FULFILLMENT_STUBPROVIDER_AMBIGUOUSPROVIDERSKUIDS=3 \
 PPOB2_FULFILLMENT_STUBPROVIDER_TIMEOUTPROVIDERSKUIDS=4 \
 ./gradlew :app:bootRun
 psql -h localhost -U ppob2 -d ppob2 -f scripts/e2e/dev-seed.sql
+scripts/e2e/provision-secrets.sh
 
 # 2. PPOB1's database, then PPOB1 on :8081
 createdb -h localhost -U ppob2 ppob1     # once
@@ -64,7 +67,7 @@ cd ../ppob1-sim && ./gradlew bootRun
 
 ### The seed gap this exposed
 
-`backend/scripts/e2e/dev-seed.sql` created partner `PPOB1` and left `partner.webhook_secret`
+`backend/scripts/e2e/dev-seed.sql` created partner `PPOB1` and left the partner's webhook secret
 **NULL** — V16 added the column and the fixture was never updated. PPOB2 handles that correctly:
 `WebhookDeliveryTargetResolver` logs an error and skips delivery rather than signing with nothing.
 So the consequence was entirely silent — **no outbound webhook was ever delivered, by any order, in
@@ -74,9 +77,10 @@ Which means PPOB2's entire Section 23.8 path had never once run end to end befor
 existed. The sender had unit tests; the harness had no receiver. Same profile as every money defect
 this repository has found: compiles, has a mocked test, has never run.
 
-The seed now sets it, so the step above is gone. That was checked rather than assumed to be safe
-for `backend/`'s own assertions: a webhook is only delivered when the *order* carries a
-`callback_url`, and `run-core.sh`'s `mkorder` never sends one, so those scripts produce no
+The seed first set it with an `UPDATE`. Since V28 (partner secrets are encrypted at rest) SQL cannot, so
+`backend/scripts/e2e/provision-secrets.sh` sets it through PPOB2's admin API and `run-ppob1.sh` calls it itself. That was
+checked rather than assumed to be safe for `backend/`'s own assertions: a webhook is only delivered when the *order*
+carries a `callback_url`, and `run-core.sh`'s `mkorder` never sends one, so those scripts produce no
 `webhook_event` rows either way. Re-verified after the change — 148/148 core, 13/13 routing.
 
 ## Driving it

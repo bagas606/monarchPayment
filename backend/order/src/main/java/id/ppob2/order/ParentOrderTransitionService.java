@@ -70,7 +70,7 @@ public class ParentOrderTransitionService {
      *
      * <p>Also publishes {@link OrderExpiredEvent} so the partner is told, which Section 48.3's own
      * diagram shows and this codebase deliberately did not build until now. That one IS a
-     * composition-root concern (it needs the {@code callback_url} / {@code webhook_secret} join
+     * composition-root concern (it needs the {@code callback_url} / {@code partner.webhook_secret_ciphertext} join
      * `order` has no edge for), so it is announced rather than sent from here — see that event and
      * {@code OrderExpiredWebhookListener}.
      */

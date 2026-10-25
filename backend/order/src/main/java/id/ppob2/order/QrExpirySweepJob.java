@@ -17,7 +17,7 @@ import org.springframework.stereotype.Component;
  * {@code parent_order.expires_at}, the state transition — is `order`'s own data; no composition
  * with another module is required for the sweep itself. The outbound {@code ORDER_STATUS_CHANGED}
  * webhook the same diagram shows IS a composition-root concern (it needs the
- * {@code callback_url}/{@code webhook_secret} join `order` has no Section 20.2 edge for), and was
+ * {@code callback_url}/{@code partner.webhook_secret_ciphertext} join `order` has no Section 20.2 edge for), and was
  * for a long time deliberately not built. It is now: {@code expirePaymentPending} publishes
  * {@link OrderExpiredEvent} and {@code OrderExpiredWebhookListener} in `app` queues the delivery.
  *

@@ -10,7 +10,10 @@ import id.ppob2.order.repository.ParentOrderRepository;
 import id.ppob2.partner.domain.Partner;
 import id.ppob2.partner.repository.PartnerRepository;
 import id.ppob2.sharedkernel.money.Money;
+import id.ppob2.sharedkernel.security.KeyringSecretKeyProvider;
+import id.ppob2.sharedkernel.security.SecretVault;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
@@ -25,7 +28,13 @@ class WebhookDeliveryTargetResolverTest {
 
     private final ParentOrderRepository parentOrderRepository = mock(ParentOrderRepository.class);
     private final PartnerRepository partnerRepository = mock(PartnerRepository.class);
-    private final WebhookDeliveryTargetResolver resolver = new WebhookDeliveryTargetResolver(parentOrderRepository, partnerRepository);
+    private final SecretVault vault = new SecretVault(new KeyringSecretKeyProvider(
+            "t1:" + Base64.getEncoder().encodeToString(new byte[32]), "t1"));
+    private final WebhookDeliveryTargetResolver resolver = new WebhookDeliveryTargetResolver(parentOrderRepository, partnerRepository, vault);
+
+    private String ciphertextFor(String partnerCode, String secret) {
+        return vault.encrypt(secret, WebhookDeliveryTargetResolver.secretAad(partnerCode));
+    }
 
     private static ParentOrder orderWithCallback(OrderState state, String callbackUrl, Long partnerId) {
         ParentOrder order = new ParentOrder("ORD-1", 1L, partnerId, "client-1", 1L, Money.of(60000L),
@@ -65,7 +74,7 @@ class WebhookDeliveryTargetResolverTest {
         given(parentOrderRepository.findById(1L)).willReturn(Optional.of(order));
         given(parentOrderRepository.findResellerTxnIdByParentOrderId(1L)).willReturn("PPOB1-TX-1");
         Partner partner = mock(Partner.class);
-        given(partner.getWebhookSecret()).willReturn("secret-123");
+        given(partner.getWebhookSecretCiphertext()).willReturn(ciphertextFor("PPOB1", "secret-123"));
         given(partner.getCode()).willReturn("PPOB1");
         given(partnerRepository.findById(1L)).willReturn(Optional.of(partner));
 
@@ -131,7 +140,7 @@ class WebhookDeliveryTargetResolverTest {
         given(parentOrderRepository.findById(1L)).willReturn(Optional.of(order));
         given(parentOrderRepository.findResellerTxnIdByParentOrderId(1L)).willReturn("PPOB1-TX-98213");
         Partner partner = mock(Partner.class);
-        given(partner.getWebhookSecret()).willReturn("secret-123");
+        given(partner.getWebhookSecretCiphertext()).willReturn(ciphertextFor("PPOB1", "secret-123"));
         given(partner.getCode()).willReturn("PPOB1");
         given(partnerRepository.findById(1L)).willReturn(Optional.of(partner));
 
@@ -157,7 +166,7 @@ class WebhookDeliveryTargetResolverTest {
         given(parentOrderRepository.findById(1L)).willReturn(Optional.of(order));
         given(parentOrderRepository.findResellerTxnIdByParentOrderId(1L)).willReturn(null);
         Partner partner = mock(Partner.class);
-        given(partner.getWebhookSecret()).willReturn("secret-123");
+        given(partner.getWebhookSecretCiphertext()).willReturn(ciphertextFor("PPOB1", "secret-123"));
         given(partner.getCode()).willReturn("PPOB1");
         given(partnerRepository.findById(1L)).willReturn(Optional.of(partner));
 
@@ -165,5 +174,33 @@ class WebhookDeliveryTargetResolverTest {
 
         assertThat(target).isPresent();
         assertThat(target.get().resellerTxnId()).isNull();
+    }
+
+    private Optional<WebhookDeliveryTarget> resolveWithStored(String stored) {
+        ParentOrder order = orderWithCallback(OrderState.SUCCESS, "http://example.com/cb", 1L);
+        given(parentOrderRepository.findById(1L)).willReturn(Optional.of(order));
+        Partner partner = mock(Partner.class);
+        given(partner.getWebhookSecretCiphertext()).willReturn(stored);
+        given(partner.getCode()).willReturn("PPOB1");
+        given(partnerRepository.findById(1L)).willReturn(Optional.of(partner));
+        return resolver.resolve(1L);
+    }
+
+    @Test
+    void aPlaintextSecretIsNeverUsedToSign() {
+        // The shape every row had before V28. Sending unsigned or signing with the raw string would both be wrong.
+        assertThat(resolveWithStored("ppob1-webhook-secret")).isEmpty();
+    }
+
+    @Test
+    void aCiphertextBelongingToAnotherPartnerIsNeverUsedToSign() {
+        assertThat(resolveWithStored(ciphertextFor("OTHER", "secret-123"))).isEmpty();
+    }
+
+    @Test
+    void aCiphertextUnderAKeyThisDeploymentLacksIsNeverUsedToSign() {
+        SecretVault foreign = new SecretVault(new KeyringSecretKeyProvider(
+                "gone:" + Base64.getEncoder().encodeToString(new byte[32]), "gone"));
+        assertThat(resolveWithStored(foreign.encrypt("secret-123", WebhookDeliveryTargetResolver.secretAad("PPOB1")))).isEmpty();
     }
 }

@@ -1,7 +1,7 @@
 package id.ppob2.app.webhook;
 
 /** Result of one {@link OutboundWebhookOrchestrator#attempt} call — distinguishes "nothing to
- * deliver" (no {@code callback_url}/{@code webhook_secret} resolvable, not a failure to retry)
+ * deliver" (no {@code callback_url}/{@code partner.webhook_secret_ciphertext} resolvable, not a failure to retry)
  * from an actual delivery attempt that failed and should be retried. */
 public record OutboundWebhookAttemptResult(boolean noTarget, boolean success, String failureReason) {
 

@@ -34,10 +34,10 @@ public class Partner {
     private String contractRef;
 
     /** Section 23.8's "PPOB1's registered secret" for signing outbound webhooks — not part of
-     * Section 22.2's documented schema; see the V16 migration comment for why this is the
-     * reversible signing secret itself, same caveat as {@code api_client.secret_hash}. */
-    @Column(name = "webhook_secret", length = 255)
-    private String webhookSecret;
+     * Section 22.2's documented schema. A SecretVault value (reversible: signing needs the secret),
+     * opaque to this module and decrypted in {@code app}; null means no webhook can be signed. */
+    @Column(name = "webhook_secret_ciphertext")
+    private String webhookSecretCiphertext;
 
     protected Partner() {
     }
@@ -74,7 +74,11 @@ public class Partner {
         return "ACTIVE".equals(status);
     }
 
-    public String getWebhookSecret() {
-        return webhookSecret;
+    public String getWebhookSecretCiphertext() {
+        return webhookSecretCiphertext;
+    }
+
+    public void setWebhookSecretCiphertext(String webhookSecretCiphertext) {
+        this.webhookSecretCiphertext = webhookSecretCiphertext;
     }
 }

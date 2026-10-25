@@ -14,7 +14,7 @@ import org.springframework.stereotype.Component;
  * PRD Section 23.8: notifies the partner (PPOB1) of an {@code ORDER_STATUS_CHANGED} event once
  * fulfillment reaches a terminal state. Lives in `app` — `webhook` has no edge to `order` or
  * `partner` (Section 20.2), so resolving {@code parent_order.callback_url} and
- * {@code partner.webhook_secret} ({@link WebhookDeliveryTargetResolver}) is a composition-root
+ * {@code partner.webhook_secret_ciphertext} ({@link WebhookDeliveryTargetResolver}) is a composition-root
  * concern, the same shape as {@code OrderFulfillmentReconciliationOrchestrator} right next to it
  * in the dispatch listener.
  *
@@ -77,7 +77,7 @@ public class OutboundWebhookOrchestrator {
 
     /**
      * One delivery attempt: resolve the current target fresh (not cached from a prior attempt —
-     * a partner's {@code callback_url}/{@code webhook_secret} could change between retries, and
+     * a partner's {@code callback_url}/{@code partner.webhook_secret_ciphertext} could change between retries, and
      * the order's own state is already terminal by the time this is ever reachable, so re-reading
      * it is cheap and always correct), send, and log the outcome to {@code webhook_event}
      * regardless of success. Used by both {@link #sendOrderStatusChanged}'s first attempt and

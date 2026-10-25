@@ -34,11 +34,11 @@ spring:
         # alongside QrExpirySweepJob, a single slow/timing-out webhook-delivery batch could occupy
         # that one thread long enough to delay the expiry sweep too. Two threads means the two jobs
         # no longer contend for the same slot.
-        # Now 3: one thread per @Scheduled job (QrExpirySweepJob, WebhookRetrySweepJob and the hourly
-        # admin-session purge). The purge is one fast DELETE and would be fine on a shared thread, but the
+        # Now 6: one thread per @Scheduled job (QrExpirySweepJob, WebhookRetrySweepJob, the hourly
+        # admin-session purge and the three pattern-economics jobs). The purge is one fast DELETE and would be fine on a shared thread, but the
         # invariant "no job can be starved by another" is worth more than a thread, and it is simpler to
         # keep true than to remember which job is the exception.
-        size: 3
+        size: 6
 
 server:
   port: ${PORT:8080}
@@ -67,6 +67,11 @@ ppob2:
   business-zone: ${PPOB2_BUSINESS_ZONE:UTC}
   security:
     signature-window-ms: 300000 # 5 minutes, PRD Section 23.2
+    # Key ring encrypting partner HMAC secrets and webhook secrets at rest (SecretVault). REQUIRED, no default:
+    # `k1:<openssl rand -base64 32>[,k2:...]`. To rotate, add a key, point the active id at it, keep the old one
+    # listed until every secret has been re-provisioned. Losing a listed key makes its secrets unrecoverable.
+    secret-keys: ${PPOB2_SECRET_KEYS:}
+    active-secret-key-id: ${PPOB2_SECRET_ACTIVE_KEY_ID:}
   channel:
     default-application-id: PPOB1-DEFAULT
   payment:

@@ -5,9 +5,9 @@
 # Assumes:
 #   - PPOB2 on :8080, freshly seeded (backend/scripts/e2e/dev-seed.sql), booted with the three
 #     injection knobs (fail=2 ambiguous=3 timeout=4) so the partial-failure case has a failing SKU
-#   - partner.webhook_secret set for PPOB1 — the dev seed leaves it NULL, in which case PPOB2
-#     refuses to send unsigned and every webhook case here fails for that one reason:
-#       UPDATE partner SET webhook_secret='ppob1-webhook-secret' WHERE code='PPOB1';
+#   - PPOB1's two secrets provisioned (backend/scripts/e2e/provision-secrets.sh, done below) -- since V28
+#     they are ciphertext, so SQL cannot set them. Without the webhook secret PPOB2 refuses to send
+#     unsigned and every webhook case here fails for that one reason.
 #   - PPOB1 on :8081 against a fresh ppob1 database
 # See ppob1-sim/README.md.
 set -u
@@ -43,8 +43,10 @@ chk "PPOB1 is up"  "$(curl -s -o /dev/null -w '%{http_code}' "$P1/actuator/healt
 chk "PPOB2 is up"  "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/actuator/health)" 200
 # Without this the whole webhook half of this script fails identically, and it looks like a signing
 # bug rather than one missing column.
-chk "PPOB2 has a webhook_secret for PPOB1" \
-    "$(scalar "select webhook_secret is not null and webhook_secret <> '' from partner where code='PPOB1'")" t
+PROVISION="$(cd "$SP/../../../backend" && pwd)/scripts/e2e/provision-secrets.sh"
+"$PROVISION" || exit 2
+chk "PPOB2 has an encrypted webhook secret for PPOB1" \
+    "$(scalar "select webhook_secret_ciphertext like 'v1.%' from partner where code='PPOB1'")" t
 
 echo "== Section 23.3: signed GET with a query string =="
 # The only endpoint with a query parameter, and so the only one that breaks if the signature covers
@@ -191,11 +193,11 @@ chk "reconciled transactions are settled" \
 chk "...and a second run has nothing to do"  "$(field "$(curl -s -X POST "$P1/sim/recon/run")" examined)" 0
 
 echo "== A genuinely broken push integration =="
-# Reproduced for real, not staged: clearing PPOB2's partner.webhook_secret makes it refuse to send
+# Reproduced for real, not staged: clearing PPOB2's partner webhook secret makes it refuse to send
 # an unsigned callback (WebhookDeliveryTargetResolver logs and skips rather than signing with
 # nothing), so the order succeeds upstream and PPOB1 is never told. This is the exact state a
 # stock dev seed is in, which is why PPOB2's outbound webhook had never been exercised at all.
-$Q "update partner set webhook_secret=null where code='PPOB1'" >/dev/null 2>&1
+$Q "update partner set webhook_secret_ciphertext=null where code='PPOB1'" >/dev/null 2>&1
 R=$(submit '{"reseller_txn_id":"E2E-NOWH-1","product_code":"MOBILE_LEGENDS","amount":20000,"customer_reference":"GAMEID-NOWH"}')
 NID=$(field "$R" id); NOID=$(field "$R" ppob2_order_id)
 ORIGREF="R-$NOID" $CB "$(pgref "$NOID")" 20000 00 >/dev/null; sleep 7
@@ -214,7 +216,7 @@ chk "...recording the states as compared, not after the repair" \
 
 # Now that the state agrees, the SECOND run is the one that can see the provenance problem: a
 # SUCCESS that PPOB2 does push, which PPOB1 nonetheless only ever learned by asking.
-$Q "update partner set webhook_secret='ppob1-webhook-secret' where code='PPOB1'" >/dev/null 2>&1
+"$PROVISION" webhook
 P1Q "update ppob1_transaction set recon_settled_at=null where reseller_txn_id='E2E-NOWH-1'"
 RUN=$(curl -s -X POST "$P1/sim/recon/run")
 chk "the missing callback is reported as WEBHOOK_NEVER_ARRIVED" \

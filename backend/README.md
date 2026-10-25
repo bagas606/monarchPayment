@@ -1646,9 +1646,9 @@ Known gaps to close before this is production-real:
   for a parent one at a time regardless of provider.
 - **`api_client.secret_hash`** (Section 22.3) is documented as a one-way hash, but HMAC
   verification requires the server to reproduce the client's MAC, which a one-way hash can't do.
-  `HmacAuthenticationFilter` currently treats the stored value as the verification secret
-  directly — flagged inline with a `NOTE:` comment. This needs a decision from whoever owns the
-  PRD (reversible/KMS-backed encryption is the likely fix) before going further.
+  **Resolved 2026-10-24 (V28), partially:** the column is now `secret_ciphertext` and holds an
+  AES-256-GCM value under a config-held key ring (see the dated entry at the end of this file); what
+  remains open is KMS, and updating Section 22.3's wording.
 - **Nonce replay protection** (`NonceStore`) is in-memory. Section 19.1 designates Redis for
   this; an in-memory store does not protect against replay once there's more than one app
   instance.
@@ -2641,7 +2641,8 @@ dev-only failure-injection knobs.
 
 ```bash
 docker compose up -d          # starts Postgres on localhost:5432
-./gradlew :app:bootRun
+. ~/.ppob2-dev-keys           # PPOB2_SECRET_KEYS / PPOB2_SECRET_ACTIVE_KEY_ID: no default, the app will not boot without them
+./gradlew :app:bootRun        # (create that file as the root README's quickstart shows)
 ```
 
 The app validates its schema against Flyway migrations (`spring.jpa.hibernate.ddl-auto: validate`)
@@ -2656,7 +2657,11 @@ patterns with economics, and an Admin Web user:
 ```bash
 docker exec -i backend-postgres-1 psql -U ppob2 -d ppob2 -v ON_ERROR_STOP=1 -1 \
   < scripts/e2e/dev-seed.sql
+scripts/e2e/provision-secrets.sh    # needs PPOB2_ADMIN_BASIC_AUTH_ENABLED=true; sets PPOB1's two encrypted secrets
 ```
+
+The seed carries no secrets: since V28 they are ciphertext, which SQL cannot produce, so they are set through
+the admin API (`PUT /admin/api-clients/{clientId}/secret`, `PUT /admin/partners/{code}/webhook-secret`).
 
 It resolves every id by lookup instead of hardcoding, and it lives under `scripts/` rather than
 `src/main/resources/` on purpose — it briefly did live there, which packaged a `SUPER_ADMIN` row with
@@ -2931,3 +2936,94 @@ scripts/e2e/run-refund-gateway.sh        # 15 assertions; needs PPOB2_PAYMENT_ST
 See [`scripts/e2e/README.md`](scripts/e2e/README.md) for the prerequisites (fresh seed, the three
 injection knobs and their exact env-var spelling) and for what these deliberately do not cover, and
 [`docs/TEST-STATUS.md`](../docs/TEST-STATUS.md) for the per-ID status of all 54 PRD test cases.
+
+### 2026-10-24 — Partner secrets encrypted at rest (V28)
+
+Closes the longest-standing go-live blocker on this list: `api_client.secret_hash` (HMAC secret, Section 23.2)
+and `partner.webhook_secret` (Section 23.8) held the raw secret, so a database dump alone could forge any partner's
+requests. Chosen design (envelope-at-keyring, not per-row data keys; the PRD names no mechanism):
+
+- `shared-kernel`: `SecretVault` encrypts to `v1.<keyId>.<base64(iv||ct+tag)>` (AES-256-GCM, random IV), with the
+  row identity (`api_client:<client_id>`, `partner:<code>:webhook`) as GCM AAD, so a ciphertext copied onto another
+  row does not decrypt. `SecretKeyProvider` is the seam; `KeyringSecretKeyProvider` reads
+  `PPOB2_SECRET_KEYS=k1:<b64>[,k2:...]` + `PPOB2_SECRET_ACTIVE_KEY_ID`. A KMS implementation unwraps one stored data
+  key per id at boot and caches it, so nothing about the stored shape or the schema changes and no HMAC request
+  pays a network call. **That KMS provider is not built.**
+- Fail-fast: the app does not boot without the key ring (checked: exit 1 with the variable names in the message).
+  No default exists. Unlike the MFA key, this one gates every partner request, so warn-and-continue was wrong.
+- Fail-closed at use: `HmacAuthenticationFilter` and `WebhookDeliveryTargetResolver` refuse anything not in the
+  vault format (plaintext, NULL, forged, wrong row, unknown key id): 401 for the client, no outbound webhook, an
+  ERROR log naming the client/partner but never the value. There is no "accept plaintext" fallback.
+- V28 renames the columns (`secret_ciphertext`, `webhook_secret_ciphertext`), widens them to TEXT and **wipes**
+  existing plaintext (SQL cannot encrypt). Pre-release, so the migration path is "re-provision", not "convert".
+- Provisioning is `PUT /admin/api-clients/{clientId}/secret` and `PUT /admin/partners/{code}/webhook-secret`
+  (permission `partner_secret:manage`, SUPER_ADMIN only). Omit the body to generate a secret, returned once; supply
+  one to store it unechoed. The audit row carries a keyed fingerprint (HMAC under the active key, so a dump cannot be used to test guesses) and the key id, never the secret.
+- Not done: key rotation tooling beyond "add key, switch active id, re-run the PUTs"; partner/api_client creation
+  is still SQL (only the secret has an endpoint); Section 22.3's wording is unchanged.
+- Verified: `SecretVaultTest` (10), resolver tests for plaintext / foreign-row / unknown-key values, and
+  `run-partner-secrets.sh` (34 assertions: stored value is ciphertext, SQL-written plaintext / NULL / copied /
+  forged / unknown-key values are all 401, generate + rotate + audit, 400/404/401/403, only SUPER_ADMIN holds the
+  permission). `run-core.sh` 178/178 and `run-ppob1.sh` pass on top of it, i.e. the whole partner API and the
+  independently-verified outbound webhooks work with encrypted secrets.
+
+### 2026-10-24 — Pattern generator, scoring, configuration and catalog administration (V29)
+
+Closes go-live blocker 2 in part and most of the Section 41.3 / 41.4 / 41.11 gap. What was built, what was measured, what
+was decided and what is still open:
+
+- **Generator (`decomposition`).** `PatternGenerator` is a pure, deterministic function (SKUs + amount in, patterns out). Level by
+  level in increasing total quantity, fewer distinct SKUs first, then SKU id; a bounded search pruned by remaining-amount
+  reachability and the gcd test; a per-SKU cap from `quota_daily`; a node budget that is reported (`budget_exhausted`) rather
+  than hidden. **Java, not Rust:** Section 29.1 says "preferred", and a pure function is the seam a Rust binary would replace.
+  Verified by 60 random catalogs against an independent brute-force oracle (and one deliberate pruning bug, which the oracle
+  caught), determinism across SKU order, caps, limits, infeasible amounts and real SHA-256 hashes.
+- **Limits are relative.** First version capped total quantity at 12; a synthetic run left 43 of 118 amounts uncovered because
+  10,000,000 needs 20 units of a 500,000 SKU. Now: the fewest achievable units plus `generation.extra_quantity` (default 4), under
+  a hard ceiling (default 40). 118 amounts then covered; only one infeasible amount (the seed's 10,000) remained.
+- **Lifecycle.** BUILDING, VALIDATING (check in SQL against what was written: sums, counts, no component-less pattern, no
+  face-value drift), then scored for today, then **waits**. Activation is manual, atomic, one ACTIVE generation enforced by a unique
+  index, and refused with 409 `COVERAGE_REGRESSION` when a (product, amount) the current generation serves would lose every
+  eligible pattern, unless a reason is given and audited. Rollback is re-activation of a SUPERSEDED generation, re-scored first.
+  `VALIDATING` with `completed_at` null means "still running"; the API exposes `ready` so a client does not have to know that.
+- **Scoring (`PatternScoringService`).** Set-based SQL for a business day. `score = w_margin * net_margin_pct - w_childcount *
+  (child orders - 1)`; the other five 31.3 terms have no data source and no knob. Payment fee is 0 (no MDR known). A component with
+  no active price makes a pattern ineligible. **Why it came first:** routing reads economics for *today* only, so a generation
+  without rows serves nothing, and the seed's patterns would stop being routable at midnight. **Tomorrow is scored before it
+  starts** (`scoreTomorrow`, 23:30 business zone; activation and a price edit score both days too): a first version that only
+  rescored at 00:05 left a gap from midnight until a 25 s transaction committed, in which every paid order would have gone to
+  REFUND_PENDING, and no suite could see it because none crosses midnight. It is now pinned by `PatternMaintenanceJobsTest`
+  (fixed clock at 23:59 Jakarta; a deliberate off-by-one in the job fails it) and by e2e assertions that tomorrow's rows exist
+  after activation and after a price edit. `dailyRescore` (00:05, overwrites today, ensures the new tomorrow, prunes) and
+  `ensureUpcoming` (hourly, fills only missing rows, never overwrites) complete it; all can be switched off with
+  `ppob2.pattern.maintenance-enabled=false`. A price edit re-scores only the patterns containing that SKU (reverse index, 30.4).
+- **Catalog and configuration.** Products, providers, SKUs and supported amounts are created and switched off, never deleted. A SKU
+  face-value change invalidates the patterns that contain it in the same transaction (30.3) and returns the coverage lost; a new
+  amount or SKU is accepted at once but joins routing only after the next generation, and the API and UI say so. `configuration`
+  (22.25) holds overrides; keys, types, ranges and defaults are code (`ConfigKey`), unknown keys cannot be written.
+- **Permissions (interpretation of 42.1, as V19's was):** `catalog:view`, `catalog:edit`, `pricing:edit`, `config:edit`,
+  `pattern:view`, `pattern:generate`, `pattern:activate`. Activation, pricing and configuration are SUPER_ADMIN only; TECH_SUPPORT
+  may edit the catalog and start a generation but not activate it.
+- **Measured (synthetic catalog, 3 providers x 8 denominations x 118 amounts, plus the 6 seed amounts, one machine):**
+  985,777 patterns in 3 min 2 s, peak RSS about 500 MB, 91 of 124 amounts at the
+  K = 10,000 limit, none budget-exhausted. **Storage, per generation:** patterns 782 MB, components 629 MB; **per scored day:**
+  `pattern_economics` about 280 MB (563 MB for the two days written at activation). A full re-score of that pool took 25 s, and
+  activation (two days scored, coverage computed) took 67 s, so it is a long request.
+  **Growth, and what bounds it:** ~280 MB a day at this size would be ~25 GB over 90 days, so economics older than
+  `ppob2.pattern.economics-retention-days` (default 30, minimum 7) are deleted nightly, and so are the patterns of FAILED
+  generations (never served). SUPERSEDED generations (rollback targets) are **not** pruned: each is ~1.4 GB at this size, so
+  a small disk needs them removed by hand until a retention rule exists. Retention was tested by planting old rows and a dead
+  generation and letting the job run: old rows and dead patterns gone, a 5-day-old row and the generation row kept.
+  **Known limitation:** `MarginReconciliationOrchestrator` compares an order with the snapshot on or before its date, and a
+  mid-day price edit overwrites today's row, so same-day orders routed at the old cost are compared against the new one and can
+  raise a spurious margin discrepancy. Fixing it needs intra-day economics versions. Orders through it: 0.67 s (100,000) and
+  1.4 s (5,000,000) from paid callback to SUCCESS, which includes loading up to 10,000 candidates per order. That is the limit to
+  watch: the PRD envisions a Redis candidate cache and this reads Postgres directly.
+- **Not done:** partial regeneration (30.3; a structural change invalidates and waits for the next full generation); provider
+  health / availability / capacity / load-balance / failure scoring terms; a component-count limit (TC-PROP-003 asks for one; the
+  limits here are on total quantity); the dashboard, margin and quota views; CRUD for admin users and roles; the real payment-fee
+  value; a real catalog (all numbers above are synthetic).
+- **Verified:** 272 PPOB2 unit tests; `run-pattern-admin.sh` 84, `run-catalog-admin.sh` 83 and `ui-smoke.cjs` 74 (new pages driven in
+  a real browser, including a hostile product name shown as text and the coverage-reason dialog), on top of every earlier suite
+  unchanged. Two things the first runs taught: a stale success notice made a browser assertion pass for the wrong reason (waits are
+  now on the notice's own text), and `scalar()` strips spaces, which had made an audit assertion compare against the wrong string.

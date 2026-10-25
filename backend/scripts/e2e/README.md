@@ -27,6 +27,23 @@ scripts/e2e/run-core.sh                  # 178 assertions
 scripts/e2e/run-routing-and-sweeps.sh    # 15 assertions, ~2 min (waits on the 60s sweep tick)
 ```
 
+Every app boot for these suites also needs the partner-secret key ring (`PPOB2_SECRET_KEYS`, `PPOB2_SECRET_ACTIVE_KEY_ID`;
+any `k1:$(openssl rand -base64 32)` will do, the app refuses to start without it). The seed carries no partner secrets
+since V28; `provision-secrets.sh` sets them through the admin API and `run-core.sh`, `run-routing-and-sweeps.sh`,
+`run-refund-gateway.sh` and `run-partner-secrets.sh` call it themselves.
+
+`run-pattern-admin.sh` (84 assertions) and `run-catalog-admin.sh` (83) cover pattern generation, activation, rollback,
+scoring, configuration, catalog, pricing and supported amounts. Both **build and activate generations**, which replaces the
+hand-seeded one and its hand-set scores that `run-core.sh`'s routing cases rely on, so each needs its own freshly seeded
+database and must run **after** `run-core.sh` (not before it, and not one after the other without re-seeding). They provision
+secrets themselves like the other suites. `run-pattern-admin.sh` also places real orders through generated patterns, and
+`ui-smoke.cjs` drives the same pages in a browser (it activates a generation too, so run it last on its database).
+
+`run-partner-secrets.sh` (34 assertions) covers secrets at rest: the stored value is ciphertext, and SQL-written
+plaintext, NULL, a ciphertext copied from another client, a forged one and one under an unknown key id are all refused;
+generate / rotate / audit through the provisioning endpoints, and their 400/401/403/404 guard rails. It provisions its
+own state, so it can run at any point against a seeded database.
+
 `run-backoffice-read.sh` (95 assertions) is the odd one out: it does **not** want a fresh database. It reads what `run-core.sh` left behind (orders in every state, the rejected callback, the admin audit rows) and restores the three rows it temporarily edits. Run it right after `run-core.sh`; run alone against an empty database most of its cases would fail for want of data, not because anything is wrong.
 
 `run-refund-gateway.sh` (15 assertions) is separate because it needs the app booted with a *fourth*
@@ -76,11 +93,22 @@ flag's name if it is missing, rather than failing dozens of assertions with 401.
 (`./gradlew :app:bootJar`), `python3` for the TOTP codes, and takes ~3 minutes, most of it waiting for TOTP
 time-steps and the timeouts to elapse.
 
-`ui-smoke.cjs` (46 assertions) drives the backoffice UI in a real browser. It needs Node, the `playwright`
+`ui-smoke.cjs` (74 assertions) drives the backoffice UI in a real browser. It needs Node, the `playwright`
 package (`NODE_PATH` pointing at it) and Chromium; the app up with HTTP Basic **off**, an MFA key set
 (`PPOB2_ADMIN_MFA_ENCRYPTION_KEY`) and `PPOB2_ADMIN_COOKIE_SECURE=false` (plain HTTP), and a database
 populated by `run-core.sh`. It stages its own starting state (resets `superadmin`'s MFA, puts one paid order
 in `REFUND_PENDING` and one record back to `OPEN`), so it can be re-run; `SHOTS=<dir>` also writes screenshots.
+
+## Running everything: `run-all.sh`
+
+`run-all.sh` runs every suite in the one order they support, each group on a freshly wiped and re-seeded database, starting and
+stopping the apps itself (PPOB2 on :8080, ppob1-sim on :8081 for its suite, a second PPOB2 on :8081 for `run-admin-auth.sh`, and a
+Basic-off PPOB2 for `ui-smoke.cjs`). It generates a throwaway secret key ring for the run and prints a summary table; the exit
+status is 0 only if every suite that ran reported `FAIL: 0` (it checks the printed count, not just each script's exit status).
+Per-suite and per-boot logs go to `LOG_DIR` (default `/tmp/ppob2-e2e`). `E2E_SKIP="ppob1 ui-smoke"` leaves suites out; `ui-smoke` is
+skipped with a notice if node and playwright are not available. It needs the two jars built and a reachable Postgres (see `q.sh`).
+`.github/workflows/ci.yml` calls exactly this script; the groups, in order, are: core + backoffice-read + partner-secrets + routing,
+refund-gateway, ppob1, admin-auth, pattern-admin, catalog-admin, ui-smoke. Allow about 15 to 20 minutes.
 
 ## The pieces
 

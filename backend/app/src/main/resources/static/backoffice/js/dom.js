@@ -58,7 +58,8 @@ const TONE = {
   SUCCESS: 'ok', PAID: 'ok', ACTIVE: 'ok', RESOLVED: 'ok', DELIVERED: 'ok', REFUNDED: 'ok', RECEIVED: 'ok', COMPENSATED: 'info',
   FAILED: 'bad', PARTIAL_FAILED: 'bad', EXHAUSTED: 'bad', EXPIRED: 'warn', CANCELLED: 'warn',
   REFUND_PENDING: 'warn', PAYMENT_PENDING: 'info', PENDING: 'info', EXECUTING: 'info', FULFILLING: 'info',
-  OPEN: 'warn', INVESTIGATING: 'info', CREATED: 'info', DECOMPOSITION_SELECTED: 'info', TIMEOUT: 'bad', UNKNOWN: 'warn',
+  OPEN: 'warn', INVESTIGATING: 'info', ELIGIBLE: 'ok', INELIGIBLE: 'bad', INVALIDATED: 'bad', OVERRIDE: 'info', 'NO ECONOMICS': 'warn',
+  READY: 'ok', BUILDING: 'info', 'VALIDATING…': 'info', SUPERSEDED: 'warn', 'NONE POSSIBLE': 'warn', 'SEARCH CUT SHORT': 'warn', CREATED: 'info', DECOMPOSITION_SELECTED: 'info', TIMEOUT: 'bad', UNKNOWN: 'warn',
 };
 export function badge(value) {
   if (value === null || value === undefined) return '';

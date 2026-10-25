@@ -7,7 +7,11 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
-/** Maps to the `api_client` table, PRD Section 22.3. `secretHash` never holds plaintext. */
+/**
+ * Maps to the `api_client` table, PRD Section 22.3. {@code secretCiphertext} is a SecretVault value
+ * (reversible, because HMAC verification needs the secret itself), opaque to this module; null means
+ * the client has not been provisioned and cannot authenticate. Decryption happens in {@code app}.
+ */
 @Entity
 @Table(name = "api_client")
 public class ApiClient {
@@ -22,8 +26,8 @@ public class ApiClient {
     @Column(name = "partner_id", nullable = false)
     private Long partnerId;
 
-    @Column(name = "secret_hash", nullable = false, length = 255)
-    private String secretHash;
+    @Column(name = "secret_ciphertext")
+    private String secretCiphertext;
 
     @Column(nullable = false, length = 16)
     private String status;
@@ -37,10 +41,10 @@ public class ApiClient {
     protected ApiClient() {
     }
 
-    public ApiClient(String clientId, Long partnerId, String secretHash, String status, int rateLimitPerMin) {
+    public ApiClient(String clientId, Long partnerId, String secretCiphertext, String status, int rateLimitPerMin) {
         this.clientId = clientId;
         this.partnerId = partnerId;
-        this.secretHash = secretHash;
+        this.secretCiphertext = secretCiphertext;
         this.status = status;
         this.rateLimitPerMin = rateLimitPerMin;
     }
@@ -57,8 +61,12 @@ public class ApiClient {
         return partnerId;
     }
 
-    public String getSecretHash() {
-        return secretHash;
+    public String getSecretCiphertext() {
+        return secretCiphertext;
+    }
+
+    public void setSecretCiphertext(String secretCiphertext) {
+        this.secretCiphertext = secretCiphertext;
     }
 
     public String getStatus() {

@@ -58,7 +58,7 @@ if [ ! -f "$JAR" ]; then echo "no jar at $JAR -- run ./gradlew :app:bootJar"; ex
 if curl -s "localhost:$PORT/actuator/health" | grep -q UP; then echo "port $PORT already in use"; exit 2; fi
 ensure_user superadmin SUPER_ADMIN; ensure_user ops1 OPERATIONS; ensure_user finance1 FINANCE; ensure_user viewer1 VIEWER
 $Q "delete from admin_session" >/dev/null
-env PORT=$PORT PPOB2_ADMIN_BASIC_AUTH_ENABLED=false PPOB2_ADMIN_MFA_ENCRYPTION_KEY="$KEY" PPOB2_ADMIN_COOKIE_SECURE=false \
+env PORT=$PORT PPOB2_SECRET_KEYS="k1:$KEY" PPOB2_SECRET_ACTIVE_KEY_ID=k1 PPOB2_ADMIN_BASIC_AUTH_ENABLED=false PPOB2_ADMIN_MFA_ENCRYPTION_KEY="$KEY" PPOB2_ADMIN_COOKIE_SECURE=false \
     PPOB2_ADMIN_SESSION_IDLE_TIMEOUT=PT6S PPOB2_ADMIN_SESSION_ABSOLUTE_TIMEOUT=PT15S PPOB2_ADMIN_SESSION_PENDING_TIMEOUT=PT8S \
     PPOB2_ADMIN_MFA_MAX_ATTEMPTS=5 PPOB2_ADMIN_LOGIN_MAX_FAILURES=5 PPOB2_ADMIN_LOGIN_LOCKOUT=PT15M \
     setsid nohup java -jar "$JAR" > /tmp/ppob2-admin-auth.log 2>&1 < /dev/null &

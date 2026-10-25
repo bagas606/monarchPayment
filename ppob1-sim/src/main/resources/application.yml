@@ -45,8 +45,9 @@ ppob1:
     base-url: ${PPOB1_PPOB2_BASE_URL:http://localhost:8080}
     # Matches the `api_client` row that backend/scripts/e2e/dev-seed.sql seeds for partner PPOB1.
     client-id: ${PPOB1_PPOB2_CLIENT_ID:ppob1-client}
-    # PPOB2 stores this verbatim in api_client.secret_hash (its own flagged go-live blocker: the
-    # Section 23.2 scheme needs the server to recompute the MAC, which a one-way hash cannot do).
+    # PPOB2 stores this encrypted (api_client.secret_ciphertext) and decrypts it to recompute the MAC, because
+    # the Section 23.2 scheme cannot work from a one-way hash. It gets there through PPOB2's admin API
+    # (backend/scripts/e2e/provision-secrets.sh), not SQL; the two sides must be given the same value.
     client-secret: ${PPOB1_PPOB2_CLIENT_SECRET:dev-secret}
     # Short on purpose. A reseller blocking indefinitely on an upstream call is how a retail till
     # stops serving customers; a timeout here is recoverable because reseller_txn_id doubles as the
@@ -61,7 +62,7 @@ ppob1:
   # it was given (OutboundWebhookSender takes URI.create(callbackUrl).getPath()), so a mismatch
   # here makes every signature fail -- and fail looking exactly like a wrong secret.
   callback-path: ${PPOB1_CALLBACK_PATH:/webhooks/ppob2}
-  # Must equal partner.webhook_secret for partner PPOB1 in PPOB2's database. The dev seed leaves
-  # that column NULL, in which case PPOB2 refuses to send unsigned and delivers nothing at all --
-  # see ppob1-sim/README.md for the one UPDATE that turns webhooks on.
+  # Must equal the webhook secret PPOB2 holds (encrypted) for partner PPOB1. The dev seed leaves it unset,
+  # in which case PPOB2 refuses to send unsigned and delivers nothing at all -- backend/scripts/e2e/
+  # provision-secrets.sh sets it through the admin API.
   webhook-secret: ${PPOB1_WEBHOOK_SECRET:ppob1-webhook-secret}

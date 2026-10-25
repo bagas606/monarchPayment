@@ -19,26 +19,17 @@ INSERT INTO channel (code, name) VALUES ('RESELLER_API', 'Reseller API');
 INSERT INTO partner (code, name, channel_id, contract_ref)
   SELECT 'PPOB1', 'PPOB1', id, NULL FROM channel WHERE code = 'RESELLER_API';
 
--- `secret_hash` holds the HMAC verification secret verbatim, not a hash: Section 23.2's signature
--- scheme requires the server to recompute the MAC with the same secret the client used, which a
--- one-way hash cannot do. See HmacAuthenticationFilter's NOTE -- this is a flagged open assumption
--- (Section 73.3) and a real go-live blocker, not a property of this fixture.
-INSERT INTO api_client (client_id, partner_id, secret_hash)
-  SELECT 'ppob1-client', id, 'dev-secret' FROM partner WHERE code = 'PPOB1';
-
--- Section 23.8's "PPOB1's registered secret", used to sign outbound ORDER_STATUS_CHANGED webhooks.
--- V16 added this column and this fixture was never updated to fill it, which had a consequence
--- nobody could see: WebhookDeliveryTargetResolver refuses to sign with nothing (correctly -- it
--- logs an error and skips rather than sending unsigned), so with the column NULL **no outbound
--- webhook was ever delivered, by any order, in any environment this fixture builds.** The sender
--- had unit tests and the e2e harness had no receiver, so the whole Section 23.8 path had never run
--- end to end. Found by building ppob1-sim, which is the receiver; see ppob1-sim/README.md.
+-- No secrets here, on purpose. Since V28 api_client.secret_ciphertext and partner.webhook_secret_ciphertext hold
+-- ciphertext under PPOB2_SECRET_KEYS, which SQL cannot produce. The client is created unprovisioned (it cannot
+-- authenticate, and a request from it is refused) and scripts/e2e/provision-secrets.sh gives it its secrets through
+-- the admin API, exactly as an operator would. Run it after this file; the run-*.sh suites do so themselves.
 --
--- Safe for the assertions in this directory, checked rather than assumed: a webhook is only
--- delivered when the ORDER carries a callback_url (parent_order.callback_url, also from V16), and
--- run-core.sh's mkorder never sends one -- so these scripts produce no webhook_event rows either
--- before or after this line. Re-verified after adding it: 148/148 core, 13/13 routing.
-UPDATE partner SET webhook_secret = 'ppob1-webhook-secret' WHERE code = 'PPOB1';
+-- History worth keeping: this fixture once left the webhook secret NULL, which meant no outbound webhook was ever
+-- delivered in any environment it built -- WebhookDeliveryTargetResolver correctly refuses to send unsigned, the
+-- sender had unit tests, and the harness had no receiver. Found by building ppob1-sim. Provisioning the webhook
+-- secret is therefore part of the setup, not an optional extra.
+INSERT INTO api_client (client_id, partner_id)
+  SELECT 'ppob1-client', id FROM partner WHERE code = 'PPOB1';
 
 INSERT INTO product (code, name, category) VALUES ('MOBILE_LEGENDS', 'Mobile Legends', 'GAME_TOPUP');
 INSERT INTO supported_amount (product_category, amount) VALUES
