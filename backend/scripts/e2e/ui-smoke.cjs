@@ -202,6 +202,8 @@ function totp(base32, offset = 0) {
   console.log('== Catalog, pricing, generations, patterns, configuration ==');
   const nav = await page.textContent('nav');
   truthy('the navigation offers the new pages to SUPER_ADMIN', ['Catalog', 'Generations', 'Patterns', 'Configuration'].every((n) => nav.includes(n)));
+  // A flash notice is drawn before the page body finishes loading; sampling the body straight after it races the render.
+  const settled = () => page.waitForFunction(() => !document.querySelector('main').innerText.includes('Loading…'));
   const dialogFill = async (fields) => { for (const [k, v] of Object.entries(fields)) await page.fill('dialog [name=' + k + ']', String(v)); };
 
   await page.goto(BASE + '/backoffice/#/catalog');
@@ -216,6 +218,7 @@ function totp(base32, offset = 0) {
   await dialogFill({ code: 'UISMOKE', name: XSS, category: 'UISMOKE' });
   await page.click('dialog button[type=submit]');
   await page.waitForSelector('.notice.ok:has-text("Product added")');
+  await settled();
   truthy('adding a product through the dialog reports success', await page.isVisible('.notice.ok:has-text("Product added")'));
   await page.waitForSelector('tr:has-text("UISMOKE")');
   truthy('...the new product is listed', await page.isVisible('tr:has-text("UISMOKE")'));
@@ -226,6 +229,7 @@ function totp(base32, offset = 0) {
   await dialogFill({ code: 'UISMOKE', name: 'again', category: 'UISMOKE' });
   await page.click('dialog button[type=submit]');
   await page.waitForSelector('.notice.error:has-text("already exists")');
+  await settled();
   truthy('a duplicate product shows the server\'s reason', await page.isVisible('.notice.error:has-text("already exists")'));
   // Price change needs a reason; it reports how many patterns it re-scored.
   const priceBtn = page.locator('tr:has-text("ML-20000-B") button:has-text("Price")');
@@ -234,6 +238,7 @@ function totp(base32, offset = 0) {
   await dialogFill({ provider_cost: 18250, reason: 'ui smoke price check' });
   await page.click('dialog button[type=submit]');
   await page.waitForSelector('.notice.ok:has-text("re-scored")');
+  await settled();
   truthy('a price change reports the new version and the patterns re-scored', await page.isVisible('.notice.ok:has-text("re-scored")'));
   truthy('...and the table shows the new cost', await page.isVisible('tr:has-text("ML-20000-B"):has-text("18.250")'));
   await page.click('tr:has-text("ML-20000-B") button:has-text("History")');
@@ -250,12 +255,14 @@ function totp(base32, offset = 0) {
   await dialogFill({ value: 1000 });
   await page.click('dialog button[type=submit]');
   await page.waitForSelector('.notice.error:has-text("between")');
+  await settled();
   truthy('an out-of-range value is refused with the allowed range', await page.isVisible('.notice.error:has-text("between")'));
   await page.click('tr:has-text("routing.weight.childcount") button:has-text("Change")');
   await page.waitForSelector('dialog[open]');
   await dialogFill({ value: 0.75 });
   await page.click('dialog button[type=submit]');
   await page.waitForSelector('.notice.ok:has-text("updated")');
+  await settled();
   truthy('a valid value is saved and the row says it is an override', await page.isVisible('tr:has-text("routing.weight.childcount"):has-text("OVERRIDE")'));
   truthy('a supported amount with no patterns behind it is flagged', await page.isVisible('text=cannot be fulfilled') || (await page.textContent('body')).includes('10.000'));
 
@@ -266,6 +273,7 @@ function totp(base32, offset = 0) {
   await page.waitForSelector('dialog[open]');
   await page.click('dialog button[type=submit]');
   await page.waitForSelector('.notice.ok:has-text("started")');
+  await settled();
   truthy('starting a generation reports its id', await page.isVisible('.notice.ok:has-text("started")'));
   await page.waitForSelector('tbody tr:first-child .badge:has-text("READY")', { timeout: 90000 });
   truthy('the list updates by itself until the generation is READY', true);
@@ -278,6 +286,7 @@ function totp(base32, offset = 0) {
   await page.waitForSelector('dialog[open]');
   await page.click('dialog button[type=submit]');
   await page.waitForSelector('.notice.ok:has-text("ACTIVE"), dialog[open]:has-text("Coverage would drop")');
+  await settled();
   if (await page.isVisible('dialog[open]:has-text("Coverage would drop")')) {
     truthy('a coverage regression asks for a reason instead of activating silently', true);
     await page.click('dialog button:has-text("Cancel")');
@@ -289,10 +298,13 @@ function totp(base32, offset = 0) {
     await dialogFill({ reason: 'ui smoke: accepting reduced coverage' });
     await page.click('dialog button:has-text("Activate anyway")');
     await page.waitForSelector('.notice.ok:has-text("ACTIVE")');
+    await settled();
   } else {
     truthy('activation without a coverage loss goes straight through', true);
   }
   truthy('activation reports the coverage change', await page.isVisible('.notice.ok:has-text("ACTIVE")'));
+  // The flash notice is drawn before the page body finishes loading, so wait for the badge rather than sampling it.
+  await page.waitForSelector('h1 .badge:has-text("ACTIVE")', { timeout: 10000 }).catch(() => {});
   truthy('...and the generation is now ACTIVE', await page.isVisible('h1 .badge:has-text("ACTIVE")'));
 
   await page.goto(BASE + '/backoffice/#/patterns?parent_amount=20000');
