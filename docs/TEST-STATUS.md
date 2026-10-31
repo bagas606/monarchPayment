@@ -7,7 +7,7 @@ lives in [`../backend/README.md`](../backend/README.md); searching it for an ID 
 
 Last full pass: **2026-10-24** (V29: partner secrets encrypted, pattern generator, catalog and configuration
 administration), each group starting from a wiped schema (all 29 Flyway migrations re-applied from zero), in the
-documented order: 272 + 65 unit tests, `run-core.sh` 178/178, `run-backoffice-read.sh` 95/95,
+documented order: 272 + 65 unit tests, `run-core.sh` 184/184, `run-backoffice-read.sh` 95/95,
 `run-partner-secrets.sh` 34/34, `run-routing-and-sweeps.sh` 15/15, `run-refund-gateway.sh` 15/15, `run-ppob1.sh` 126/126,
 `run-admin-auth.sh` 101/101, `run-pattern-admin.sh` 84/84, `run-catalog-admin.sh` 83/83 and `ui-smoke.cjs` 74/74.
 (The 65 PPOB1 unit tests were last run on 2026-10-22; nothing in `ppob1-sim/` changed except comments and a script.)

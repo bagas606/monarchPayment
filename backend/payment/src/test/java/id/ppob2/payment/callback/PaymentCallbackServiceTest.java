@@ -70,8 +70,44 @@ class PaymentCallbackServiceTest {
         PaymentCallbackOutcome outcome = service.processCallback("not even json", Map.of());
 
         assertThat(outcome).isEqualTo(PaymentCallbackOutcome.SIGNATURE_INVALID);
-        verify(webhookEventRecorder).record(eq(WebhookDirection.INBOUND), eq("AYOLINX"), eq("CALLBACK"), anyString(), eq("FAILED"), eq(null));
+        verify(webhookEventRecorder).recordInbound(eq("AYOLINX"), eq("CALLBACK"), anyString(), eq("FAILED"), eq(null),
+                eq("not even json"), anyString());
         verify(paymentEventDeduplicator, never()).recordIfNew(any(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void acceptedCallbackStoresTheExactBodyAndTheSignatureHeadersButNotCredentials() throws Exception {
+        given(paymentRepository.findByPgReference("ORD-404")).willReturn(Optional.empty());
+        String body = "{ \"originalPartnerReferenceNo\" :  \"ORD-404\",\"latestTransactionStatus\":\"00\" }";
+        Map<String, String> headers = new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        headers.put("X-SIGNATURE", "sig-abc");
+        headers.put("X-TIMESTAMP", "2024-09-18T06:36:36+00:00");
+        headers.put("Authorization", "Bearer secret-token");
+        headers.put("Cookie", "session=1");
+
+        service.processCallback(body, headers);
+
+        ArgumentCaptor<String> rawBody = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> rawHeaders = ArgumentCaptor.forClass(String.class);
+        verify(webhookEventRecorder).recordInbound(eq("AYOLINX"), eq("CALLBACK"), eq(body), eq("RECEIVED"), any(),
+                rawBody.capture(), rawHeaders.capture());
+        assertThat(rawBody.getValue()).isEqualTo(body);
+        var stored = objectMapper.readTree(rawHeaders.getValue());
+        assertThat(stored.get("X-SIGNATURE").asText()).isEqualTo("sig-abc");
+        assertThat(stored.get("X-TIMESTAMP").asText()).isEqualTo("2024-09-18T06:36:36+00:00");
+        assertThat(stored.has("Authorization")).isFalse();
+        assertThat(stored.has("Cookie")).isFalse();
+    }
+
+    @Test
+    void anOversizedBodyIsStillRecordedButItsRawCopyIsDropped() {
+        given(paymentGateway.verifyCallbackSignature(anyString(), any())).willReturn(false);
+        String huge = "x".repeat(PaymentCallbackService.MAX_CAPTURED_BODY_CHARS + 1);
+
+        service.processCallback(huge, Map.of());
+
+        verify(webhookEventRecorder).recordInbound(eq("AYOLINX"), eq("CALLBACK"), anyString(), eq("FAILED"), eq(null),
+                eq(null), anyString());
     }
 
     @Test

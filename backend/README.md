@@ -3027,3 +3027,22 @@ was decided and what is still open:
   a real browser, including a hostile product name shown as text and the coverage-reason dialog), on top of every earlier suite
   unchanged. Two things the first runs taught: a stale success notice made a browser assertion pass for the wrong reason (waits are
   now on the notice's own text), and `scalar()` strips spaces, which had made an audit assertion compare against the wrong string.
+
+### 2026-10-25 — Raw capture of inbound webhooks (V30)
+
+- **Why.** An Ayolinx callback is signed over the exact request bytes, but `webhook_event.payload` is JSONB (drops
+  whitespace, reorders keys) and the signature headers were never stored, so a stored callback could not be re-verified
+  and the signed-string gap in README blocker 9 could not be investigated from the database.
+- **What.** V30 adds `webhook_event.raw_body` (TEXT) and `raw_headers` (JSONB), both nullable. `PaymentCallbackService`
+  stores the body as received and the request headers on every inbound callback (accepted, malformed and
+  signature-rejected alike) through `WebhookEventRecorder.recordInbound`. Outbound rows and rows from before V30 stay
+  NULL. `Authorization`, `Proxy-Authorization`, `Cookie` and `Set-Cookie` are never stored. A body over 65,536
+  characters keeps its normal row but no raw copy.
+- **Not exposed.** `AdminPaymentReader.listWebhookEvents` selects named columns, so the admin API does not return the new
+  ones; read them with SQL (`docs/AYOLINX-CALLBACK-CAPTURE.md`).
+- **Limits.** The raw body can contain payer data (e.g. `customerNumber`) and `webhook_event` has no retention job, so
+  these rows grow without bound and need a retention decision before go-live. Headers are stored as the app sees them
+  behind the proxy.
+- **Verified.** `PaymentCallbackServiceTest` +2 (exact body and headers stored, credentials dropped, oversize body);
+  `run-core.sh` 184/184 (+6: compact body found byte-for-byte in `raw_body` while the same text is absent from the JSONB
+  `payload`, signature header stored, `Authorization` sent and not stored, outbound rows carry no raw copy).

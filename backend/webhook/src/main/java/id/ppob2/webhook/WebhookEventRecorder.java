@@ -28,6 +28,14 @@ public class WebhookEventRecorder {
         repository.save(new WebhookEvent(direction, source, eventType, payload, status, dedupKey, Instant.now()));
     }
 
+    /** As {@link #record}, plus the request exactly as received (body bytes and a JSON object of headers), for
+     * inbound callbacks whose signature covers bytes the JSONB {@code payload} cannot reproduce. */
+    public void recordInbound(String source, String eventType, String payload, String status, String dedupKey,
+                               String rawBody, String rawHeadersJson) {
+        repository.save(new WebhookEvent(WebhookDirection.INBOUND, source, eventType, payload, status, dedupKey,
+                Instant.now()).withRawCapture(rawBody, rawHeadersJson));
+    }
+
     /** For callers with no ambient transaction to join — notably an outbound delivery attempt
      * made from an {@code AFTER_COMMIT} listener's call tree ({@code OutboundWebhookOrchestrator}),
      * after an HTTP call that must not run inside a transaction. {@code REQUIRES_NEW} makes the

@@ -549,6 +549,18 @@ $Q "insert into admin_user (username,password_hash) values ('techsupport1','\$2a
 $Q "insert into admin_user_role (admin_user_id, role_id) select u.id, r.id from admin_user u, role r where u.username='techsupport1' and r.code='TECH_SUPPORT' on conflict do nothing" >/dev/null 2>&1
 chk "lookup: TECH_SUPPORT lacks order:view -> 403"      "$(curl -s -o /dev/null -w '%{http_code}' -u techsupport1:admin123 "$AL?reseller_txn_id=$MD1")" 403
 
+# Raw capture (V30): the callback's signed bytes and headers must survive, which the JSONB payload cannot do. The body is
+# sent compact on purpose: jsonb re-renders it with ": " separators, so a compact match in raw_body proves it is the
+# bytes as received and not a re-serialisation. Authorization is sent to prove it is not stored.
+CAPBODY='{"callbackType":"QRIS","amount":{"currency":"IDR","value":"1.00"},"latestTransactionStatus":"00","originalPartnerReferenceNo":"RAWCAP-NOPE","originalReferenceNo":"RAWCAP-1","finishedTime":"2024-09-18T06:36:36+00:00"}'
+CAPSIG=$(printf '%s' "$CAPBODY" | openssl dgst -sha256 -hmac "${WEBHOOK_SECRET:-dev-webhook-secret}" -hex | sed 's/^.*= //')
+chk "raw capture: callback acknowledged"  "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8080/internal/webhooks/ayolinx -H 'Content-Type: application/json' -H "X-Ayolinx-Signature: $CAPSIG" -H 'Authorization: Bearer must-not-be-stored' -d "$CAPBODY")" 200
+chk "raw capture: body stored byte-for-byte"  "$(scalar "select count(*) from webhook_event where source='AYOLINX' and direction='INBOUND' and raw_body like '%\"originalReferenceNo\":\"RAWCAP-1\"%'")" 1
+chk "raw capture: JSONB payload alone could not have proven it"  "$(scalar "select count(*) from webhook_event where raw_body like '%RAWCAP-1%' and payload::text like '%\"originalReferenceNo\":\"RAWCAP-1\"%'")" 0
+chk "raw capture: signature header stored"  "$(scalar "select count(*) from webhook_event where raw_body like '%RAWCAP-1%' and lower(raw_headers::text) like '%x-ayolinx-signature%'")" 1
+chk "raw capture: Authorization header not stored"  "$(scalar "select count(*) from webhook_event where raw_body like '%RAWCAP-1%' and (lower(raw_headers::text) like '%authorization%' or raw_headers::text like '%must-not-be-stored%')")" 0
+chk "raw capture: outbound rows carry no raw copy"  "$(scalar "select count(*) from webhook_event where direction='OUTBOUND' and (raw_body is not null or raw_headers is not null)")" 0
+
 echo ""
 echo "================================"
 echo "  PASS: $pass    FAIL: $fail"
